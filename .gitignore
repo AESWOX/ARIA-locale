@@ -1,0 +1,84 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Frontend
+node_modules/
+desktop/node_modules/
+desktop/node_modules/.cache/
+desktop/dist/
+
+# Build artifacts
+build/
+dist/
+src-tauri/target/
+src-tauri/gen/
+# Nested copies (patterns with a slash are anchored to repo root вЂ” cover the
+# real paths under desktop/ and backend/ explicitly, otherwise git add -A
+# walks gigabytes of Rust cache / PyInstaller output).
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+backend/dist/
+backend/build/
+backend/.pytest_cache/
+
+# Sidecar binary is a BUILD OUTPUT (copied by the build script from
+# backend/dist/backend.exe) вЂ” never keep it in git: 100+ MB per release in
+# history and a stale binary that contradicts the source it ships with.
+desktop/src-tauri/bin/
+
+# Databases вЂ” must never be in version control
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+/data/
+
+# Logs
+logs/
+*.log
+
+# Zips вЂ” intermediate artifacts
+*.zip
+
+# Secrets вЂ” must never be in version control
+.env
+.env.*
+*.env
+!*.env.example
+*.tar.gz
+
+# DoD verification artifacts
+.dod_verify.json
+coverage.xml
+*.orig
+*.rej
+dod_verify.json
+backend/.coverage
+
+# Delivery artifacts
+*.bundle
+release/
+delivery_*
+*.patch
+aria_full_delivery_audit.ps1
+
+# Binaries are build/installer outputs вЂ” never in git (wave 0 review: 3 exe were still tracked)
+*.exe
+*.msi
+
+# Editor / patch backups
+*.bak
+
+# rebuild_and_smoke.py logs
+reports/
+
+# артефакт сборки (выносим в GitHub Releases)
+aria_release__5dvg4nh/
+
+# СЂР°Р±РѕС‡Р°СЏ РїР°РїРєР° С…СѓРєРѕРІ approve/pre_tool/post_tool
+backend/.aria/
+
+sandbox_share/out_*/

@@ -1,0 +1,148 @@
+"""api/auth.py — runtime handshake между Tauri shell и backend sidecar."""
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import stat
+import time
+from pathlib import Path
+
+from fastapi import Header, HTTPException
+
+from aria.config import get_settings
+
+
+RUNTIME_TOKEN_ENV = "LOCAL_AGENT_RUNTIME_TOKEN"
+DISABLE_BOOTSTRAP_WRITE_ENV = "LOCAL_AGENT_DISABLE_BOOTSTRAP_WRITE"
+
+
+def generate_runtime_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def generate_pin() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def write_bootstrap_file(runtime_token: str, first_run: bool) -> Path:
+    settings = get_settings()
+    path = Path(settings.runtime_token_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "backendBaseUrl": f"http://{settings.http_host}:{settings.http_port}",
+        "runtimeToken": runtime_token,
+        "pinRequired": True,
+        "idleLockMinutes": settings.security_auto_lock_minutes,
+        "firstRun": first_run,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    return path
+
+
+def write_onboarded_marker() -> Path:
+    """Record that this profile has been launched at least once.
+
+    Independent of bootstrap.json and NEVER gated by DISABLE_BOOTSTRAP_WRITE_ENV
+    (that flag only disables the bootstrap handshake for the old Rust-invoke
+    scheme). Written unconditionally on every issue() so first_run flips to
+    False on the second launch even when Tauri never writes bootstrap.json.
+    """
+    settings = get_settings()
+    path = Path(settings.onboarded_marker_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+    return path
+
+
+class RuntimeTokenStore:
+    def __init__(self):
+        self._token: str | None = None
+        self._pin: str | None = None
+        self._failed_attempts = 0
+        self._first_run = False
+
+    def issue(self) -> tuple[str, str]:
+        settings = get_settings()
+        env_token = os.getenv(RUNTIME_TOKEN_ENV, "").strip()
+        self._token = env_token or generate_runtime_token()
+        self._pin = settings.LOCAL_AGENT_UI_PIN.strip() or generate_pin()
+        self._failed_attempts = 0
+        self._first_run = not Path(settings.onboarded_marker_path).expanduser().exists()
+        write_onboarded_marker()
+        if os.getenv(DISABLE_BOOTSTRAP_WRITE_ENV, "0") != "1":
+            write_bootstrap_file(self._token, self._first_run)
+        return self._token, self._pin
+
+    def verify_token(self, presented: str | None) -> bool:
+        if self._token is None or presented is None:
+            return False
+        return secrets.compare_digest(self._token, presented)
+
+    def current_token(self) -> str:
+        """Expose the active runtime token so the backend can embed it into the
+        served index.html (same-origin SPA mode). Called only after issue()."""
+        return self._token or ""
+
+    def first_run(self) -> bool:
+        """True when no onboarded marker file existed before issue() — i.e.
+        the first launch of this profile. Lets main.py embed a ``first-run``
+        meta tag so the SPA can show onboarding once. Independent of the
+        bootstrap.json handshake: the marker is written unconditionally."""
+        return self._first_run
+
+    def verify_pin(self, presented: str | None) -> bool:
+        if self._pin is None or presented is None:
+            return False
+        if self._failed_attempts >= 10:
+            return False
+        ok = secrets.compare_digest(self._pin, presented)
+        self._failed_attempts = 0 if ok else self._failed_attempts + 1
+        return ok
+
+
+token_store = RuntimeTokenStore()
+
+
+class WsTicketStore:
+    """Single-use WebSocket upgrade tickets (gated-mode WS auth bridge).
+
+    Minted by POST /api/auth/ws-ticket and consumed exactly once by the
+    /api/ws upgrade. Expired tickets are pruned lazily on each issue.
+    """
+
+    def __init__(self, ttl_seconds: int = 30) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._tickets: dict[str, float] = {}
+
+    def issue(self) -> tuple[str, int]:
+        now = time.monotonic()
+        for expired in [t for t, exp in self._tickets.items() if exp < now]:
+            self._tickets.pop(expired, None)
+        ticket = secrets.token_urlsafe(24)
+        self._tickets[ticket] = now + self._ttl_seconds
+        return ticket, self._ttl_seconds
+
+    def consume(self, ticket: str | None) -> bool:
+        if not ticket:
+            return False
+        exp = self._tickets.pop(ticket, None)
+        if exp is None or time.monotonic() > exp:
+            return False
+        return True
+
+
+ticket_store = WsTicketStore()
+
+
+async def require_runtime_token(x_local_agent_token: str | None = Header(default=None)) -> str:
+    """Shared runtime-token dependency for API routers (moved from aria.main)."""
+    settings = get_settings()
+    if settings.aria_dev_mode:
+        if x_local_agent_token is None and settings.http_host in ("127.0.0.1", "localhost", "0.0.0.0"):
+            return ""
+    if not token_store.verify_token(x_local_agent_token):
+        raise HTTPException(status_code=401, detail="invalid runtime token")
+    return x_local_agent_token or ""
