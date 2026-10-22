@@ -106,6 +106,8 @@ def _transition(
         )
         return False
     repo.set_task_status(session, task, status, error_code=error_code, error_message=error_message)
+    if status == TaskStatus.failed:
+        _post_failure_message(session, task)
     return True
 
 
@@ -1064,6 +1066,60 @@ def _post_result_message(session: OrmSession, task: Task, task_plan: TaskPlan,
         logger.warning("Result message for task %s not posted: %s", str(task.id)[:8], exc)
 
 
+_FAILURE_TITLES = {
+    "bounded_retry_exhausted": "аудитор не принял результат после всех повторов",
+    "integrity_naebal": "проверка целостности не пройдена",
+    "hook_blocked": "результат заблокирован защитным хуком",
+    "approval_required": "нужно подтверждение владельца",
+}
+
+
+def _audit_reason(report) -> str:
+    """Причина «ПРОЕБАЛ» вместе с замечаниями аудитора (раньше в событии была только общая фраза)."""
+    reason = "Correctness QA (run_audit) verdict=needs_rework"
+    remarks = [*(getattr(report, "patch_suggestions", None) or []), *(getattr(report, "missing_requirements", None) or [])]
+    shown = [str(r).strip()[:200] for r in remarks if str(r).strip()][:3]
+    return f"{reason}: {'; '.join(shown)}" if shown else reason
+
+
+def build_failure_message(task: Task, remarks: list[str]) -> str:
+    code = task.error_code or "unknown"
+    title = _FAILURE_TITLES.get(code, code)
+    lines = [f"⚠️ Задача не выполнена: {title}."]
+    detail = (task.error_message or "").strip()
+    if detail:
+        lines += ["", detail[:500]]
+    if remarks:
+        lines += ["", "Замечания аудитора:"] + [f"- {r}" for r in remarks]
+    lines += ["", f"Код: `{code}`. Файлы, которые успели записаться, остались в песочнице."]
+    return "\n".join(lines)
+
+
+def _post_failure_message(session: OrmSession, task: Task) -> None:
+    """Сообщение об отказе в чат: раньше failed-задача оставляла пустой экран и ни одной строки в логе."""
+    try:
+        from aria.core.events import event_bus
+        from aria.db import repository as repo
+        from aria.http_utils import serialize_message
+
+        agent_session = repo.get_session(session, task.session_id)
+        if agent_session is None:
+            return
+        remarks: list[str] = []
+        reports = repo.list_audit_reports(session, task.id)
+        if reports:
+            last = reports[-1]
+            for item in [*(last.patch_suggestions or []), *(last.missing_requirements or [])]:
+                text = str(item).strip()
+                if text:
+                    remarks.append(text[:300])
+        msg = repo.append_message(session, agent_session, role="assistant", content=build_failure_message(task, remarks[:4]))
+        session.flush()
+        event_bus.emit("message.created", serialize_message(msg), session_id=task.session_id, task_id=task.id)
+    except Exception as exc:  # noqa: BLE001 - сбой доставки сообщения не должен ломать переход статуса
+        logger.warning("Failure message for task %s not posted: %s", str(task.id)[:8], exc)
+
+
 def _approval_blocked_commands(tool_calls: list[dict]) -> list[str]:
     """Команды, которые shell-политика не запустила (approval_required) — шаг не выполнен, а не «упал»."""
     out: list[str] = []
@@ -1233,7 +1289,7 @@ async def _stage4_audit(
                 flags.append(
                     IntegrityFlag(
                         kind="proebal",
-                        reason="Correctness QA (run_audit) verdict=needs_rework",
+                        reason=_audit_reason(report),
                     )
                 )
                 return flags

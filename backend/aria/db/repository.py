@@ -3,6 +3,7 @@
 duration_ms обязателен для terminal statuses) проверялись в одном месте."""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -190,6 +191,12 @@ def set_task_status(db: OrmSession, task: m.Task, status: TaskStatus, error_code
     if error_message:
         task.error_message = error_message
     db.flush()
+    if status == TaskStatus.failed:
+        # Сбой задачи должен быть виден в логе приложения, а не только в БД.
+        logging.getLogger("local_agent.tasks").warning(
+            "task %s failed: code=%s message=%s",
+            str(task.id)[:8], task.error_code or "-", (task.error_message or "-")[:400],
+        )
     return task
 
 

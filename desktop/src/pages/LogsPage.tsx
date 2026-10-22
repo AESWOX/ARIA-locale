@@ -5,7 +5,7 @@ import {
   useCallback,
   useRef,
 } from "react";
-import { FileText, RefreshCw } from "lucide-react";
+import { FileText, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge } from "@vendor/ui/ui/components/badge";
 import { Button } from "@vendor/ui/ui/components/button";
@@ -85,6 +85,21 @@ export default function LogsPage() {
       .finally(() => setLoading(false));
   }, [file, lineCount, level, component]);
 
+  const clearLogs = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    api
+      .clearLogs()
+      .then(() => {
+        setLines([]);
+        fetchLogs();
+      })
+      .catch((err) => {
+        setError(String(err));
+        setLoading(false);
+      });
+  }, [fetchLogs]);
+
   useLayoutEffect(() => {
     setAfterTitle(
       <span className="flex items-center gap-1.5">
@@ -102,6 +117,18 @@ export default function LogsPage() {
           aria-label={t.common.refresh}
         >
           {loading ? <Spinner /> : <RefreshCw />}
+        </Button>
+        <Button
+          type="button"
+          ghost
+          size="icon"
+          className="text-muted-foreground hover:text-foreground"
+          onClick={clearLogs}
+          disabled={loading}
+          aria-label={t.common.clear}
+          title={t.common.clear}
+        >
+          <Trash2 />
         </Button>
       </span>,
     );
@@ -139,8 +166,10 @@ export default function LogsPage() {
     setEnd,
     t.common.live,
     t.common.refresh,
+    t.common.clear,
     t.logs.autoRefresh,
     fetchLogs,
+    clearLogs,
   ]);
 
   useEffect(() => {

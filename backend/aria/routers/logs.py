@@ -8,6 +8,7 @@ Unknown logical names fall back to backend.log. Lines are filtered by level
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -96,3 +97,48 @@ async def get_logs(
             continue
         result.append(line)
     return {"file": path.name, "lines": result[-lines:] if len(result) > lines else result}
+
+
+def _truncate_log(path: Path) -> bool:
+    """Обнулить файл лога. Если его держит открытым наш RotatingFileHandler, чистим через него,
+    иначе дальнейшие записи продолжились бы со старого смещения."""
+    if not path.is_file():
+        return False
+    target = os.path.normcase(str(path.resolve()))
+    seen: list[logging.Handler] = []
+    for name in ("", "uvicorn", "uvicorn.access"):
+        for handler in logging.getLogger(name).handlers:
+            base = getattr(handler, "baseFilename", None)
+            if base and os.path.normcase(os.path.abspath(base)) == target and handler not in seen:
+                seen.append(handler)
+    for handler in seen:
+        handler.acquire()
+        try:
+            handler.flush()
+            stream = getattr(handler, "stream", None)
+            if stream is not None:
+                stream.seek(0)
+                stream.truncate(0)
+        finally:
+            handler.release()
+    if not seen:
+        with open(path, "w", encoding="utf-8"):
+            pass
+    return True
+
+
+@router.post("/logs/clear")
+async def clear_logs(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Очистить лог (и ротированные копии), чтобы дальше были видны только новые записи."""
+    cleared = _truncate_log(_LOG_DIR / "backend.log")
+    removed = 0
+    for i in range(1, 10):
+        rotated = _LOG_DIR / f"backend.log.{i}"
+        try:
+            if rotated.is_file():
+                rotated.unlink()
+                removed += 1
+        except OSError:
+            pass
+    logging.getLogger("local_agent.logs").info("log cleared by user")
+    return {"ok": True, "cleared": cleared, "removed_backups": removed}

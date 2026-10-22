@@ -551,6 +551,8 @@ export const api = {
     if (params.component && params.component !== "all") qs.set("component", params.component);
     return fetchJSON<LogsResponse>(`/api/logs?${qs.toString()}`);
   },
+  clearLogs: () =>
+    fetchJSON<{ ok: boolean; cleared: boolean; removed_backups: number }>("/api/logs/clear", { method: "POST" }),
   getAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),

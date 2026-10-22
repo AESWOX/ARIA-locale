@@ -77,6 +77,31 @@ _file_handler.setFormatter(
 )
 _file_handler.setLevel(logging.INFO)
 
+
+
+class _QuietPollingFilter(logging.Filter):
+    """UI опрашивает /chat/sessions, /status и т.п. каждые 3-10 с: успешные GET забивали лог
+    и прятали настоящие события. Ошибки и не-GET остаются. ARIA_LOG_ACCESS=1 возвращает всё."""
+
+    _PREFIXES = ("/chat/sessions", "/status", "/sessions/", "/analytics/usage", "/assets/", "/favicon.ico", "/logs", "/api/logs")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.access" or os.environ.get("ARIA_LOG_ACCESS") == "1":
+            return True
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            _client, method, path, _http, status = args
+            try:
+                ok = int(status) < 400
+            except (TypeError, ValueError):
+                return True
+            if method == "GET" and ok and str(path).startswith(self._PREFIXES):
+                return False
+        return True
+
+
+_file_handler.addFilter(_QuietPollingFilter())
+
 _root_logger = logging.getLogger()
 _root_logger.addHandler(_file_handler)
 _root_logger.setLevel(logging.INFO)
