@@ -342,10 +342,10 @@ async def startup() -> None:
                 if expired:
                     _app_logger.info("expired %d stale attention item(s)", expired)
                 if _catalog_gate.due():
-                    count = await refresh_provider_models_job(router)
+                    count = await refresh_provider_models_job(app.state.router)
                     _app_logger.debug("provider catalog refresh: %s models", count)
                 # Волна 1 (A12): cron реально исполняет расписания.
-                due = await run_due_jobs(router, getattr(app.state, "task_runner", None))
+                due = await run_due_jobs(app.state.router, getattr(app.state, "task_runner", None))
                 if due.get("submitted") or due.get("due"):
                     _app_logger.info("cron tick: due=%s submitted=%s", due.get("due"), due.get("submitted"))
             except Exception:

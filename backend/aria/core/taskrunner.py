@@ -177,6 +177,13 @@ class TaskRunner:
         configured = getattr(get_settings(), "runner_max_workers", 3)
         self._max_workers = int(max_workers or configured or 3)
 
+    def set_router(self, router) -> None:
+        """Подменить роутер провайдеров (смена ключей в мастере или на странице Keys).
+
+        Воркеры читают ``self._router`` при каждом запуске задачи, поэтому новые задачи
+        сразу видят новый набор провайдеров; уже идущие задачи доработают на старом."""
+        self._router = router
+
     # ── lifecycle ────────────────────────────────────────────────────
 
     async def start(self) -> None:

@@ -171,7 +171,13 @@ def _refresh_settings(request: Request | None = None) -> None:
         try:
             from aria.llm.router import build_default_router
 
-            request.app.state.router = build_default_router()
+            new_router = build_default_router()
+            request.app.state.router = new_router
+            # TaskRunner держит собственную ссылку на роутер: без этого Agent/Plan после
+            # смены ключа продолжают работать со старым (пустым) набором провайдеров.
+            runner = getattr(request.app.state, "task_runner", None)
+            if runner is not None:
+                runner.set_router(new_router)
         except Exception:  # noqa: BLE001 - never fail saving a key because of this
             logging.getLogger("local_agent.env").exception("could not rebuild LLM router")
 
