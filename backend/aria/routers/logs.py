@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,14 @@ _LOG_DIR = _paths.log_dir()
 _LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
 
 
+_LEVEL_RE = re.compile(r"^\S+ \S+ (DEBUG|INFO|WARNING|ERROR|CRITICAL) ")
+
+
 def _classify_line(line: str) -> str:
+    # Уровень берём из поля levelname, а не ищем слово «error» в тексте (иначе обычные строки краснеют).
+    m = _LEVEL_RE.match(line)
+    if m:
+        return "ERROR" if m.group(1) in ("ERROR", "CRITICAL") else m.group(1)
     upper = line.upper()
     if "ERROR" in upper or "CRITICAL" in upper or "FATAL" in upper:
         return "ERROR"
@@ -34,6 +42,35 @@ def _classify_line(line: str) -> str:
     if "DEBUG" in upper:
         return "DEBUG"
     return "INFO"
+
+
+# Формат строки лога: "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_LINE_RE = re.compile(r"^\S+ \S+ (?:DEBUG|INFO|WARNING|ERROR|CRITICAL) ([\w.\-]+):")
+
+# Компоненты соответствуют именам логгеров, а не угадываются по подстроке в тексте.
+_COMPONENT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "gateway": ("uvicorn", "httpx", "aria.web"),
+    "agent": ("aria.core", "local_agent.loop", "local_agent.taskrunner", "local_agent.tasks", "local_agent.audit",
+              "local_agent.router", "local_agent.llm", "local_agent.key_pool", "local_agent.sessions",
+              "local_agent.chat", "local_agent.compression", "local_agent.runprofile", "local_agent.timing"),
+    "tools": ("aria.tools", "local_agent.tools", "local_agent.toolhooks", "local_agent.hooks", "local_agent.mcp",
+              "local_agent.checkpoints", "aria.vision"),
+    "cron": ("local_agent.main", "aria.scheduler"),
+    "cli": ("aria.cli", "local_agent.setup", "local_agent.env", "local_agent.logs"),
+}
+
+
+def _logger_name(line: str) -> str | None:
+    m = _LINE_RE.match(line)
+    return m.group(1) if m else None
+
+
+def _in_component(line: str, comp: str) -> bool:
+    prefixes = _COMPONENT_PREFIXES.get(comp)
+    if prefixes is None:
+        return comp in line.lower()
+    name = _logger_name(line)
+    return bool(name) and name.startswith(prefixes)
 
 
 def _resolve_file(name: str) -> Path:
@@ -88,12 +125,17 @@ async def get_logs(
     path = _resolve_file(file)
     raw = _tail(path, max(1, min(lines, 2000)))
     min_rank = _LEVEL_ORDER.get(level.upper(), 0) if level and level.upper() != "ALL" else 0
+    kind = Path(file).name.lower() if file else "agent"
+    if kind == "errors":  # вкладка «errors» — это предупреждения и ошибки, а не копия основного лога
+        min_rank = max(min_rank, _LEVEL_ORDER["WARNING"])
     comp = component.strip().lower()
+    if kind == "gateway" and comp in ("", "all"):  # вкладка «gateway» — HTTP-слой
+        comp = "gateway"
     result: list[str] = []
     for line in raw:
         if min_rank and _LEVEL_ORDER.get(_classify_line(line), 0) < min_rank:
             continue
-        if comp and comp != "all" and comp not in line.lower():
+        if comp and comp != "all" and not _in_component(line, comp):
             continue
         result.append(line)
     return {"file": path.name, "lines": result[-lines:] if len(result) > lines else result}

@@ -23,7 +23,16 @@ const LEVELS = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR"] as const;
 const COMPONENTS = ["all", "gateway", "agent", "tools", "cli", "cron"] as const;
 const LINE_COUNTS = [50, 100, 200, 500] as const;
 
+const LEVEL_RE = /^\S+ \S+ (DEBUG|INFO|WARNING|ERROR|CRITICAL) /;
+
 function classifyLine(line: string): "error" | "warning" | "info" | "debug" {
+  // Уровень берем из поля levelname, а не ищем слово "error" в тексте строки.
+  const m = LEVEL_RE.exec(line);
+  if (m) {
+    if (m[1] === "ERROR" || m[1] === "CRITICAL") return "error";
+    if (m[1] === "WARNING") return "warning";
+    return m[1] === "DEBUG" ? "debug" : "info";
+  }
   const upper = line.toUpperCase();
   if (
     upper.includes("ERROR") ||

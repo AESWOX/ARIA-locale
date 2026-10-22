@@ -182,6 +182,7 @@ def set_task_status(db: OrmSession, task: m.Task, status: TaskStatus, error_code
     from aria.core.state_machine import assert_transition_allowed
 
     assert_transition_allowed(task.status, status)
+    previous = task.status
     task.status = status
     task.updated_at = _now()
     if status in (TaskStatus.done, TaskStatus.done_unaudited, TaskStatus.failed, TaskStatus.cancelled):
@@ -191,12 +192,15 @@ def set_task_status(db: OrmSession, task: m.Task, status: TaskStatus, error_code
     if error_message:
         task.error_message = error_message
     db.flush()
+    _tasks_log = logging.getLogger("local_agent.tasks")
     if status == TaskStatus.failed:
         # Сбой задачи должен быть виден в логе приложения, а не только в БД.
-        logging.getLogger("local_agent.tasks").warning(
+        _tasks_log.warning(
             "task %s failed: code=%s message=%s",
             str(task.id)[:8], task.error_code or "-", (task.error_message or "-")[:400],
         )
+    else:
+        _tasks_log.info("task %s: %s -> %s", str(task.id)[:8], getattr(previous, "value", previous), getattr(status, "value", status))
     return task
 
 
@@ -353,7 +357,25 @@ def finish_tool_call(db: OrmSession, call: m.ToolCall, status: ToolStatus, outpu
     persisted.error_code = error_code
     persisted.error_message = error_message
     db.flush()
+    _log_tool_call(persisted, status)
     return persisted
+
+
+_TOOL_TARGET_KEYS = ("path", "url", "query", "glob", "pattern", "name", "role")  # без command/content: там бывают секреты
+
+
+def _log_tool_call(call: m.ToolCall, status: ToolStatus) -> None:
+    """Каждый вызов инструмента — строка в логе (раньше инструменты не логировались вообще)."""
+    log = logging.getLogger("local_agent.tools")
+    data = call.input_json if isinstance(call.input_json, dict) else {}
+    target = next((f"{k}={str(data[k])[:100]}" for k in _TOOL_TARGET_KEYS if data.get(k)), "")
+    name = getattr(status, "value", status)
+    task = str(call.task_id)[:8] if call.task_id else "-"
+    line = "tool %s %s task=%s %sms %s".strip() % (call.tool_name, name, task, call.duration_ms if call.duration_ms is not None else "?", target)
+    if call.error_code or call.error_message:
+        log.warning("%s error=%s %s", line, call.error_code or "-", (call.error_message or "")[:300])
+    else:
+        log.info("%s", line)
 
 
 def list_tool_calls(db: OrmSession, task_id: uuid.UUID) -> list[m.ToolCall]:
@@ -427,6 +449,12 @@ def create_audit_report(db: OrmSession, session: m.Session, task: m.Task, **fiel
     report = m.AuditReport(session_id=session.id, task_id=task.id, **fields)
     db.add(report)
     db.flush()
+    verdict = getattr(report.verdict, "value", report.verdict)
+    remarks = [str(x)[:160] for x in [*(report.patch_suggestions or []), *(report.missing_requirements or [])] if str(x).strip()][:3]
+    logging.getLogger("local_agent.audit").info(
+        "audit task=%s attempt=%s verdict=%s model=%s remarks=%s",
+        str(task.id)[:8], report.attempt_no, verdict, report.auditor_model or "-", remarks or "-",
+    )
     return report
 
 
