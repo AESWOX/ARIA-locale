@@ -174,20 +174,64 @@ def tok():
     return token
 
 
+# Rejection checks call the ASGI app directly: no TestClient portal thread, no race.
+def _ws_asgi(path_qs, origin=None):
+    path, _, qs = path_qs.partition("?")
+    headers = [(b"host", b"testserver")]
+    if origin is not None:
+        headers.append((b"origin", origin.encode()))
+    scope = {
+        "type": "websocket",
+        "asgi": {"version": "3.0"},
+        "scheme": "ws",
+        "http_version": "1.1",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": qs.encode(),
+        "headers": headers,
+        "client": ["testclient", 50000],
+        "server": ["testserver", 80],
+        "subprotocols": [],
+    }
+    sent = []
+
+    async def _run():
+        first = [True]
+
+        async def receive():
+            if first[0]:
+                first[0] = False
+                return {"type": "websocket.connect"}
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "websocket.send":
+                # Client is gone after the greeting: Starlette turns OSError into WebSocketDisconnect,
+                # which is how the handler (it only waits on the event queue) leaves its loop.
+                raise OSError("client disconnected")
+
+        await app(scope, receive, send)
+
+    asyncio.run(_run())
+    return sent
+
+
+def _assert_rejected_1008(sent):
+    types = [m["type"] for m in sent]
+    assert "websocket.accept" not in types, f"connection was accepted: {types}"
+    closes = [m for m in sent if m["type"] == "websocket.close"]
+    assert closes, f"no websocket.close sent: {types}"
+    assert closes[0].get("code") == 1008, closes[0]
+
+
 def test_ws_without_credentials_is_rejected_in_loopback(tok):
-    c = TestClient(app)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with c.websocket_connect("/ws"):
-            pass
-    assert exc.value.code == 1008
+    _assert_rejected_1008(_ws_asgi("/ws"))
 
 
 def test_ws_with_wrong_token_is_rejected(tok):
-    c = TestClient(app)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with c.websocket_connect("/ws?token=nope"):
-            pass
-    assert exc.value.code == 1008
+    _assert_rejected_1008(_ws_asgi("/ws?token=nope"))
 
 
 def test_ws_with_valid_token_connects(tok):
@@ -197,22 +241,15 @@ def test_ws_with_valid_token_connects(tok):
 
 
 def test_ws_with_ticket_connects_once(tok):
-    c = TestClient(app)
     ticket, _ttl = ticket_store.issue()
-    with c.websocket_connect(f"/ws?ticket={ticket}"):
-        pass
-    with pytest.raises(WebSocketDisconnect):
-        with c.websocket_connect(f"/ws?ticket={ticket}"):
-            pass
+    first = [m["type"] for m in _ws_asgi(f"/ws?ticket={ticket}")]
+    assert "websocket.accept" in first, first
+    _assert_rejected_1008(_ws_asgi(f"/ws?ticket={ticket}"))
 
 
 @pytest.mark.parametrize("origin", ["https://evil.example", "http://127.0.0.1.evil.example", "null"])
 def test_ws_rejects_foreign_origin_even_with_valid_token(tok, origin):
-    c = TestClient(app)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with c.websocket_connect(f"/ws?token={tok}", headers={"origin": origin}):
-            pass
-    assert exc.value.code == 1008
+    _assert_rejected_1008(_ws_asgi(f"/ws?token={tok}", origin=origin))
 
 
 @pytest.mark.parametrize("origin", ["http://127.0.0.1:5173", "http://localhost:8765", "tauri://localhost", "http://tauri.localhost"])
