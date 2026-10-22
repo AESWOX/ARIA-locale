@@ -50,8 +50,8 @@ SYSTEM_PROMPT = (
     "Reply in the language the user writes in. Be concise and honest; say so when you are unsure."
 )
 NOT_CONFIGURED_HINT = (
-    "No language model is configured. Open Keys and add GEMINI_API_KEYS (a free key from "
-    "aistudio.google.com), then send the message again."
+    "No language model is configured. Open Keys and add a key for any provider "
+    "(DeepSeek, Gemini or Groq), then send the message again."
 )
 
 
@@ -378,7 +378,7 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
     # 1a) CTX: сжать старую часть истории, если она выросла выше порога токенов.
     # Вне DB-scope: сетевой вызов суммаризатора не держит writer-lock; сбой сжатия чат не роняет.
     try:
-        await compression.maybe_compress(session_id)
+        await compression.maybe_compress(session_id, request.app.state.router)
     except Exception:  # noqa: BLE001
         logger.exception("chat: compression failed, continuing with full history")
     with session_scope() as db:

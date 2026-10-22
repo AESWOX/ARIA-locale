@@ -136,17 +136,40 @@ async def _summarize_with_model(pool: KeyPool, model: str, prompt: str) -> str:
     raise last_error or NoAvailableKeys("compression pool exhausted")
 
 
-async def _summarize(text_block: str) -> str:
-    settings = get_settings()
-    if _get_compression_pool() is None:
-        raise RuntimeError("compression pool not configured (no compression keys)")
-
-    prompt = (
+def _summary_prompt(text_block: str) -> str:
+    return (
         "Сожми диалог ниже в краткое фактологическое summary для памяти агента. "
         "Сохрани: принятые решения, важные факты, незавершённые задачи. "
         "Не сохраняй: технический шум, повторы, приветствия.\n\n"
         f"{text_block}"
     )
+
+
+async def _summarize_via_router(router, text_block: str) -> str:
+    """Сжатие через общий роутер (любой настроенный провайдер): без Gemini-ключа сжатие раньше просто
+    не работало, и у пользователя с одним ключом DeepSeek/Groq контекст рос до лимита модели."""
+    from aria.llm.providers.base import ChatMessage
+
+    result = await router.route_chat(
+        "free_tier_reasoning",
+        [ChatMessage(role="user", content=_summary_prompt(text_block))],
+        [],
+        timeout_sec=120,
+        resilient=True,
+        fallback_classes=("standard_reasoning", "premium_reasoning"),
+    )
+    text = (result.response.text or "").strip()
+    if not text:
+        raise RuntimeError("compression via router returned an empty summary")
+    return text
+
+
+async def _summarize(text_block: str) -> str:
+    settings = get_settings()
+    if _get_compression_pool() is None:
+        raise RuntimeError("compression pool not configured (no compression keys)")
+
+    prompt = _summary_prompt(text_block)
 
     # Цепочка моделей (COMPRESSION_MODELS): у каждой модели своя квота на тех же ключах, исчерпанная модель
     # отдаёт запрос следующей. С одной моделью поведение прежнее: последняя ошибка поднимается как есть.
@@ -167,7 +190,7 @@ async def _summarize(text_block: str) -> str:
     raise last_error or NoAvailableKeys("compression pool exhausted")
 
 
-async def _maybe_compress_impl(session_id) -> bool:
+async def _maybe_compress_impl(session_id, router=None) -> bool:
     """Возвращает True если сжатие реально произошло в этом вызове.
 
     ВАЖНО: не держит db-транзакцию открытой во время сетевого запроса —
@@ -214,7 +237,10 @@ async def _maybe_compress_impl(session_id) -> bool:
     # ---- db-сессия закрыта, транзакции нет — теперь идём в сеть ----
 
     try:
-        summary_text = await _summarize(text_block)
+        if router is not None and _get_compression_pool() is None:
+            summary_text = await _summarize_via_router(router, text_block)
+        else:
+            summary_text = await _summarize(text_block)
     except Exception as exc:  # noqa: BLE001
         logger.warning("compression failed for session %s, leaving history uncompressed: %s", session_id, exc)
         return False
@@ -239,14 +265,14 @@ async def _maybe_compress_impl(session_id) -> bool:
     return True
 
 
-async def maybe_compress(session_id) -> bool:
+async def maybe_compress(session_id, router=None) -> bool:
     """Обёртка с замером: ``compression_check`` — каждый вызов (включая «сжимать нечего»),
     ``compression_run`` — только когда сжатие реально произошло и дорого стоило."""
     t0 = time.monotonic()
     did = False
     ok = True
     try:
-        did = await _maybe_compress_impl(session_id)
+        did = await (_maybe_compress_impl(session_id, router) if router is not None else _maybe_compress_impl(session_id))
         return did
     except BaseException:
         ok = False

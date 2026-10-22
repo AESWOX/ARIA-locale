@@ -30,6 +30,8 @@ def ctx(monkeypatch):
         return "SUMMARY-TEXT"
 
     monkeypatch.setattr(compression, "_summarize", fake_summarize)
+    # Фикстура изображает настроенное Gemini-сжатие: без пула ключей сжатие уходит через роутер (test_single_key.py).
+    monkeypatch.setattr(compression, "_get_compression_pool", lambda model=None: object())
     return calls
 
 

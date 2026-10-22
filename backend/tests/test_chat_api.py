@@ -88,7 +88,7 @@ def test_no_real_model_gives_a_clear_hint_not_a_fake_answer():
     try:
         assert c.get("/chat/status").json() == {"configured": False, "providers": [], "hint": NOT_CONFIGURED_HINT}
         r = c.post(f"/chat/sessions/{sid}/send", json={"content": "hi"})
-        assert r.status_code == 503 and "GEMINI_API_KEYS" in r.json()["detail"]
+        assert r.status_code == 503 and "Open Keys" in r.json()["detail"]
         assert c.get(f"/chat/sessions/{sid}/messages").json() == []  # nothing stored when we could not even try
     finally:
         _cleanup(sid)

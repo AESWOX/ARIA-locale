@@ -237,7 +237,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
         # ВНЕ session_scope(): сетевой запрос компрессии не должен держать
         # writer-lock на всё время HTTP round-trip (см. docstring модуля).
-        await compression.maybe_compress(session_id_for_compression)
+        await compression.maybe_compress(session_id_for_compression, router)
 
         with session_scope() as db:
             task = repo.get_task(db, task_id)
