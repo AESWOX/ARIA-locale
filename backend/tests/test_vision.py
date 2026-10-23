@@ -14,6 +14,7 @@ from aria.tools.handlers.vision import vision_analyze, _detect_mime
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 TEST_IMAGE = FIXTURE_DIR / "test_image.png"
+SANDBOX = str(FIXTURE_DIR)
 
 SAMPLE_GEMINI_RESPONSE = {
     "choices": [{"message": {"content": "This is a red square pixel."}}],
@@ -39,7 +40,7 @@ class TestVisionAnalyzeOffline:
         assert "error" in result
 
     async def test_file_not_found_returns_error(self):
-        result = await vision_analyze({"file_path": "/nonexistent/image.png"})
+        result = await vision_analyze({"file_path": "/nonexistent/image.png"}, sandbox_root=SANDBOX)
         assert "error" in result
 
     async def test_missing_both_params_returns_error(self):
@@ -55,7 +56,7 @@ class TestVisionAnalyzeOffline:
         with patch("aria.secrets.secret_provider.get_key_list", return_value=["fake-key"]):
             with patch("urllib.request.urlopen", new_callable=MagicMock) as mock:
                 mock.return_value.__enter__.return_value.read.return_value = json.dumps(SAMPLE_GEMINI_RESPONSE).encode("utf-8")
-                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
 
         assert "text" in result
         assert result["text"] == "This is a red square pixel."
@@ -81,14 +82,14 @@ class TestVisionAnalyzeOffline:
                 HTTPError("http://test", 429, "Too Many Requests", {}, None),
                 HTTPError("http://test", 429, "Too Many Requests", {}, None),
             ]):
-                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
 
         assert "error" in result
         assert "429" in result["error"] or "Too Many" in result.get("error", "")
 
     async def test_no_keys_returns_error(self):
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
-            result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+            result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert "error" in result
 
 
@@ -118,7 +119,7 @@ class TestVisionDeepSeekBackend:
     async def test_single_deepseek_key_is_enough(self, deepseek_key):
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
             with patch("urllib.request.urlopen", return_value=_ok(SAMPLE_DEEPSEEK_RESPONSE)) as mock:
-                result = await vision_analyze({"file_path": str(TEST_IMAGE), "prompt": "what is it"})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE), "prompt": "what is it"}, sandbox_root=SANDBOX)
         assert result["text"] == "A red square."
         assert result["provider"] == "deepseek" and result["model"] == "deepseek-flash"
         req = mock.call_args.args[0]
@@ -134,7 +135,7 @@ class TestVisionDeepSeekBackend:
     async def test_gemini_stays_first_when_its_key_exists(self, deepseek_key):
         with patch("aria.secrets.secret_provider.get_key_list", return_value=["gem-key"]):
             with patch("urllib.request.urlopen", return_value=_ok(SAMPLE_GEMINI_RESPONSE)) as mock:
-                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert result["provider"] == "gemini"
         assert mock.call_count == 1
 
@@ -144,7 +145,7 @@ class TestVisionDeepSeekBackend:
                 HTTPError("http://test", 429, "Too Many Requests", {}, None),
                 _ok(SAMPLE_DEEPSEEK_RESPONSE),
             ]) as mock:
-                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert result["provider"] == "deepseek" and result["text"] == "A red square."
         assert mock.call_count == 2
 
@@ -154,13 +155,13 @@ class TestVisionDeepSeekBackend:
                 HTTPError("http://test", 429, "Too Many Requests", {}, None),
                 HTTPError("http://test", 402, "Payment Required", {}, None),
             ]):
-                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert "error" in result and "402" in result["error"]
 
     async def test_empty_deepseek_reply_is_an_error_not_an_empty_answer(self, deepseek_key):
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
             with patch("urllib.request.urlopen", return_value=_ok({"choices": [{"message": {"content": ""}}]})):
-                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert "error" in result and "empty" in result["error"]
 
     async def test_formats_deepseek_cannot_read_are_rejected_without_a_request(self, deepseek_key):
@@ -174,7 +175,7 @@ class TestVisionDeepSeekBackend:
     async def test_no_keys_at_all_names_every_option(self, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
-            result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+            result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert "DEEPSEEK_API_KEY" in result["error"] and "GEMINI_API_KEYS" in result["error"]
 
     def test_vision_model_is_flash_not_pro(self):
@@ -182,3 +183,99 @@ class TestVisionDeepSeekBackend:
 
         assert get_settings().deepseek_vision_model == "deepseek-flash"
         assert "pro" not in get_settings().deepseek_vision_model
+
+
+class TestVisionSandbox:
+    """SEC-N1: vision_analyze reads images only inside the sandbox."""
+
+    def _png(self, directory: Path, name: str = "pic.png") -> Path:
+        path = directory / name
+        path.write_bytes(TEST_IMAGE.read_bytes())
+        return path
+
+    async def test_absolute_path_outside_sandbox_is_rejected_without_a_request(self, tmp_path):
+        sandbox = tmp_path / "sb"
+        sandbox.mkdir()
+        outside = self._png(tmp_path)
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=["k"]):
+            with patch("urllib.request.urlopen") as mock:
+                result = await vision_analyze({"file_path": str(outside)}, sandbox_root=str(sandbox))
+        assert "escapes sandbox" in result["error"]
+        mock.assert_not_called()
+
+    async def test_dotdot_traversal_is_rejected(self, tmp_path):
+        sandbox = tmp_path / "sb"
+        sandbox.mkdir()
+        self._png(tmp_path)
+        with patch("urllib.request.urlopen") as mock:
+            result = await vision_analyze({"file_path": "../pic.png"}, sandbox_root=str(sandbox))
+        assert "escapes sandbox" in result["error"]
+        mock.assert_not_called()
+
+    async def test_symlink_pointing_outside_is_rejected(self, tmp_path):
+        import pytest
+
+        sandbox = tmp_path / "sb"
+        sandbox.mkdir()
+        outside = self._png(tmp_path)
+        try:
+            (sandbox / "link.png").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available here")
+        with patch("urllib.request.urlopen") as mock:
+            result = await vision_analyze({"file_path": "link.png"}, sandbox_root=str(sandbox))
+        assert "escapes sandbox" in result["error"]
+        mock.assert_not_called()
+
+    async def test_no_sandbox_root_means_no_file_access(self, tmp_path):
+        outside = self._png(tmp_path)
+        result = await vision_analyze({"file_path": str(outside)})
+        assert "sandbox" in result["error"]
+
+    async def test_relative_and_absolute_paths_inside_the_sandbox_work(self, tmp_path):
+        sandbox = tmp_path / "sb"
+        (sandbox / "img").mkdir(parents=True)
+        inside = self._png(sandbox / "img")
+        for given in ("img/pic.png", str(inside)):
+            with patch("aria.secrets.secret_provider.get_key_list", return_value=["fake-key"]):
+                with patch("urllib.request.urlopen", new_callable=MagicMock) as mock:
+                    mock.return_value.__enter__.return_value.read.return_value = json.dumps(SAMPLE_GEMINI_RESPONSE).encode("utf-8")
+                    result = await vision_analyze({"file_path": given}, sandbox_root=str(sandbox))
+            assert result.get("text") == "This is a red square pixel."
+
+    async def test_oversized_file_is_refused_before_reading(self, tmp_path, monkeypatch):
+        from aria.tools.handlers import vision as vision_mod
+
+        sandbox = tmp_path / "sb"
+        sandbox.mkdir()
+        self._png(sandbox)
+        monkeypatch.setattr(vision_mod, "_MAX_IMAGE_BYTES", 10)
+        result = await vision_analyze({"file_path": "pic.png"}, sandbox_root=str(sandbox))
+        assert "too large" in result["error"]
+
+    async def test_slow_provider_call_does_not_block_the_event_loop(self, tmp_path):
+        import asyncio
+        import time
+
+        sandbox = tmp_path / "sb"
+        sandbox.mkdir()
+        self._png(sandbox)
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        def slow(*a, **k):
+            time.sleep(0.4)
+            return _ok(SAMPLE_GEMINI_RESPONSE)
+
+        task = asyncio.create_task(ticker())
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=["fake-key"]):
+            with patch("urllib.request.urlopen", side_effect=slow):
+                result = await vision_analyze({"file_path": "pic.png"}, sandbox_root=str(sandbox))
+        task.cancel()
+        assert "text" in result
+        assert ticks >= 8  # loop kept running during the 0.4 s blocking call

@@ -506,7 +506,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         input_schema={
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "Absolute path to image file"},
+                "file_path": {"type": "string", "description": "Path to an image file inside the sandbox"},
                 "image_base64": {"type": "string", "description": "Base64-encoded image data"},
                 "prompt": {"type": "string", "description": "Optional text instruction (default: describe)"},
                 "model": {"type": "string", "description": "Gemini model (default: gemini-3.8-flash); ignored by the DeepSeek backend"},

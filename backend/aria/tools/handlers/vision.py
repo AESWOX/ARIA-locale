@@ -6,8 +6,12 @@ So a user with a single DeepSeek key still gets image understanding.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import logging
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger("aria.vision")
@@ -15,13 +19,28 @@ logger = logging.getLogger("aria.vision")
 # DeepSeek Vision принимает только эти форматы (docs: Vision → Limits) и до 32 MiB на картинку.
 _DEEPSEEK_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 _DEEPSEEK_MAX_BYTES = 32 * 1024 * 1024
+_MAX_IMAGE_BYTES = 32 * 1024 * 1024
 
 
-async def vision_analyze(input_json: dict, **_ctx) -> dict:
+def _resolve_in_sandbox(file_path: str, sandbox_root: str | None) -> Path | dict:
+    """SEC-N1: only files inside the sandbox. Returns the resolved path or an error dict.
+
+    resolve() follows symlinks, so a link inside the sandbox that points outside is rejected too.
+    """
+    if not sandbox_root:
+        return {"error": "file_path is only available inside the sandbox; no sandbox root given (use image_base64)"}
+    root = Path(sandbox_root).resolve()
+    target = (root / file_path).resolve()  # an absolute file_path replaces root and is checked below
+    if not target.is_relative_to(root):
+        return {"error": f"path {file_path} escapes sandbox root"}
+    return target
+
+
+async def vision_analyze(input_json: dict, sandbox_root: str | None = None, **_ctx) -> dict:
     """Analyze an image with a multimodal model (Gemini, or DeepSeek Flash when Gemini is not available).
 
     Accepts either:
-      - file_path: str — absolute path to an image file on disk
+      - file_path: str — path to an image file INSIDE the sandbox (relative to it, or absolute within it)
       - image_base64: str — already base64-encoded image data
       - prompt: str — optional text instruction (default: 'Describe this image in detail')
 
@@ -33,9 +52,14 @@ async def vision_analyze(input_json: dict, **_ctx) -> dict:
 
     # 1. Get image data
     if file_path:
+        resolved = _resolve_in_sandbox(file_path, sandbox_root)
+        if isinstance(resolved, dict):
+            return resolved
         try:
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
+            size = resolved.stat().st_size
+            if size > _MAX_IMAGE_BYTES:
+                return {"error": f"image is too large: {size} bytes (limit {_MAX_IMAGE_BYTES})"}
+            image_bytes = await asyncio.to_thread(resolved.read_bytes)
         except FileNotFoundError:
             return {"error": f"file not found: {file_path}"}
         except PermissionError:
@@ -43,6 +67,8 @@ async def vision_analyze(input_json: dict, **_ctx) -> dict:
         except Exception as exc:
             return {"error": f"read failed: {exc}"}
     elif image_base64:
+        if len(image_base64) > _MAX_IMAGE_BYTES * 4 // 3 + 16:
+            return {"error": f"image is too large (limit {_MAX_IMAGE_BYTES} bytes)"}
         try:
             image_bytes = base64.b64decode(image_base64)
         except Exception as exc:
@@ -90,11 +116,12 @@ async def vision_analyze(input_json: dict, **_ctx) -> dict:
     if not backends:
         return {"error": "no vision API keys available (set GEMINI_API_KEYS, VISION_GEMINI_API_KEYS or DEEPSEEK_API_KEY)"}
 
-    # 4. Try backends in order, keys round-robin inside each
-    import json
-    import urllib.request
-    import urllib.error
+    # 4. Blocking HTTP runs off the event loop (a 30 s key timeout used to freeze every other request)
+    return await asyncio.to_thread(_request_backends, backends, prompt, content_type, b64_str)
 
+
+def _request_backends(backends: list[dict], prompt: str, content_type: str, b64_str: str) -> dict:
+    """Try backends in order, keys round-robin inside each. Blocking (urllib): call via asyncio.to_thread."""
     last_error = None
     for backend in backends:
         url = f"{backend['base_url'].rstrip('/')}/chat/completions"
