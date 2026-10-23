@@ -155,6 +155,9 @@ class Settings(BaseSettings):
     # (GET /v1/models on 15.10.2026 lists only deepseek-flash and deepseek-v4-pro).
     deepseek_chat_model: str = "deepseek-flash"  # standard_reasoning link
     deepseek_reasoner_model: str = "deepseek-v4-pro"  # premium_reasoning link
+    # Vision: deepseek-flash (V4.1) принимает изображения, deepseek-v4-pro НЕТ (docs: Models & Pricing, Vision).
+    # Поэтому для картинок берётся только Flash, а не premium-модель.
+    deepseek_vision_model: str = "deepseek-flash"
     # DeepSeek V4 thinks by default (effort=high) and bills reasoning tokens as output.
     # off = {"thinking": {"type": "disabled"}}; low|high|max = reasoning_effort.
     deepseek_chat_thinking: str = "off"

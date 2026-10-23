@@ -1,7 +1,8 @@
 """aria/tools/handlers/vision.py — Vision analysis handler (B2/v13).
 
-Uses Gemini's OpenAI-compatible endpoint with image_url (base64) format.
-Separate key pool from main agent answers.
+Backends, in order: Gemini (OpenAI-compatible endpoint, own key pool) and, when there is no Gemini key
+or Gemini fails, DeepSeek Flash (``deepseek-flash`` accepts images; ``deepseek-v4-pro`` does not).
+So a user with a single DeepSeek key still gets image understanding.
 """
 from __future__ import annotations
 
@@ -11,17 +12,20 @@ from pathlib import Path
 
 logger = logging.getLogger("aria.vision")
 
+# DeepSeek Vision принимает только эти форматы (docs: Vision → Limits) и до 32 MiB на картинку.
+_DEEPSEEK_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_DEEPSEEK_MAX_BYTES = 32 * 1024 * 1024
+
 
 async def vision_analyze(input_json: dict, **_ctx) -> dict:
-    """Analyze an image using Gemini multimodal vision.
+    """Analyze an image with a multimodal model (Gemini, or DeepSeek Flash when Gemini is not available).
 
     Accepts either:
       - file_path: str — absolute path to an image file on disk
       - image_base64: str — already base64-encoded image data
       - prompt: str — optional text instruction (default: 'Describe this image in detail')
 
-    Requires a working Gemini API key configured via GEMINI_API_KEYS or
-    VISION_GEMINI_API_KEYS env vars (SecretProvider).
+    Requires a Gemini key (GEMINI_API_KEYS / VISION_GEMINI_API_KEYS) or a DeepSeek key (DEEPSEEK_API_KEY).
     """
     file_path = input_json.get("file_path", "")
     image_base64 = input_json.get("image_base64", "")
@@ -53,65 +57,97 @@ async def vision_analyze(input_json: dict, **_ctx) -> dict:
 
     b64_str = base64.b64encode(image_bytes).decode("ascii")
 
-    # 3. Get API keys from SecretProvider
+    # 3. Backends: Gemini keys first (as before), DeepSeek Flash as the fallback / only option
+    from aria.config import get_settings
     from aria.secrets import secret_provider
-    keys = secret_provider.get_key_list("VISION_GEMINI_API_KEYS") or secret_provider.get_key_list("GEMINI_API_KEYS")
-    if not keys:
-        return {"error": "no vision API keys available (VISION_GEMINI_API_KEYS or GEMINI_API_KEYS)"}
 
-    # 4. Build request
+    backends: list[dict] = []
+    gemini_keys = secret_provider.get_key_list("VISION_GEMINI_API_KEYS") or secret_provider.get_key_list("GEMINI_API_KEYS")
+    if gemini_keys:
+        backends.append({
+            "name": "gemini",
+            "keys": gemini_keys,
+            "base_url": secret_provider.get_key("VISION_GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta/openai",
+            "model": input_json.get("model", "gemini-3.8-flash"),
+            "extra": {},
+            "max_tokens": 1024,
+        })
+    settings = get_settings()
+    deepseek_key = settings.deepseek_api_key_resolved
+    if deepseek_key:
+        if content_type in _DEEPSEEK_MIMES and len(image_bytes) <= _DEEPSEEK_MAX_BYTES:
+            backends.append({
+                "name": "deepseek",
+                "keys": [deepseek_key],
+                "base_url": settings.deepseek_base_url,
+                "model": settings.deepseek_vision_model,
+                # thinking по умолчанию включён и съел бы лимит токенов на «рассуждения» без ответа
+                "extra": {"thinking": {"type": "disabled"}},
+                "max_tokens": 2048,
+            })
+        elif not backends:
+            return {"error": f"DeepSeek vision accepts PNG/JPEG/WebP/GIF up to 32 MiB; got {content_type}, {len(image_bytes)} bytes"}
+    if not backends:
+        return {"error": "no vision API keys available (set GEMINI_API_KEYS, VISION_GEMINI_API_KEYS or DEEPSEEK_API_KEY)"}
+
+    # 4. Try backends in order, keys round-robin inside each
     import json
     import urllib.request
     import urllib.error
 
-    base_url = secret_provider.get_key("VISION_GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta/openai"
-    model = input_json.get("model", "gemini-3.8-flash")
-    url = f"{base_url.rstrip('/')}/chat/completions"
-
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64_str}", "detail": "high"}},
-                ],
-            }
-        ],
-        "max_tokens": 1024,
-    }
-    data = json.dumps(body).encode("utf-8")
-
-    # 5. Try keys round-robin
     last_error = None
-    for key in keys:
-        try:
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {key}",
-                    "User-Agent": "ARIA/1.0",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-            text = result["choices"][0]["message"]["content"]
-            return {
-                "text": text,
-                "model": model,
-                "usage": result.get("usage", {}),
-            }
-        except urllib.error.HTTPError as exc:
-            last_error = f"HTTP {exc.code}: {exc.reason}"
-            if exc.code in (429, 401, 403):
-                continue  # try next key
-            break
-        except Exception as exc:
-            last_error = str(exc)
-            break
+    for backend in backends:
+        url = f"{backend['base_url'].rstrip('/')}/chat/completions"
+        body = {
+            "model": backend["model"],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64_str}", "detail": "high"}},
+                    ],
+                }
+            ],
+            "max_tokens": backend["max_tokens"],
+            **backend["extra"],
+        }
+        data = json.dumps(body).encode("utf-8")
+        for key in backend["keys"]:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {key}",
+                        "User-Agent": "ARIA/1.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                text = result["choices"][0]["message"]["content"]
+                if not (text or "").strip():
+                    last_error = f"{backend['name']}: empty reply"
+                    logger.warning("vision: %s returned an empty reply (model=%s)", backend["name"], backend["model"])
+                    break
+                logger.info("vision: backend=%s model=%s ok", backend["name"], backend["model"])
+                return {
+                    "text": text,
+                    "model": backend["model"],
+                    "provider": backend["name"],
+                    "usage": result.get("usage", {}),
+                }
+            except urllib.error.HTTPError as exc:
+                last_error = f"HTTP {exc.code}: {exc.reason}"
+                logger.warning("vision: %s HTTP %s (model=%s)", backend["name"], exc.code, backend["model"])
+                if exc.code in (429, 401, 402, 403):
+                    continue  # try next key
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                logger.warning("vision: %s failed: %s", backend["name"], exc)
+                break
 
     return {"error": f"vision request failed: {last_error}"}
 

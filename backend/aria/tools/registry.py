@@ -500,7 +500,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "vision_analyze": ToolSpec(
         tool_name="vision_analyze",
-        description="Analyze an image using Gemini multimodal vision. "
+        description="Analyze an image with a multimodal model (Gemini, or DeepSeek Flash when only a DeepSeek key is set). "
                     "Accepts file_path or image_base64. "
                     "Returns text description of the image contents.",
         input_schema={
@@ -509,7 +509,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "file_path": {"type": "string", "description": "Absolute path to image file"},
                 "image_base64": {"type": "string", "description": "Base64-encoded image data"},
                 "prompt": {"type": "string", "description": "Optional text instruction (default: describe)"},
-                "model": {"type": "string", "description": "Gemini model (default: gemini-3.8-flash)"},
+                "model": {"type": "string", "description": "Gemini model (default: gemini-3.8-flash); ignored by the DeepSeek backend"},
             },
             "oneOf": [
                 {"required": ["file_path"]},
@@ -522,6 +522,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "text": {"type": "string"},
                 "error": {"type": "string"},
                 "model": {"type": "string"},
+                "provider": {"type": "string"},
             },
         },
         timeout_sec=35,

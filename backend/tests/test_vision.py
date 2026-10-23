@@ -90,3 +90,95 @@ class TestVisionAnalyzeOffline:
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
             result = await vision_analyze({"file_path": str(TEST_IMAGE)})
         assert "error" in result
+
+
+# ── DeepSeek Flash как бэкенд vision (deepseek-flash принимает изображения, deepseek-v4-pro нет) ──────────────
+
+import pytest  # noqa: E402
+from urllib.error import HTTPError  # noqa: E402
+
+SAMPLE_DEEPSEEK_RESPONSE = {
+    "choices": [{"message": {"content": "A red square."}}],
+    "usage": {"prompt_tokens": 400, "completion_tokens": 5, "total_tokens": 405},
+}
+
+
+def _ok(payload):
+    resp = MagicMock()
+    resp.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+    return resp
+
+
+@pytest.fixture
+def deepseek_key(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-deepseek-vision-1234567890")
+
+
+class TestVisionDeepSeekBackend:
+    async def test_single_deepseek_key_is_enough(self, deepseek_key):
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
+            with patch("urllib.request.urlopen", return_value=_ok(SAMPLE_DEEPSEEK_RESPONSE)) as mock:
+                result = await vision_analyze({"file_path": str(TEST_IMAGE), "prompt": "what is it"})
+        assert result["text"] == "A red square."
+        assert result["provider"] == "deepseek" and result["model"] == "deepseek-flash"
+        req = mock.call_args.args[0]
+        assert req.full_url.endswith("/chat/completions") and "deepseek" in req.full_url
+        assert req.get_header("Authorization") == "Bearer sk-test-deepseek-vision-1234567890"
+        body = json.loads(req.data.decode("utf-8"))
+        assert body["model"] == "deepseek-flash", "v4-pro изображения не принимает"
+        assert body["thinking"] == {"type": "disabled"}, "thinking по умолчанию съел бы лимит токенов"
+        parts = body["messages"][0]["content"]
+        assert parts[0] == {"type": "text", "text": "what is it"}
+        assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    async def test_gemini_stays_first_when_its_key_exists(self, deepseek_key):
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=["gem-key"]):
+            with patch("urllib.request.urlopen", return_value=_ok(SAMPLE_GEMINI_RESPONSE)) as mock:
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+        assert result["provider"] == "gemini"
+        assert mock.call_count == 1
+
+    async def test_falls_back_to_deepseek_when_gemini_is_rate_limited(self, deepseek_key):
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=["gem-key"]):
+            with patch("urllib.request.urlopen", side_effect=[
+                HTTPError("http://test", 429, "Too Many Requests", {}, None),
+                _ok(SAMPLE_DEEPSEEK_RESPONSE),
+            ]) as mock:
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+        assert result["provider"] == "deepseek" and result["text"] == "A red square."
+        assert mock.call_count == 2
+
+    async def test_both_backends_failing_reports_the_last_error(self, deepseek_key):
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=["gem-key"]):
+            with patch("urllib.request.urlopen", side_effect=[
+                HTTPError("http://test", 429, "Too Many Requests", {}, None),
+                HTTPError("http://test", 402, "Payment Required", {}, None),
+            ]):
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+        assert "error" in result and "402" in result["error"]
+
+    async def test_empty_deepseek_reply_is_an_error_not_an_empty_answer(self, deepseek_key):
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
+            with patch("urllib.request.urlopen", return_value=_ok({"choices": [{"message": {"content": ""}}]})):
+                result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+        assert "error" in result and "empty" in result["error"]
+
+    async def test_formats_deepseek_cannot_read_are_rejected_without_a_request(self, deepseek_key):
+        tiff = base64.b64encode(b"II*\x00" + b"\x00" * 64).decode("ascii")
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
+            with patch("urllib.request.urlopen") as mock:
+                result = await vision_analyze({"image_base64": tiff})
+        assert "error" in result and "PNG/JPEG/WebP/GIF" in result["error"]
+        mock.assert_not_called()
+
+    async def test_no_keys_at_all_names_every_option(self, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
+            result = await vision_analyze({"file_path": str(TEST_IMAGE)})
+        assert "DEEPSEEK_API_KEY" in result["error"] and "GEMINI_API_KEYS" in result["error"]
+
+    def test_vision_model_is_flash_not_pro(self):
+        from aria.config import get_settings
+
+        assert get_settings().deepseek_vision_model == "deepseek-flash"
+        assert "pro" not in get_settings().deepseek_vision_model
