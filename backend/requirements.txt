@@ -1,10 +1,11 @@
-fastapi==0.116.1
+fastapi==0.161.1
+starlette==1.9.0
 uvicorn[standard]==0.35.0
 sqlalchemy==2.0.42
 pydantic-settings==2.10.1
 httpx==0.28.1
 psutil==7.0.0
-python-multipart==0.0.20
+python-multipart==0.0.32
 python-dotenv==1.2.2
 alembic==1.13.3
 croniter==6.0.0
