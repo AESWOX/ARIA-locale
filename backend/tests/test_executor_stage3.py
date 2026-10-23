@@ -54,10 +54,10 @@ def _sandbox() -> Path:
 
 
 def _patch_llm(monkeypatch):
-    async def _fake_command(router, session, role, objective):
+    async def _fake_command(router, session, role, objective, context=""):
         return "echo hello > out.txt"
 
-    async def _fake_content(router, session, role, objective):
+    async def _fake_content(router, session, role, objective, context=""):
         return "hello report"
 
     monkeypatch.setattr(exec_mod, "_llm_generate_command", _fake_command)

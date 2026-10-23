@@ -31,10 +31,10 @@ def _spec(name, handler):
 
 @pytest.fixture(autouse=True)
 def _stub_side_effects(monkeypatch):
-    async def _content(router, session, role, objective):
+    async def _content(router, session, role, objective, context=""):
         return "content"
 
-    async def _command(router, session, role, objective):
+    async def _command(router, session, role, objective, context=""):
         return "echo ok"
 
     monkeypatch.setattr(executor, "_llm_generate_content", _content)

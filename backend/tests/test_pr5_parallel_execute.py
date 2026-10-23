@@ -27,10 +27,10 @@ def _spec(name, handler):
 def _stub_llm(monkeypatch):
     """Шаги file_write/shell_execute берут контент у LLM — в тестах подменяем генерацию."""
 
-    async def _content(router, session, role, objective):
+    async def _content(router, session, role, objective, context=""):
         return "content"
 
-    async def _command(router, session, role, objective):
+    async def _command(router, session, role, objective, context=""):
         return "echo ok"
 
     monkeypatch.setattr(executor, "_llm_generate_content", _content)

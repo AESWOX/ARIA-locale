@@ -29,6 +29,7 @@ from aria.core.plan_validator import (
     MAX_REPLAN_ATTEMPTS,
     PlanStep,
     check_oracle_naebal,
+    effective_dependencies,
     topological_waves,
     validate_plan,
 )
@@ -710,6 +711,93 @@ def _serialize_by_write_scope(steps: list[dict], wave: list[int]) -> list[list[i
     return groups
 
 
+# BUG-3: шаг плана видит запрос, историю диалога и результаты своих зависимостей.
+STEP_CONTEXT_HISTORY_MESSAGES = 12
+STEP_CONTEXT_MESSAGE_CHARS = 1500
+STEP_CONTEXT_DEP_CHARS = 4000
+STEP_CONTEXT_TOTAL_CHARS = 16000
+
+
+def _clip(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + "\n…(обрезано)"
+
+
+def _step_result_text(outcome: dict) -> str:
+    """Что шаг дал зависимым шагам: текст результата или причина отказа."""
+    out = outcome.get("output_json") if isinstance(outcome.get("output_json"), dict) else {}
+    if outcome.get("status") != "ok":
+        return f"[шаг не выполнен: {out.get('error') or 'неизвестная ошибка'}]"
+    inp = outcome.get("input_json") if isinstance(outcome.get("input_json"), dict) else {}
+    tool = outcome.get("tool_name")
+    if tool == "file_write":
+        return f"записан файл `{inp.get('path', '?')}`:\n{inp.get('content', '')}"
+    if tool == "llm_task":
+        return str(out.get("content") or "")
+    if tool == "file_read":
+        if out.get("content") is not None:
+            return str(out["content"])
+        if out.get("entries") is not None:
+            return "\n".join(str(e) for e in out["entries"])
+    return json.dumps(out, ensure_ascii=False, default=str)
+
+
+def _dialog_context(session: OrmSession, task: Task) -> str:
+    """Запрос пользователя, TaskSpec и хвост диалога: общая часть контекста всех шагов."""
+    from aria.core import clarifier as _clarifier
+    from aria.db import repository as repo
+
+    parts: list[str] = []
+    if (task.objective or "").strip():
+        parts.append(f"Запрос пользователя:\n{_clip(task.objective, STEP_CONTEXT_DEP_CHARS)}")
+    try:
+        spec = _clarifier.load_spec(session, task.id)
+    except Exception:  # noqa: BLE001 — контекст не должен ронять исполнение
+        spec = None
+    if spec is not None and (spec.goal or "").strip():
+        parts.append("Контракт задачи:\n" + _clip(spec.to_markdown(), STEP_CONTEXT_DEP_CHARS))
+    if getattr(task, "session_id", None) is not None:
+        lines: list[str] = []
+        for msg in repo.list_messages_for_prompt(session, task.session_id, limit=STEP_CONTEXT_HISTORY_MESSAGES):
+            kind = (msg.content_json or {}).get("type") if isinstance(msg.content_json, dict) else None
+            if msg.role not in ("user", "assistant") and kind != "compression_summary":
+                continue
+            who = "сводка раннего диалога" if kind == "compression_summary" else msg.role
+            lines.append(f"[{who}] {_clip(msg.content, STEP_CONTEXT_MESSAGE_CHARS)}")
+        if lines:
+            parts.append("Диалог с пользователем (последние сообщения):\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _compose_step_context(base: str, steps: list[dict], idx: int, deps: list[set[int]],
+                          results: dict[int, dict]) -> str:
+    """Общий контекст + результаты шагов, от которых зависит шаг idx."""
+    blocks: list[str] = []
+    for d in sorted(deps[idx]):
+        outcome = results.get(d)
+        if outcome is None:
+            continue
+        title = str(steps[d].get("objective") or steps[d].get("step_id") or d)
+        blocks.append(
+            f"Результат шага «{_clip(title, 200)}» (step_id {steps[d].get('step_id')}):\n"
+            + _clip(_step_result_text(outcome), STEP_CONTEXT_DEP_CHARS)
+        )
+    text = base
+    if blocks:
+        text = (text + "\n\n" if text else "") + "\n\n".join(blocks)
+    return _clip(text, STEP_CONTEXT_TOTAL_CHARS)
+
+
+def _with_context(system: str, context: str) -> str:
+    if not context:
+        return system
+    return (
+        system
+        + "\n\nКонтекст задачи. Используй его: если нужные данные здесь есть, "
+        "не проси пользователя прислать их заново.\n\n" + context
+    )
+
+
 async def _execute_step_isolated(
     step: dict,
     *,
@@ -717,6 +805,7 @@ async def _execute_step_isolated(
     task_id: Any,
     sandbox_root: str,
     router: ProviderRouter | None,
+    context: str = "",
 ) -> dict:
     """Исполняет один узел плана в собственном коротком session_scope (PR-5).
 
@@ -769,7 +858,7 @@ async def _execute_step_isolated(
                     raise ValueError(f"skill_ref «{skill_ref}» не найден (навык добавляется во вкладке SKILLS или POST /skills)")
                 skill_text = f"\n\nСледуй инструкциям навыка «{skill_ref}»:\n{body}"
             messages = [
-                ChatMessage(role="system", content=f"Ты {role}. {objective}{skill_text}"),
+                ChatMessage(role="system", content=_with_context(f"Ты {role}. {objective}{skill_text}", context)),
                 ChatMessage(role="user", content=objective),
             ]
             result = await router.route_chat(
@@ -796,13 +885,13 @@ async def _execute_step_isolated(
                 raise ValueError(f"tool_ref={tool_ref} не имеет handler'а в registry (только orchestrator loop)")
 
             if tool_ref == "file_write":
-                content = _strip_code_fence(await _llm_generate_content(router, None, role, objective))
+                content = _strip_code_fence(await _llm_generate_content(router, None, role, objective, context=context))
                 if not content.strip():
                     # Пустой ответ модели раньше молча превращался в пустой файл со status=ok.
                     raise ValueError(f"LLM вернул пустое содержимое для файла (шаг {step_id[:8] or index}) — файл не создан")
                 handler_input = {"path": step.get("path", f"generated/{tc_id}.txt"), "content": content}
             elif tool_ref == "shell_execute":
-                command = await _llm_generate_command(router, None, role, objective)
+                command = await _llm_generate_command(router, None, role, objective, context=context)
                 handler_input = {"command": command}
             elif tool_ref == "file_read":
                 handler_input = {"path": step.get("path", ".")}
@@ -836,6 +925,9 @@ async def _execute_step_isolated(
                 timeout_sec=spec.timeout_sec,
                 sandbox_root=sandbox_root,
             )
+            if tool_ref == "file_read" and isinstance(output_json, dict) and output_json.get("exists") is False:
+                # Чтение несуществующего файла раньше шло как успех (exists=false), и зависимые шаги работали по пустоте.
+                output_json = {"error": f"file not found: {handler_input.get('path')}"}
             await toolhooks.post_tool(
                 spec.tool_name, handler_input, output_json,
                 "error" if isinstance(output_json, dict) and output_json.get("error") else "ok",
@@ -944,6 +1036,9 @@ async def _stage3_execute(
         len(steps), len(waves), limit, str(task.id)[:8],
     )
 
+    deps = effective_dependencies(steps)
+    base_context = _dialog_context(session, task)
+    results: dict[int, dict] = {}
     tool_calls_raw: list[dict] = []
     for wave_no, wave in enumerate(waves, start=1):
         session.commit()  # PR-5: writer-lock отпущен перед параллельной волной
@@ -957,6 +1052,7 @@ async def _stage3_execute(
             factories = [
                 (lambda i=idx: _execute_step_isolated(
                     steps[i], index=i, task_id=task.id, sandbox_root=sandbox_root, router=router,
+                    context=_compose_step_context(base_context, steps, i, deps, results),
                 ))
                 for idx in run_idx
             ]
@@ -972,6 +1068,7 @@ async def _stage3_execute(
                     )
                     outcome = _failed_step_payload(steps[idx], outcome)
                 tool_calls_raw.append(outcome)
+                results[idx] = outcome
                 steps[idx]["status"] = "done" if outcome.get("status") == "ok" else "failed"
                 # tool_call_ids — ТОЛЬКО при ok, чтобы ЗАБЫЛ-детектор срабатывал на failure
                 if outcome.get("status") == "ok":
@@ -1186,13 +1283,17 @@ async def _llm_generate_content(
     session: OrmSession | None,
     role: str,
     objective: str,
+    context: str = "",
 ) -> str:
     """LLM генерирует контент для записи в файл."""
     messages = [
         ChatMessage(
             role="system",
-            content=f"Ты {role}. Сгенерируй содержимое файла для задачи: {objective}. "
-                    "Верни ТОЛЬКО содержимое файла, без markdown-обёртки, без пояснений.",
+            content=_with_context(
+                f"Ты {role}. Сгенерируй содержимое файла для задачи: {objective}. "
+                "Верни ТОЛЬКО содержимое файла, без markdown-обёртки, без пояснений.",
+                context,
+            ),
         ),
         ChatMessage(role="user", content=objective),
     ]
@@ -1209,13 +1310,17 @@ async def _llm_generate_command(
     session: OrmSession | None,
     role: str,
     objective: str,
+    context: str = "",
 ) -> str:
     """LLM генерирует shell-команду для выполнения."""
     messages = [
         ChatMessage(
             role="system",
-            content=f"Ты {role}. Для задачи: {objective} — напиши ОДНУ shell-команду "
-                    "для выполнения. Верни ТОЛЬКО команду, без markdown-обёртки, без пояснений.",
+            content=_with_context(
+                f"Ты {role}. Для задачи: {objective} — напиши ОДНУ shell-команду "
+                "для выполнения. Верни ТОЛЬКО команду, без markdown-обёртки, без пояснений.",
+                context,
+            ),
         ),
         ChatMessage(role="user", content=objective),
     ]
