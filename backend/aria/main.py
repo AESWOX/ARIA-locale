@@ -114,7 +114,7 @@ for _uvicorn_logger_name in ("uvicorn", "uvicorn.access"):
     if _file_handler not in logging.getLogger(_uvicorn_logger_name).handlers:
         logging.getLogger(_uvicorn_logger_name).addHandler(_file_handler)
 
-app = FastAPI(title="ARIA by aeswox", version="0.9.0")
+app = FastAPI(title="ARIA by aeswox", version="0.2.1")
 settings = get_settings()
 router = build_default_router()
 app.state.router = router
