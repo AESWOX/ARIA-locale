@@ -57,6 +57,7 @@ from aria.routers.skills import router as skills_router
 from aria.routers.storage import router as storage_router
 from aria.routers.ops import router as ops_router
 from aria.routers.stubs import router as stubs_router
+from aria.logredact import RedactingFormatter as _RedactingFormatter, quiet_library_loggers as _quiet_library_loggers
 from aria.routers.webhooks import router as webhooks_router
 from aria.routers.system import router as system_router
 from aria.routers.tasks import router as tasks_router
@@ -73,7 +74,7 @@ _file_handler = logging.handlers.RotatingFileHandler(
     _LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
 )
 _file_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 )
 _file_handler.setLevel(logging.INFO)
 
@@ -105,6 +106,7 @@ _file_handler.addFilter(_QuietPollingFilter())
 _root_logger = logging.getLogger()
 _root_logger.addHandler(_file_handler)
 _root_logger.setLevel(logging.INFO)
+_quiet_library_loggers()  # M5: httpx пишет URL с токеном Telegram на INFO
 
 # uvicorn пишет через свои логгеры с propagate=False ("uvicorn", "uvicorn.access").
 # "uvicorn.error" пропагирует в "uvicorn" — вешать хендлер и на него = каждая строка дважды.
