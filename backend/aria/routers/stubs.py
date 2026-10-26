@@ -12,6 +12,7 @@ Rules (enforced by tests/test_stubs_honesty.py):
 from __future__ import annotations
 
 from aria import paths
+from aria.version import APP_VERSION
 
 import json
 import os
@@ -410,12 +411,7 @@ async def aria_update(_: str = Depends(require_runtime_token)) -> dict[str, Any]
 
 @router.get("/aria/update/check")
 async def aria_update_check(force: bool = False, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    try:
-        import importlib.metadata
-
-        version = importlib.metadata.version("local-agent")
-    except Exception:
-        version = "0.0.0 (dev)"
+    version = APP_VERSION
     return {
         "install_method": "local",
         "current_version": version,

@@ -32,6 +32,7 @@ from aria.api.auth import token_store
 from aria.config import get_settings
 from aria.db import repository as repo
 from aria.db.base import init_db, run_migrations, session_scope
+from aria.version import APP_VERSION
 from aria.db.enums import ProviderStatus
 from aria.http_utils import seed_database
 from aria.llm.router import build_default_router
@@ -108,7 +109,7 @@ for _uvicorn_logger_name in ("uvicorn", "uvicorn.access"):
     if _file_handler not in logging.getLogger(_uvicorn_logger_name).handlers:
         logging.getLogger(_uvicorn_logger_name).addHandler(_file_handler)
 
-app = FastAPI(title="ARIA by aeswox", version="0.2.1")
+app = FastAPI(title="ARIA by aeswox", version=APP_VERSION)
 settings = get_settings()
 router = build_default_router()
 app.state.router = router

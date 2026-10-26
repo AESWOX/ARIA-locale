@@ -18,6 +18,7 @@ from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.http_utils import health_payload, iso, serialize_session, utc_now
+from aria.version import APP_VERSION
 
 router = APIRouter(tags=["system"])
 
@@ -177,11 +178,7 @@ async def system_self_test(_: str = Depends(require_runtime_token)) -> dict[str,
         checks["config"] = f"error: {exc}"
 
     # 5. Version / identity
-    try:
-        import importlib.metadata
-        version = importlib.metadata.version("local-agent") if hasattr(importlib.metadata, "version") else "0.0.0"
-    except Exception:
-        version = "0.0.0 (dev)"
+    version = APP_VERSION
 
     # 6. Provider catalog — реально ли есть модели в БД
     try:
@@ -280,7 +277,6 @@ async def system_timings(window_sec: float | None = Query(default=None, gt=0), _
 @router.get("/system/stats")
 async def system_stats(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     """§0: системная статистика (SystemStats) — platform + psutil при наличии."""
-    import importlib.metadata
     import platform
     import socket
     import sys
@@ -290,10 +286,7 @@ async def system_stats(_: str = Depends(require_runtime_token)) -> dict[str, Any
     except Exception:
         psutil = None
 
-    try:
-        aria_version = importlib.metadata.version("local-agent")
-    except Exception:
-        aria_version = "0.0.0 (dev)"
+    aria_version = APP_VERSION
 
     result: dict[str, Any] = {
         "os": platform.system(),
