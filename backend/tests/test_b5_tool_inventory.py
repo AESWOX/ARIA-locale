@@ -97,8 +97,8 @@ def _uid() -> str:
 HANDLER_TOOLS = sorted(n for n, s in TOOL_REGISTRY.items() if s.handler is not None)
 
 
-def test_registry_has_23_tools_and_delegate_is_special_case():
-    assert len(TOOL_REGISTRY) == 23, f"в реестре {len(TOOL_REGISTRY)} тулов, обновите ожидаемое число"
+def test_registry_has_24_tools_and_delegate_is_special_case():
+    assert len(TOOL_REGISTRY) == 24, f"в реестре {len(TOOL_REGISTRY)} тулов, обновите ожидаемое число"
     assert [n for n, s in TOOL_REGISTRY.items() if s.handler is None] == ["delegate_task"]
 
 
@@ -121,6 +121,7 @@ CASES = {
     "file_read": (lambda sb: {"path": "hello.txt"}, lambda o: o.get("content") == "hello from sandbox"),
     "file_write": (lambda sb: {"path": "out/w.txt", "content": "abc"}, lambda o: o.get("bytes_written") == 3),
     "file_search": (lambda sb: {"glob": "*.txt"}, lambda o: "hello.txt" in str(o)),
+    "file_grep": (lambda sb: {"pattern": "hello"}, lambda o: any(m["path"] == "hello.txt" and m["line"] == 1 for m in o.get("matches", []))),
     # offline: тул обязан вернуть dict с понятной ошибкой, а не исключение
     "web_search": (lambda sb: {"query": "aria test"}, lambda o: isinstance(o, dict) and o.get("results") == [] and o.get("error")),
     "web_fetch": (lambda sb: {"url": "https://example.com/"}, lambda o: isinstance(o, dict) and "dns resolution failed" in o.get("error", "")),

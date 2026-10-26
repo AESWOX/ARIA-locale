@@ -93,7 +93,7 @@ _CATALOG: dict[str, dict[str, Any]] = {
     "files": {
         "label": "Files",
         "description": "Read, write and search files in the workspace.",
-        "tools": ["file_read", "file_write", "file_search"],
+        "tools": ["file_read", "file_write", "file_search", "file_grep"],
         "has_category": False,
         "providers": [_provider("local", "Local", "local", [])],
     },

@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     compression_target_ratio: float = 0.2
 
     agent_sandbox_root: str = paths.default_sandbox_path()
+    # Папка проекта пользователя, которую агент может ТОЛЬКО читать (file_read/file_search/file_grep со scope="project").
+    # Пусто = выключено. Писать, запускать команды и создавать файлы там агент не может: корень получают лишь читающие инструменты.
+    agent_project_root: str = ""
 
     @field_validator(
         "gemini_api_keys", "groq_api_keys", "compression_gemini_api_keys",

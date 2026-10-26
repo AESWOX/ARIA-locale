@@ -6,6 +6,8 @@ null_output_allowed, requires_approval, allowed_roles, idempotency_class.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -86,8 +88,32 @@ async def _shell_execute(input_json: dict, timeout_sec: int, sandbox_root: str, 
     )
 
 
+def _read_root(input_json: dict, sandbox_root: str) -> tuple[str | None, str | None]:
+    """Корень для читающих инструментов: песочница или (scope="project") папка проекта только для чтения."""
+    scope = str(input_json.get("scope") or "sandbox").lower()
+    if scope == "sandbox":
+        return sandbox_root, None
+    if scope != "project":
+        return None, f"unknown scope {scope!r}: use \"sandbox\" or \"project\""
+    from aria.config import get_settings
+
+    raw = (get_settings().agent_project_root or "").strip()
+    if not raw:
+        return None, "project root is not set (Settings: agent_project_root). Ask the owner to set it."
+    root = Path(raw).expanduser()
+    if not root.is_dir():
+        return None, f"project root does not exist or is not a folder: {raw}"
+    resolved = root.resolve()
+    if resolved == resolved.parent or resolved == Path.home().resolve():
+        return None, "project root must be a project folder, not a drive root or the home folder"
+    return str(resolved), None
+
+
 async def _file_read(input_json: dict, sandbox_root: str, **_ctx) -> dict:
-    return await files_handler.file_read(input_json, sandbox_root)
+    root, err = _read_root(input_json, sandbox_root)
+    if err:
+        return {"error": err}
+    return await files_handler.file_read(input_json, root)
 
 
 async def _file_write(input_json: dict, sandbox_root: str, **_ctx) -> dict:
@@ -95,7 +121,17 @@ async def _file_write(input_json: dict, sandbox_root: str, **_ctx) -> dict:
 
 
 async def _file_search(input_json: dict, sandbox_root: str, **_ctx) -> dict:
-    return await files_handler.file_search(input_json, sandbox_root)
+    root, err = _read_root(input_json, sandbox_root)
+    if err:
+        return {"error": err}
+    return await files_handler.file_search(input_json, root)
+
+
+async def _file_grep(input_json: dict, sandbox_root: str, **_ctx) -> dict:
+    root, err = _read_root(input_json, sandbox_root)
+    if err:
+        return {"error": err}
+    return await files_handler.file_grep(input_json, root)
 
 
 
@@ -353,8 +389,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "file_read": ToolSpec(
         tool_name="file_read",
-        description="Читает содержимое файла или список директории в пределах sandbox root.",
-        input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        description="Читает файл или список директории. Для больших файлов передай start_line/end_line: ответ придёт с номерами строк (формат «N| текст») и total_lines. scope=\"project\" читает папку проекта владельца (только чтение).",
+        input_schema={"type": "object", "properties": {
+            "path": {"type": "string"},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+            "scope": {"type": "string", "enum": ["sandbox", "project"], "description": "sandbox = рабочая папка агента (по умолчанию); project = папка проекта владельца, только чтение"},
+        }, "required": ["path"]},
         output_schema={"type": "object", "properties": {"exists": {"type": "boolean"}, "content": {"type": ["string", "null"]}}},
         timeout_sec=15,
         risk_level=RiskLevel.low,
@@ -383,8 +424,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "file_search": ToolSpec(
         tool_name="file_search",
-        description="Ищет файлы по glob-паттерну в пределах sandbox root.",
-        input_schema={"type": "object", "properties": {"glob": {"type": "string"}}, "required": []},
+        description="Ищет файлы по ИМЕНИ (glob). Пропускает .git, build, node_modules и т.п.; результат отсортирован. Для поиска по содержимому используй file_grep.",
+        input_schema={"type": "object", "properties": {
+            "glob": {"type": "string"},
+            "include_ignored": {"type": "boolean"},
+            "scope": {"type": "string", "enum": ["sandbox", "project"], "description": "sandbox = рабочая папка агента (по умолчанию); project = папка проекта владельца, только чтение"},
+        }, "required": []},
         output_schema={"type": "object", "properties": {"matches": {"type": "array"}}},
         timeout_sec=15,
         risk_level=RiskLevel.low,
@@ -393,6 +438,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         allowed_roles=("general", "orchestrator", "coder", "devops_infra", "qa_auditor", "housekeeping", "obsidian_keeper"),
         idempotency_class=IdempotencyClass.safe_read,
         handler=_file_search,
+    ),
+    "file_grep": ToolSpec(
+        tool_name="file_grep",
+        description="Ищет текст (или regex при regex=true) ВНУТРИ файлов. Ответ: список {path, line, text}. "
+                    "Пропускает .git, build, node_modules и бинарные файлы. Ответ на «где обрабатывается X»: сначала file_grep, потом file_read с диапазоном строк.",
+        input_schema={"type": "object", "properties": {
+            "pattern": {"type": "string"},
+            "regex": {"type": "boolean"},
+            "case_sensitive": {"type": "boolean"},
+            "glob": {"type": "string", "description": "фильтр файлов, например **/*.cpp"},
+            "path": {"type": "string", "description": "подпапка, с которой начать"},
+            "context": {"type": "integer", "minimum": 0, "maximum": 5},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+            "scope": {"type": "string", "enum": ["sandbox", "project"], "description": "sandbox = рабочая папка агента (по умолчанию); project = папка проекта владельца, только чтение"},
+        }, "required": ["pattern"]},
+        output_schema={"type": "object", "properties": {"matches": {"type": "array"}, "truncated": {"type": "boolean"}}},
+        timeout_sec=30,
+        risk_level=RiskLevel.low,
+        null_output_allowed=True,
+        requires_approval=False,
+        allowed_roles=("general", "orchestrator", "coder", "devops_infra", "qa_auditor", "housekeeping", "research"),
+        idempotency_class=IdempotencyClass.safe_read,
+        handler=_file_grep,
     ),
     "delegate_task": ToolSpec(
         tool_name="delegate_task",
