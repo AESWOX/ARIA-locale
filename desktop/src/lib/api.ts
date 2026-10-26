@@ -2296,6 +2296,8 @@ export interface RunState {
   status: string | null;
   terminal: boolean;
   attention: RunAttentionItem[];
+  /** Open clarification questions while status is awaiting_clarification (shape: ClarifyQuestion). */
+  questions?: Array<Record<string, unknown>>;
   /** Why the task failed (provider_http_429, provider_unavailable, runner_error, ...); null otherwise. */
   error_code?: string | null;
   error_message?: string | null;

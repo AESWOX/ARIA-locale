@@ -202,6 +202,10 @@ export default function NativeChatPage() {
         if (list.length > 0) {
           setActiveId(list[0].id);
           setMessages(await api.chatMessages(list[0].id));
+          // After a reload the run state is what brings back the clarification card (PRD-3)
+          // and resumes polling of a task that is still running.
+          const state = await api.runState(list[0].id).catch(() => null);
+          if (!cancelled && state) setRun(state);
         }
       } catch (e) {
         if (!cancelled) setError(errMessage(e));
@@ -213,6 +217,18 @@ export default function NativeChatPage() {
       cancelled = true;
     };
   }, []);
+
+  // PRD-3: the clarification card survives a reload and a session switch. While the task waits
+  // for answers the server returns the open questions with the run state; once it stops
+  // waiting the card goes away.
+  useEffect(() => {
+    if (!run) return;
+    const qs = run.status === "awaiting_clarification" ? ((run.questions ?? []) as unknown as ClarifyQuestion[]) : [];
+    setTaskQuestions((cur) => {
+      const next = qs.length > 0 ? qs : null;
+      return JSON.stringify(cur) === JSON.stringify(next) ? cur : next;
+    });
+  }, [run]);
 
   // Agent/Plan runs execute in the background (TaskRunner); poll while one is active.
   const watching = activeId !== null && runBusy(run);
@@ -264,6 +280,7 @@ export default function NativeChatPage() {
     setError(null);
     setMessages([]);
     setRun(null);
+    setTaskQuestions(null);
     await loadMessages(id);
     try {
       setRun(await api.runState(id));
