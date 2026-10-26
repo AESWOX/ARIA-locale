@@ -80,10 +80,72 @@ class ClarifyOutcome:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Язык и «пустая» болтовня (UI-3, UI-4)
+# ═══════════════════════════════════════════════════════════════════
+
+_SMALL_TALK: frozenset[str] = frozenset({
+    # ru / uk
+    "привет", "приветик", "здравствуй", "здравствуйте", "здорово", "добрый день", "добрый вечер",
+    "доброе утро", "доброй ночи", "хай", "хэй", "салют", "прив", "привіт", "вітаю", "доброго дня",
+    "добрий день", "добрий вечір", "доброго ранку", "спасибо", "спасибо большое", "благодарю",
+    "дякую", "дякую вам", "пока", "до свидания", "до побачення", "бувай", "ок", "окей", "хорошо",
+    "ладно", "понял", "понятно", "ясно", "ага", "угу", "да", "нет", "тест", "проверка",
+    "как дела", "как ты", "как жизнь", "что нового", "як справи", "як ти",
+    # en
+    "hi", "hii", "hello", "hey", "heya", "yo", "sup", "hola", "good morning", "good afternoon",
+    "good evening", "good night", "thanks", "thank you", "thx", "ty", "bye", "goodbye", "cya",
+    "ok", "okay", "k", "got it", "cool", "yes", "no", "test", "testing", "ping",
+    "how are you", "how are you doing", "hows it going", "whats up", "what's up",
+})
+_GREETING_HEADS = frozenset({"hi", "hello", "hey", "привет", "здравствуйте", "привіт"})
+_VOCATIVES = frozenset({"there", "all", "everyone", "claude", "aria", "bot", "друзья", "всем", "ария", "бот", "assistant", "ассистент"})
+_PUNCT_RE = re.compile(r"[^\w\s']", re.UNICODE)
+
+
+def _clause_is_small_talk(clause: str) -> bool:
+    text = _PUNCT_RE.sub(" ", clause.lower().replace("ё", "е").replace("’", "'"))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"(.)\1{2,}", r"\1", text)  # «приветтт», «heyyy» -> «привет», «hey»
+    if not text:
+        return False
+    if text in _SMALL_TALK:
+        return True
+    # «hi there», «hello claude»: приветствие плюс обращение (не любое слово: «hey deploy» это задача)
+    head, _, tail = text.partition(" ")
+    return head in _GREETING_HEADS and tail in _VOCATIVES
+
+
+def is_small_talk(content: str) -> bool:
+    """Приветствие, благодарность, «ок», проверка связи: уточнять тут нечего (UI-4).
+
+    Намеренно узко: каждая часть сообщения (между знаками препинания) должна быть известной
+    короткой фразой. «привет, как дела?» подходит; «привет, сделай отчёт» и «hi, build me an app»
+    нет, поэтому решение владельца от 19.10 (вопросы на любой запрос) для всего остального действует.
+    """
+    clauses = [c for c in re.split(r"[,.!?;:…]+", content or "") if c.strip()]
+    return bool(clauses) and all(_clause_is_small_talk(c) for c in clauses)
+
+
+def detect_language(content: str) -> str:
+    """'uk' | 'ru' | 'en' по буквам запроса; без букв остаётся русский (прежнее поведение)."""
+    text = content or ""
+    cyr = len(re.findall(r"[А-Яа-яЁёІіЇїЄєҐґ]", text))
+    lat = len(re.findall(r"[A-Za-z]", text))
+    if cyr == 0 and lat == 0:
+        return "ru"
+    if lat > cyr:
+        return "en"
+    return "uk" if re.search(r"[ІіЇїЄєҐґ]", text) else "ru"
+
+
+_LANG_NAME = {"ru": "русский", "uk": "украинский", "en": "английский (English)"}
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Гейт: нужен ли он вообще
 # ═══════════════════════════════════════════════════════════════════
 
-def gate_required(content: str, mode: str = "plan") -> bool:
+def gate_required(content: str, mode: str = "plan", *, awaiting: bool = False) -> bool:
     """Нужен ли гейт уточнения для этого сообщения.
 
     plan-режим — это Stage 1–7 с tool calls, там контракт обязателен. В agent-режиме
@@ -100,6 +162,9 @@ def gate_required(content: str, mode: str = "plan") -> bool:
         return False
     # Решение владельца (19.10): структурированный запрос и вопросы формируются на ЛЮБОЙ непустой
     # запрос в plan и agent. Режим больше не влияет; список глаголов оставлен только для совместимости.
+    # Ответ на открытые вопросы («да», «ок», «нет») болтовнёй не считается: он идёт в TaskSpec.
+    if not awaiting and is_small_talk(content):
+        return False  # UI-4: «hi.» не задаёт пять вопросов; сообщение идёт быстрым путём
     return bool((content or "").strip())
 
 
@@ -131,6 +196,8 @@ async def _ask_model(router: ProviderRouter, content: str, spec: TaskSpec) -> di
             role="user",
             content=(
                 f"Запрос владельца: {content}\n\n"
+                f"Язык запроса: {_LANG_NAME[detect_language(content)]}. Все вопросы, варианты ответа "
+                "(включая «Свой вариант»), цель, критерии и допущения пиши на этом же языке.\n\n"
                 f"Уже известный контракт (может быть пустым): {spec.model_dump_json()}\n"
                 f"Раунд уточнения: {spec.clarify_rounds}/{MAX_CLARIFY_ROUNDS}"
             ),
@@ -237,8 +304,31 @@ _FALLBACK_QUESTIONS: tuple[dict, ...] = (
 )
 
 
-def _fallback_questions() -> list[dict]:
-    return _normalise_questions([dict(q) for q in _FALLBACK_QUESTIONS])
+_FALLBACK_QUESTIONS_EN: tuple[dict, ...] = (
+    {
+        "text": "What format do you need the result in?",
+        "field": "clarification",
+        "options": ["Text right in the chat", "Markdown file (.md)", "Table", "Short summary plus a file with details", "Other (my own)"],
+        "recommended": "Text right in the chat",
+    },
+    {
+        "text": "How detailed should it be?",
+        "field": "clarification",
+        "options": ["Short (5-10 lines)", "Medium (1-2 pages)", "Detailed, with reasoning", "As complete as possible, by sections", "Other (my own)"],
+        "recommended": "Detailed, with reasoning",
+    },
+    {
+        "text": "Any constraints or things that must not be done?",
+        "field": "constraints",
+        "options": ["No constraints", "Do not run external programs", "Free tools only", "Offline only, no internet", "Other (my own)"],
+        "recommended": "No constraints",
+    },
+)
+
+
+def _fallback_questions(lang: str = "ru") -> list[dict]:
+    src = _FALLBACK_QUESTIONS_EN if lang == "en" else _FALLBACK_QUESTIONS
+    return _normalise_questions([dict(q) for q in src])
 
 
 def _merge_payload(spec: TaskSpec, payload: dict) -> list[str]:
@@ -310,7 +400,17 @@ def _load_or_derive(task_id: uuid.UUID, content: str) -> TaskSpec:
     return derive_spec(content)
 
 
-def _question_message(questions: list[dict]) -> str:
+def _question_message(questions: list[dict], lang: str = "ru") -> str:
+    if lang == "en":
+        lines = ["To do and verify the task I need a few answers:"]
+        for i, q in enumerate(questions, start=1):
+            lines.append(f"{i}. {q['text']}")
+            for letter, opt in zip("ABCDE", q.get("options") or []):
+                mark = " (recommended)" if opt == q.get("default_value") else ""
+                lines.append(f"   {letter}) {opt}{mark}")
+        lines.append("")
+        lines.append('Pick options in the card or answer in text in this chat; you can also press "Accept assumptions".')
+        return "\n".join(lines)
     lines = ["Чтобы выполнить и проверить задачу, нужны ответы:"]
     for i, q in enumerate(questions, start=1):
         lines.append(f"{i}. {q['text']}")
@@ -336,6 +436,7 @@ async def run_gate(
     * автономный режим или лимит раундов исчерпан -> допущения записываются в TaskSpec
       и попадают в отчёт (PR-6), вопросов владельцу не задаём.
     """
+    lang = detect_language(content)
     spec = _load_or_derive(task_id, content)
     # PR-3: риск считаем и по запросу владельца, и по уточнённой clarifier цели:
     # модель могла переписать формулировку, и маркер риска остался бы только в исходном тексте.
@@ -380,7 +481,7 @@ async def run_gate(
     if not autonomous and not blocking and rounds == 0:
         # Решение владельца: вопросы задаются ВСЕГДА, даже если модель решила, что запрос ясен
         # (или clarifier недоступен). Дальше раунды идут только по неснятым пробелам контракта.
-        blocking = _fallback_questions()
+        blocking = _fallback_questions(lang)
 
     if not autonomous and not blocking and not spec.acceptance_criteria and rounds < MAX_CLARIFY_ROUNDS:
         # Контракт неполный, а модель вопросов не задала: спрашиваем детерминированно,
@@ -410,7 +511,7 @@ async def run_gate(
             )
             repo.set_task_status(db, task, TaskStatus.awaiting_clarification)
             if agent_session is not None:
-                repo.append_message(db, agent_session, role="assistant", content=_question_message(blocking))
+                repo.append_message(db, agent_session, role="assistant", content=_question_message(blocking, lang))
         logger.info("clarifier: задача %s ждёт ответа (раунд %s)", str(task_id)[:8], spec.clarify_rounds)
         return ClarifyOutcome("awaiting_clarification", spec, blocking)
 

@@ -383,7 +383,9 @@ async def post_message(
             elif task.status in (TaskStatus.draft, TaskStatus.awaiting_clarification):
                 # PR-3: автоперевод в approved по факту прихода сообщения убран. Быстрый путь
                 # (простой чат) открывается сразу, всё остальное решает TaskSpec, а не текст.
-                if clarifier.gate_required(content, mode):
+                if clarifier.gate_required(
+                    content, mode, awaiting=task.status == TaskStatus.awaiting_clarification
+                ):
                     gate_task_id = task.id
                 else:
                     repo.set_task_status(db, task, TaskStatus.approved)

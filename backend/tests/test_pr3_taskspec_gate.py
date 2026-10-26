@@ -62,8 +62,8 @@ def test_high_risk_detection():
 
 def test_every_nonempty_request_goes_through_the_gate():
     """Решение владельца 19.10: структурированный запрос и вопросы — на ЛЮБОЙ непустой запрос."""
-    assert clarifier.gate_required("привет", "agent") is True
-    assert clarifier.gate_required("как дела?", "agent") is True
+    assert clarifier.gate_required("напиши привет-мир на go", "agent") is True
+    assert clarifier.gate_required("что нового в проекте?", "agent") is True
     assert clarifier.gate_required("   ", "agent") is False
 
 

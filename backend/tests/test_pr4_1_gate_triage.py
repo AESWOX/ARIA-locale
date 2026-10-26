@@ -38,10 +38,13 @@ def test_russian_stems_match_their_inflections(monkeypatch):
         assert clarifier.gate_required(text, "agent") is True, text
 
 
-def test_plain_chatter_is_gated_too(monkeypatch):
+def test_chatter_with_a_request_is_gated_pure_greetings_are_not(monkeypatch):
+    """UI-4: чистые приветствия и благодарности быстрым путём; любая просьба идёт через гейт."""
     monkeypatch.setattr(get_settings(), "clarifier_gate_enabled", True)
-    for text in ("привет, как дела?", "спасибо", "расскажи анекдот"):
+    for text in ("привет, расскажи анекдот", "расскажи анекдот", "спасибо, а теперь напиши письмо"):
         assert clarifier.gate_required(text, "agent") is True, text
+    for text in ("привет, как дела?", "спасибо", "hi."):
+        assert clarifier.gate_required(text, "agent") is False, text
 
 
 def test_punctuation_and_case_do_not_break_matching(monkeypatch):
