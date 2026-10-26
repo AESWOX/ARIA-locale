@@ -83,7 +83,8 @@ def test_grep_cannot_leave_the_root(proj, tmp_path):
 
 
 def test_read_range_has_line_numbers_and_total(tmp_path):
-    (tmp_path / "f.txt").write_text("\n".join(f"line{i}" for i in range(1, 1001)), encoding="utf-8")
+    # write_bytes: на Windows write_text превратил бы \n в \r\n и сломал проверку «без диапазона»
+    (tmp_path / "f.txt").write_bytes("\n".join(f"line{i}" for i in range(1, 1001)).encode("utf-8"))
     out = run(fh.file_read({"path": "f.txt", "start_line": 998, "end_line": 1000}, str(tmp_path)))
     assert out["content"].splitlines() == [" 998| line998", " 999| line999", "1000| line1000"]
     assert (out["start_line"], out["end_line"], out["total_lines"]) == (998, 1000, 1000)
@@ -94,6 +95,10 @@ def test_read_range_has_line_numbers_and_total(tmp_path):
     assert "error" in past
     # без диапазона поведение прежнее
     assert run(fh.file_read({"path": "f.txt"}, str(tmp_path)))["content"].startswith("line1\n")
+    # файл с CRLF: номера строк на месте, \r в ответ не попадает
+    (tmp_path / "crlf.txt").write_bytes(b"a\r\nb\r\n")
+    crlf = run(fh.file_read({"path": "crlf.txt", "start_line": 1, "end_line": 2}, str(tmp_path)))
+    assert crlf["content"] == "1| a\n2| b" and crlf["total_lines"] == 2
 
 
 def test_read_big_file_reports_truncation(tmp_path):
@@ -103,13 +108,16 @@ def test_read_big_file_reports_truncation(tmp_path):
 
 
 def test_search_skips_junk_and_is_sorted(proj):
-    allf = run(fh.file_search({"glob": "**/*"}, str(proj)))["matches"]
+    def posix(items):  # на Windows file_search по-прежнему отдаёт пути с обратным слэшем
+        return [p.replace("\\", "/") for p in items]
+
+    allf = posix(run(fh.file_search({"glob": "**/*"}, str(proj)))["matches"])
     assert allf == sorted(allf, key=str.lower)
     assert allf[0] == "README.md"
     assert not any(p.startswith(("build/", "node_modules/", ".git/")) for p in allf)
-    again = run(fh.file_search({"glob": "**/*"}, str(proj)))["matches"]
+    again = posix(run(fh.file_search({"glob": "**/*"}, str(proj)))["matches"])
     assert allf == again
-    everything = run(fh.file_search({"glob": "**/*", "include_ignored": True}, str(proj)))["matches"]
+    everything = posix(run(fh.file_search({"glob": "**/*", "include_ignored": True}, str(proj)))["matches"])
     assert any(p.startswith("build/") for p in everything)
 
 
