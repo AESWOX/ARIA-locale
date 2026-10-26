@@ -209,6 +209,21 @@ def messages(ctx: Ctx, sid: str) -> list[dict]:
     return ctx.api.ok("GET", f"/sessions/{sid}/messages")["messages"]
 
 
+# Настоящий вывод `git --version` ("git version 2.54.0.windows.1"). Голая подстрока "git version" ловила и текст
+# вопросов уточнения ("...строку `git version ...`"), и пересказ модели до Approve: ложное «вывод ДО approval».
+GIT_VERSION_RE = re.compile(r"git version \d+\.\d+")
+
+
+def shell_ran(msgs: list[dict]) -> bool:
+    """Команда реально выполнялась: в переписке есть вызов shell_execute (до Approve его быть не должно)."""
+    return any(m.get("role") == "tool" and str(m.get("content") or "").lstrip().startswith("shell_execute") for m in msgs)
+
+
+def git_output_seen(msgs: list[dict]) -> bool:
+    """Есть настоящий вывод git --version в ответе ассистента или результате инструмента (не в вопросах уточнения)."""
+    return any(GIT_VERSION_RE.search(str(m.get("content") or "")) for m in msgs if m.get("role") in ("assistant", "tool"))
+
+
 def send_chat(ctx: Ctx, sid: str, text: str) -> str:
     try:
         data = ctx.api.ok("POST", f"/chat/sessions/{sid}/send", {"content": text}, timeout=LLM_TIMEOUT)
@@ -439,14 +454,14 @@ def s_agent_shell(ctx: Ctx):
         "high_risk_shell",
         profile={"style": "boss", "audit": "off", "thinking": "off"},
     )
-    assert "git version" not in json.dumps(messages(ctx, sid)), "command output appeared BEFORE approval"
+    assert not shell_ran(messages(ctx, sid)), "command output appeared BEFORE approval"
     # boss: корневая задача завершается, пока дочерняя ждёт Approve, поэтому ждём САМ результат команды
     # Сообщение «shell_execute (approved) -> ok» появляется раньше, чем модель перескажет вывод команды,
     # поэтому ждём сам вывод (0024: раньше проверка срабатывала по первому и падала гонкой).
-    done = lambda: "git version" in json.dumps(messages(ctx, sid), ensure_ascii=False)  # noqa: E731
+    done = lambda: (lambda ms: shell_ran(ms) and git_output_seen(ms))(messages(ctx, sid))  # noqa: E731
     _finish(ctx, sid, item, until=done)
     dump = json.dumps(messages(ctx, sid), ensure_ascii=False)
-    assert "git version" in dump, f"approved command did not run / result missing: {dump[-300:]}"
+    assert git_output_seen(messages(ctx, sid)), f"approved command did not run / result missing: {dump[-300:]}"
 
 
 @stage("agent_mcp", needs_llm=True)
