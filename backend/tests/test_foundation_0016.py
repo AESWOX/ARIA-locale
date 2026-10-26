@@ -97,11 +97,11 @@ def test_planner_and_audit_release_the_lock_before_the_model_call():
     assert au.index("router.route_chat(", j) - j < 300
 
 
-def test_busy_timeout_is_short():
+def test_busy_timeout_is_ten_seconds_not_thirty():
     from aria.db import base
 
     src = Path(base.__file__).read_text(encoding="utf-8")
-    assert "busy_timeout=5000" in src and "busy_timeout=30000" not in src
+    assert "busy_timeout=10000" in src and "busy_timeout=30000" not in src and "busy_timeout=5000" not in src
 
 
 # ── логи: task_id, подсистемы, без успешных HTTP ───────────────────────────────
@@ -208,7 +208,9 @@ def test_clean_test_data_removes_leftovers_and_keeps_user_data(tmp_path, monkeyp
         names = {s.skill_name for s in repo.list_skills(db)}
         assert "e2eabcdef-hello" not in names and "my-skill" in names
         assert db.get(m.Session, keep_id) is not None
-    assert clean_test_data() == {"skills": [], "sessions": 0, "mcp_servers": []}  # идемпотентно
+    again = clean_test_data()
+    assert (again["skills"], again["sessions"], again["mcp_servers"]) == ([], 0, [])  # идемпотентно
+    assert again["backup"] is None  # нечего удалять: копия не нужна
 
 
 def test_clean_test_data_route_requires_token_and_works(tmp_path, monkeypatch):
@@ -222,4 +224,68 @@ def test_clean_test_data_route_requires_token_and_works(tmp_path, monkeypatch):
     assert client.post("/system/clean-test-data").status_code in (401, 403)
     app.dependency_overrides[require_runtime_token] = lambda: "test"
     r = client.post("/system/clean-test-data")
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.json()["ok"] is True and r.json()["preview"] is True
+
+
+def test_clean_test_data_asks_first_and_backs_up_before_deleting(tmp_path, monkeypatch):
+    """0016b: без confirm ничего не удаляется; с confirm перед удалением делается копия БД."""
+    from aria import paths
+    from aria.core import testdata
+    from aria.routers import system as system_mod
+
+    monkeypatch.setattr(paths, "skills_dir", lambda: tmp_path / "skills")
+    (tmp_path / "skills").mkdir()
+    monkeypatch.setattr(paths, "user_data_dir", lambda: tmp_path)
+    calls = []
+    monkeypatch.setattr(testdata, "backup_database", lambda: calls.append(1) or str(tmp_path / "copy.db"))
+    with session_scope() as db:
+        repo.create_session(db, "e2e shell approval")
+        keep = repo.create_session(db, "Plan my week")
+        keep_id = keep.id
+    app = FastAPI()
+    app.include_router(system_mod.router)
+    app.dependency_overrides[require_runtime_token] = lambda: "test"
+    client = TestClient(app)
+    pre = client.post("/system/clean-test-data").json()
+    assert pre["preview"] is True and pre["sessions"] == 1 and not calls  # ничего не удалено, копии нет
+    with session_scope() as db:
+        assert len([s for s in db.query(m.Session).all() if is_test_session_title(s.title)]) == 1
+    done = client.post("/system/clean-test-data", json={"confirm": True}).json()
+    assert done["ok"] is True and done["sessions"] == 1 and done["backup"].endswith("copy.db") and calls == [1]
+    with session_scope() as db:
+        assert db.get(m.Session, keep_id) is not None
+
+
+def test_failed_backup_means_nothing_is_deleted(tmp_path, monkeypatch):
+    from aria import paths
+    from aria.core import testdata
+
+    monkeypatch.setattr(paths, "skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(testdata, "backup_database", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    with session_scope() as db:
+        repo.create_session(db, "e2e mcp approval")
+    out = clean_test_data()
+    assert out["sessions"] == 0 and "backup failed" in out["error"]
+    with session_scope() as db:
+        assert any(is_test_session_title(s.title) for s in db.query(m.Session).all())
+
+
+def test_backup_database_makes_a_readable_copy(tmp_path, monkeypatch):
+    import sqlite3
+
+    from aria import paths
+    from aria.core import testdata
+
+    src = tmp_path / "local_agent.db"
+    c = sqlite3.connect(str(src)); c.execute("create table t(x)"); c.execute("insert into t values (7)"); c.commit(); c.close()
+    monkeypatch.setattr(paths, "user_data_dir", lambda: tmp_path)
+    dst = testdata.backup_database()
+    assert dst and sqlite3.connect(dst).execute("select x from t").fetchall() == [(7,)]
+
+
+def test_sqlite_busy_timeout_is_ten_seconds():
+    from aria.db.base import make_engine
+
+    eng = make_engine("sqlite://")
+    with eng.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 10000

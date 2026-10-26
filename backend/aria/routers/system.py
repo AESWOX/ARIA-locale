@@ -76,12 +76,16 @@ def _external_url_ok(url: str) -> bool:
 
 
 @router.post("/system/clean-test-data")
-async def clean_test_data_route(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    """Settings -> «Clean test data»: убирает навыки, чаты и MCP-сервер, оставшиеся от smoke-прогонов (e2e*)."""
-    from aria.core.testdata import clean_test_data
+async def clean_test_data_route(body: dict[str, Any] | None = None, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Settings -> «Clean test data». Без {"confirm": true} только показывает, что будет удалено.
 
+    Перед удалением делается копия БД (local_agent.before-clean-*.db рядом с базой)."""
+    from aria.core.testdata import clean_test_data, preview_test_data
+
+    if not (body or {}).get("confirm"):
+        return {"ok": True, "preview": True, **(await asyncio.to_thread(preview_test_data))}
     result = await asyncio.to_thread(clean_test_data)
-    return {"ok": True, **result}
+    return {"ok": "error" not in result, "preview": False, **result}
 
 
 @router.post("/system/open-external")

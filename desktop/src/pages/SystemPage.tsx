@@ -340,9 +340,21 @@ export default function SystemPage() {
   const runCleanTestData = useCallback(async () => {
     setCleaningTestData(true);
     try {
-      const res = await api.cleanTestData();
+      const plan = await api.cleanTestData(false);
+      if (!plan.skills.length && !plan.sessions && !plan.mcp_servers.length) {
+        showToast("Nothing to clean: no smoke-test leftovers found", "success");
+        return;
+      }
+      const ok = window.confirm(
+        `This will delete ${plan.skills.length} skill(s), ${plan.sessions} chat(s) and ${plan.mcp_servers.length} MCP server(s) ` +
+          `left by smoke runs.\n\nA copy of the database is saved first. Continue?`,
+      );
+      if (!ok) return;
+      const res = await api.cleanTestData(true);
+      if (!res.ok) throw new Error(res.error || "cleanup failed");
       showToast(
-        `Removed ${res.skills.length} skill(s), ${res.sessions} chat(s), ${res.mcp_servers.length} MCP server(s)`,
+        `Removed ${res.skills.length} skill(s), ${res.sessions} chat(s), ${res.mcp_servers.length} MCP server(s)` +
+          (res.backup ? ". Database copy saved next to the database." : ""),
         "success",
       );
     } catch (e) {

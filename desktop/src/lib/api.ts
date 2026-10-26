@@ -551,9 +551,20 @@ export const api = {
     if (params.component && params.component !== "all") qs.set("component", params.component);
     return fetchJSON<LogsResponse>(`/api/logs?${qs.toString()}`);
   },
-  cleanTestData: () =>
-    fetchJSON<{ ok: boolean; skills: string[]; sessions: number; mcp_servers: string[] }>("/api/system/clean-test-data", {
+  // без confirm бэкенд только показывает, что будет удалено (preview=true); с confirm делает копию БД и удаляет
+  cleanTestData: (confirm = false) =>
+    fetchJSON<{
+      ok: boolean;
+      preview: boolean;
+      skills: string[];
+      sessions: number;
+      mcp_servers: string[];
+      backup?: string | null;
+      error?: string;
+    }>("/api/system/clean-test-data", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm }),
     }),
   clearLogs: () =>
     fetchJSON<{ ok: boolean; cleared: boolean; removed_backups: number }>("/api/logs/clear", { method: "POST" }),

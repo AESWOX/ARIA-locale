@@ -37,7 +37,50 @@ def is_test_server(name: str | None) -> bool:
     return bool(name and name.startswith("e2e-"))
 
 
-def clean_test_data() -> dict[str, Any]:
+def preview_test_data() -> dict[str, Any]:
+    """Что будет удалено, ничего не меняя."""
+    skills: list[str] = []
+    skills_root = paths.skills_dir()
+    with session_scope() as db:
+        skills = [r.skill_name for r in repo.list_skills(db) if is_test_skill(r.skill_name)]
+        sessions = [s.title for s in db.query(m.Session).all() if is_test_session_title(s.title)]
+    if skills_root.is_dir():
+        for folder in skills_root.iterdir():
+            if folder.is_dir() and is_test_skill(folder.name) and folder.name not in skills:
+                skills.append(folder.name)
+    servers: list[str] = []
+    try:
+        from aria.mcp.manager import load_servers
+
+        servers = [s.get("name") for s in load_servers() if is_test_server(s.get("name"))]
+    except Exception:  # noqa: BLE001
+        pass
+    return {"skills": skills, "sessions": len(sessions), "mcp_servers": servers}
+
+
+def backup_database() -> str | None:
+    """Копия БД рядом с ней (sqlite backup API, безопасно при WAL). None, если БД не файл."""
+    import sqlite3
+    import time
+
+    src = paths.user_data_dir() / "local_agent.db"
+    if not src.is_file():
+        return None
+    dst = src.with_name(f"local_agent.before-clean-{time.strftime('%Y%m%d-%H%M%S')}.db")
+    with sqlite3.connect(str(src)) as s, sqlite3.connect(str(dst)) as d:
+        s.backup(d)
+    return str(dst)
+
+
+def clean_test_data(*, backup: bool = True) -> dict[str, Any]:
+    plan = preview_test_data()
+    backup_path: str | None = None
+    if backup and (plan["skills"] or plan["sessions"] or plan["mcp_servers"]):
+        try:
+            backup_path = backup_database()
+        except Exception:  # noqa: BLE001 - нет копии = не удаляем сессии (необратимо)
+            return {"skills": [], "sessions": 0, "mcp_servers": [], "backup": None,
+                    "error": "backup failed, nothing was deleted"}
     skills_removed: list[str] = []
     sessions_removed = 0
     skills_root = paths.skills_dir()
@@ -72,4 +115,4 @@ def clean_test_data() -> dict[str, Any]:
             save_servers(keep)
     except Exception:  # noqa: BLE001 - MCP-реестр не должен ломать чистку остального
         pass
-    return {"skills": skills_removed, "sessions": sessions_removed, "mcp_servers": servers_removed}
+    return {"skills": skills_removed, "sessions": sessions_removed, "mcp_servers": servers_removed, "backup": backup_path}
