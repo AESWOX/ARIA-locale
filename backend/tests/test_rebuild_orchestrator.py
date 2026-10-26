@@ -101,7 +101,7 @@ def test_phase_selection_flags():
     full = [n for n, _ in rs.PHASES]
     assert [n for n in full if rs.enabled(n, _args())] == full
     stop_after_build = [n for n in full if rs.enabled(n, _args(no_install=True))]
-    assert stop_after_build == ["preflight", "tests", "typecheck", "rehearsal_src", "frontend", "pyinstaller", "rehearsal_frozen", "tauri"]
+    assert stop_after_build == ["preflight", "tests", "typecheck", "rehearsal_src", "frontend", "skills_src", "pyinstaller", "rehearsal_frozen", "tauri"]
     live = [n for n in full if rs.enabled(n, _args(live_only=True))]
     assert live == ["preflight", "launch", "smoke", "shutdown"]
     assert not rs.enabled("tests", _args(skip_tests=True)) and not rs.enabled("typecheck", _args(skip_tests=True))

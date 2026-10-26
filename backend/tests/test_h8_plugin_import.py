@@ -135,7 +135,7 @@ def test_delete_removes_everything_it_installed(env):
     assert not (skills / "acme-find-jobs").exists()
     assert [s["name"] for s in load_servers()] == ["mine"]  # чужой сервер цел
     with session_scope() as db:
-        assert repo.get_skill(db, "acme-find-jobs").status == SkillStatus.archived
+        assert repo.get_skill(db, "acme-find-jobs") is None  # не archived: серый тумблер в Skills остался бы навсегда
     assert c.get("/plugins").json()["plugins"] == []
     assert c.delete("/plugins/acme").status_code == 404
 

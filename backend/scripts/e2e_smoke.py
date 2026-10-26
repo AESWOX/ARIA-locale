@@ -12,7 +12,9 @@
   infra        health/status, токен обязателен, self-test
   surface      все основные GET-маршруты отвечают, каталог MCP содержит Upwork
   mcp          локальный фальшивый MCP-сервер: подключение, тулы, default-deny
-  plugin       импорт Agent Plugin из временной папки: preview, import, 409, delete
+  skills       навыки из release_skills.txt на месте и читаются через /skills/content; с --skills exact
+               (свежий профиль собранного exe) в списке нет ничего лишнего, в том числе хвостов e2e*
+  plugin       импорт Agent Plugin из временной папки: preview, import, 409, delete (строка навыка удаляется)
   memory       запись и поиск в долговременной памяти
   chat         живая модель: ответ на запрос, вспоминание факта из памяти (H3)
   agent_shell  агент просит команду -> карточка Approve -> одобрение -> команда выполнена (A22)
@@ -296,6 +298,59 @@ def s_mcp(ctx: Ctx):
     assert not ctx.mcp.calls, "tools/call must not happen during a connection test"
 
 
+
+# ── навыки: что должно быть в профиле ───────────────────────────────────
+
+_E2E_SKILL_RE = re.compile(r"^e2e[0-9a-f]{6}-")
+
+
+def release_allowlist() -> list[str]:
+    """Навыки, которые публичный установщик кладёт в профиль (backend/release_skills.txt)."""
+    path = Path(__file__).resolve().parents[1] / "release_skills.txt"
+    return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def check_skill_listing(listing, allow: list[str], *, exact: bool) -> tuple[list[str], list[str]]:
+    """(problems, warnings) для ответа GET /skills.
+
+    Всегда: каждый навык из allowlist есть в списке. exact (свежий изолированный профиль, репетиция
+    на собранном backend.exe): в списке нет ничего сверх allowlist, в том числе хвостов e2e*.
+    На реальном профиле лишние навыки пользователя нормальны, хвосты e2e* дают предупреждение."""
+    names = [s.get("name") for s in listing] if isinstance(listing, list) else []
+    problems: list[str] = []
+    warnings: list[str] = []
+    missing = [n for n in allow if n not in names]
+    if missing:
+        problems.append(f"bundled skills missing from /skills: {missing}")
+    junk = sorted(n for n in names if n and _E2E_SKILL_RE.match(n))
+    if exact:
+        extra = sorted(n for n in names if n not in allow)
+        if extra:
+            problems.append(f"skills outside release_skills.txt in a fresh profile: {extra}")
+    elif junk:
+        warnings.append(f"{len(junk)} leftover e2e skill row(s) from earlier runs: {junk[:5]}")
+    return problems, warnings
+
+
+@stage("skills")
+def s_skills(ctx: Ctx):
+    mode = getattr(ctx.args, "skills", "real")
+    if mode == "none":
+        raise Skip("source run: bundled skills exist only in the frozen build (checked by the rehearsal on backend.exe)")
+    api = ctx.api
+    allow = release_allowlist()
+    listing = api.ok("GET", "/skills")
+    problems, warnings = check_skill_listing(listing, allow, exact=(mode == "exact"))
+    for name in allow:
+        status, data = api.call("GET", f"/skills/content?name={name}")
+        content = data.get("content", "") if isinstance(data, dict) else ""
+        if status != 200 or not str(content).strip():
+            problems.append(f"{name}: SKILL.md is not readable through /skills/content (HTTP {status})")
+    for w in warnings:
+        print(f"        warn: {w}")
+    assert not problems, "; ".join(problems)
+
+
 @stage("plugin")
 def s_plugin(ctx: Ctx):
     api = ctx.api
@@ -320,6 +375,7 @@ def s_plugin(ctx: Ctx):
     api.ok("DELETE", f"/plugins/{name}")
     assert f"{name}-api" not in json.dumps(api.ok("GET", "/mcp/servers")), "plugin server must be removed with the plugin"
     assert not any(p["name"] == name for p in api.ok("GET", "/plugins")["plugins"])
+    assert f"{name}-hello" not in json.dumps(api.ok("GET", "/skills")), "plugin skill row must be removed with the plugin, not archived"
 
 
 @stage("memory")
@@ -516,6 +572,10 @@ def main() -> int:
                     help="require: нет модели = FAIL; skip: не трогать модель")
     ap.add_argument("--agent", action="store_true", help="стадии agent_shell и agent_mcp")
     ap.add_argument("--ctx", action="store_true", help="стадия ctx (нужен низкий порог сжатия в приложении)")
+    ap.add_argument("--skills", choices=("real", "exact", "none"), default="real",
+                    help="real: установленное приложение, навыки из release_skills.txt на месте; "
+                         "exact: свежий профиль собранного exe, в /skills ровно они; "
+                         "none: запуск из исходников, навыки в сборку не кладутся, стадию пропустить")
     ap.add_argument("--no-cleanup", action="store_true", help="не удалять созданное (для разбора)")
     ap.add_argument("--only", default="", help="через запятую: имена стадий")
     ap.add_argument("--report", default=str(Path(tempfile.gettempdir()) / "aria_e2e_report.json"))

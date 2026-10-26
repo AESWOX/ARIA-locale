@@ -188,7 +188,7 @@ def main() -> int:
             print(f"backend did not start in {startup}s; see {tmp}")
             return 1
         rc = subprocess.call([sys.executable, str(BACKEND / "scripts" / "e2e_smoke.py"), "--base", base, "--token", token,
-                              "--llm", "require", "--agent", "--ctx", "--report", str(tmp / "report.json")]
+                              "--llm", "require", "--agent", "--ctx", "--skills", "exact" if cli.exe else "none", "--report", str(tmp / "report.json")]
                              + (["--no-cleanup"] if os.environ.get("ARIA_KEEP_REHEARSAL") == "1" else []), env=env)
         print(f"rehearsal files: {tmp}")
         return rc

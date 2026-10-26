@@ -11,14 +11,16 @@
    3 typecheck        npm run typecheck
    4 rehearsal_src    репетиция e2e на исходниках: фальшивая модель, изолированный профиль
    5 frontend         npm run build
-   6 pyinstaller      сборка backend.exe (console=False)
-   7 rehearsal_frozen та же репетиция на собранном backend.exe (ловит забытые импорты)
-   8 tauri            копия sidecar + npm run tauri build -> .msi / .exe-установщик
-   9 backup           копия %APPDATA%\\ARIA на рабочий стол
-  10 install          остановить процессы, удалить старую установку, поставить новую (тихо)
-  11 launch           запустить установленное приложение, дождаться backend, найти порт
-  12 smoke            e2e_smoke.py по РЕАЛЬНЫМ ключам: chat, память, MCP, плагины, Approve, сжатие
-  13 shutdown         закрыть приложение, проверить отсутствие процессов, запустить обычным образом
+   6 skills_src       check_release_skills.py --strict: все навыки из release_skills.txt на месте, без секретов
+   7 pyinstaller      сборка backend.exe (console=False)
+   8 rehearsal_frozen та же репетиция на собранном backend.exe (ловит забытые импорты; стадия skills
+                      проверяет, что в свежем профиле ровно навыки из release_skills.txt)
+   9 tauri            копия sidecar + npm run tauri build -> .msi / .exe-установщик
+  10 backup           копия %APPDATA%\\ARIA на рабочий стол
+  11 install          остановить процессы, удалить старую установку, поставить новую (тихо)
+  12 launch           запустить установленное приложение, дождаться backend, найти порт
+  13 smoke            e2e_smoke.py по РЕАЛЬНЫМ ключам: chat, память, навыки, MCP, плагины, Approve, сжатие
+  14 shutdown         закрыть приложение, проверить отсутствие процессов, запустить обычным образом
 
 Каждая команда пишет полный лог в reports/rebuild_<время>/<фаза>.log; итог — summary.json.
 Код выхода = число упавших фаз. --dry-run печатает план и ничего не выполняет.
@@ -344,6 +346,14 @@ def ph_frontend(ctx: Ctx) -> str:
     return "dist rebuilt"
 
 
+def ph_skills_src(ctx: Ctx) -> str:
+    """Перед сборкой: установщик получит ровно навыки из release_skills.txt, и в них нет секретов."""
+    _, out = run(ctx, "skills_src", [venv_python(), "scripts/check_release_skills.py", "--strict"], BACKEND, timeout=300)
+    if ctx.args.dry_run:
+        return "dry-run"
+    return out.strip().splitlines()[-1] if out.strip() else "ok"
+
+
 def ph_pyinstaller(ctx: Ctx) -> str:
     spec = (BACKEND / "backend.spec").read_text(encoding="utf-8")
     if IS_WIN and not re.search(r"console\s*=\s*False", spec):
@@ -516,6 +526,7 @@ PHASES = [
     ("typecheck", ph_typecheck),
     ("rehearsal_src", ph_rehearsal_src),
     ("frontend", ph_frontend),
+    ("skills_src", ph_skills_src),
     ("pyinstaller", ph_pyinstaller),
     ("rehearsal_frozen", ph_rehearsal_frozen),
     ("tauri", ph_tauri),
@@ -538,7 +549,7 @@ def enabled(name: str, a: argparse.Namespace) -> bool:
         return not a.skip_tests
     if name.startswith("rehearsal"):
         return not a.skip_rehearsal
-    if name in ("frontend", "pyinstaller", "tauri"):
+    if name in ("frontend", "skills_src", "pyinstaller", "tauri"):
         return not a.skip_build
     return not a.no_install  # backup, install, launch, smoke, shutdown
 

@@ -52,7 +52,9 @@ def _remove_plugin(entry: dict) -> None:
         with session_scope() as db:
             row = repo.get_skill(db, name)
             if row is not None:
-                row.status = SkillStatus.archived
+                # Папка навыка уже удалена: строка со статусом archived осталась бы серым тумблером в Skills
+                # навсегда (GET /skills отдаёт и архивные). Повторный импорт создаёт строку заново.
+                db.delete(row)
     names = set(entry.get("servers", []))
     if names:
         save_servers([s for s in load_servers() if s.get("name") not in names])
