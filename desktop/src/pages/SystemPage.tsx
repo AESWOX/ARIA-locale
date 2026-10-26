@@ -335,6 +335,23 @@ export default function SystemPage() {
     }
   };
 
+  // ── Clean test data (следы smoke-прогонов e2e*) ───────────────────
+  const [cleaningTestData, setCleaningTestData] = useState(false);
+  const runCleanTestData = useCallback(async () => {
+    setCleaningTestData(true);
+    try {
+      const res = await api.cleanTestData();
+      showToast(
+        `Removed ${res.skills.length} skill(s), ${res.sessions} chat(s), ${res.mcp_servers.length} MCP server(s)`,
+        "success",
+      );
+    } catch (e) {
+      showToast(`Clean test data failed: ${e}`, "error");
+    } finally {
+      setCleaningTestData(false);
+    }
+  }, [showToast]);
+
   // ── Debug share ────────────────────────────────────────────────────
   // Unlike the fire-and-forget ops above, `debug share` produces shareable
   // paste URLs that are the whole point — so we surface them as real,
@@ -1077,6 +1094,30 @@ export default function SystemPage() {
             </Button>
             <Button size="sm" ghost prefix={<RotateCw className="h-3.5 w-3.5" />} onClick={() => runOp(api.runConfigMigrate, "Config migrate")}>
               Migrate config
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
+            <div className="flex items-start gap-2">
+              <Trash2 className="h-4 w-4 mt-0.5 text-muted-foreground" />
+              <div className="flex flex-col">
+                <span className="text-sm font-medium">Clean test data</span>
+                <span className="text-xs text-muted-foreground max-w-prose">
+                  Removes skills, chats and the MCP server left behind by smoke
+                  runs (names starting with e2e, the PONG and smoke-test colour
+                  chats). Your own data is not touched.
+                </span>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              disabled={cleaningTestData}
+              prefix={cleaningTestData ? <Spinner className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+              onClick={() => void runCleanTestData()}
+            >
+              {cleaningTestData ? "Cleaning…" : "Clean test data"}
             </Button>
           </CardContent>
         </Card>

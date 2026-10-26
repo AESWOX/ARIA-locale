@@ -91,14 +91,16 @@ _SMALL_TALK: frozenset[str] = frozenset({
     "дякую", "дякую вам", "пока", "до свидания", "до побачення", "бувай", "ок", "окей", "хорошо",
     "ладно", "понял", "понятно", "ясно", "ага", "угу", "да", "нет", "тест", "проверка",
     "как дела", "как ты", "как жизнь", "что нового", "як справи", "як ти",
+    "ку", "бро", "здарова", "здаров", "здоров", "йо", "хелло", "салам", "приветствую", "дароу",
     # en
     "hi", "hii", "hello", "hey", "heya", "yo", "sup", "hola", "good morning", "good afternoon",
     "good evening", "good night", "thanks", "thank you", "thx", "ty", "bye", "goodbye", "cya",
     "ok", "okay", "k", "got it", "cool", "yes", "no", "test", "testing", "ping",
     "how are you", "how are you doing", "hows it going", "whats up", "what's up",
+    "bro", "hiya", "howdy", "greetings",
 })
-_GREETING_HEADS = frozenset({"hi", "hello", "hey", "привет", "здравствуйте", "привіт"})
-_VOCATIVES = frozenset({"there", "all", "everyone", "claude", "aria", "bot", "друзья", "всем", "ария", "бот", "assistant", "ассистент"})
+_GREETING_HEADS = frozenset({"hi", "hello", "hey", "yo", "sup", "привет", "здравствуйте", "привіт", "ку", "хай", "здарова", "здаров", "йо", "хелло", "салам", "прив"})
+_VOCATIVES = frozenset({"there", "all", "everyone", "claude", "aria", "bot", "друзья", "всем", "ария", "бот", "assistant", "ассистент", "бро", "bro", "братан", "брат", "чувак", "dude", "man", "mate", "бродяга"})
 _PUNCT_RE = re.compile(r"[^\w\s']", re.UNICODE)
 
 

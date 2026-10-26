@@ -29,7 +29,7 @@ def make_engine(dsn: str | None = None):
         def _set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
 
     return engine
@@ -115,3 +115,24 @@ def session_scope() -> Iterator[OrmSession]:
         raise
     finally:
         db.close()
+
+
+def release_write_lock(db) -> None:
+    """Коммитит накопленные записи перед долгим вызовом модели (BUG-5).
+
+    SQLite допускает одного писателя: сессия, сделавшая flush и ушедшая ждать ответ модели на минуту,
+    держит блокировку записи, и остальные запросы стоят до busy_timeout («database is locked»).
+    Вызывать прямо перед `await router.route_chat(...)`.
+    """
+    if db is None:
+        return
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001 - блокировка не должна ронять сам вызов модели
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        import logging
+
+        logging.getLogger("local_agent.db").warning("release_write_lock: commit failed", exc_info=True)

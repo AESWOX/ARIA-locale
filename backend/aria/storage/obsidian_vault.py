@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from aria.config import get_settings
+from aria.textio import read_text_auto
 
 
 def vault_root() -> Path:
@@ -76,7 +77,7 @@ def read_note(note_name: str) -> dict:
     if not candidates:
         return {"found": False, "content": None, "path": None}
     path = candidates[0]
-    text = path.read_text(errors="replace")
+    text = read_text_auto(path)
     return {
         "found": True,
         "content": text,

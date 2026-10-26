@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from aria.textio import read_text_auto
+
 
 class PathEscapeError(Exception):
     pass
@@ -27,7 +29,7 @@ async def file_read(input_json: dict, sandbox_root: str) -> dict:
         return {"exists": False, "content": None}
     if path.is_dir():
         return {"exists": True, "is_dir": True, "entries": sorted(p.name for p in path.iterdir())}
-    content = path.read_text(errors="replace")
+    content = read_text_auto(path)
     return {"exists": True, "is_dir": False, "content": content[:200_000]}
 
 

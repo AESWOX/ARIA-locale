@@ -75,6 +75,15 @@ def _external_url_ok(url: str) -> bool:
     return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
+@router.post("/system/clean-test-data")
+async def clean_test_data_route(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Settings -> «Clean test data»: убирает навыки, чаты и MCP-сервер, оставшиеся от smoke-прогонов (e2e*)."""
+    from aria.core.testdata import clean_test_data
+
+    result = await asyncio.to_thread(clean_test_data)
+    return {"ok": True, **result}
+
+
 @router.post("/system/open-external")
 async def open_external(body: dict[str, Any], _: str = Depends(require_runtime_token)) -> dict[str, Any]:
     """Открыть ссылку в браузере по умолчанию.

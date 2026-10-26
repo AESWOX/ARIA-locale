@@ -57,6 +57,13 @@ from aria.routers.skills import router as skills_router
 from aria.routers.storage import router as storage_router
 from aria.routers.ops import router as ops_router
 from aria.routers.stubs import router as stubs_router
+from aria.logsetup import (
+    LOG_FORMAT as _LOG_FORMAT,
+    QuietAccessFilter as _QuietAccessFilter,
+    TaskTagFilter as _TaskTagFilter,
+    install_record_factory as _install_record_factory,
+    install_subsystem_handlers as _install_subsystem_handlers,
+)
 from aria.logredact import RedactingFormatter as _RedactingFormatter, quiet_library_loggers as _quiet_library_loggers
 from aria.routers.webhooks import router as webhooks_router
 from aria.routers.system import router as system_router
@@ -73,40 +80,27 @@ _LOG_FILE = os.path.join(_LOG_DIR, "backend.log")
 _file_handler = logging.handlers.RotatingFileHandler(
     _LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
 )
-_file_handler.setFormatter(
-    _RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-)
+_install_record_factory()
+_file_handler.setFormatter(_RedactingFormatter(_LOG_FORMAT))
 _file_handler.setLevel(logging.INFO)
 
 
 
-class _QuietPollingFilter(logging.Filter):
-    """UI опрашивает /chat/sessions, /status и т.п. каждые 3-10 с: успешные GET забивали лог
-    и прятали настоящие события. Ошибки и не-GET остаются. ARIA_LOG_ACCESS=1 возвращает всё."""
-
-    _PREFIXES = ("/chat/sessions", "/status", "/sessions/", "/analytics/usage", "/assets/", "/favicon.ico", "/logs", "/api/logs")
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.name != "uvicorn.access" or os.environ.get("ARIA_LOG_ACCESS") == "1":
-            return True
-        args = record.args
-        if isinstance(args, tuple) and len(args) == 5:
-            _client, method, path, _http, status = args
-            try:
-                ok = int(status) < 400
-            except (TypeError, ValueError):
-                return True
-            if method == "GET" and ok and str(path).startswith(self._PREFIXES):
-                return False
-        return True
+# Успешные HTTP-запросы (коды < 400) не пишутся вообще: UI опрашивает бэкенд каждые 2-3 с.
+# Имя класса сохранено ради тестов и внешних ссылок.
+_QuietPollingFilter = _QuietAccessFilter
 
 
+_file_handler.addFilter(_TaskTagFilter())
 _file_handler.addFilter(_QuietPollingFilter())
 
 _root_logger = logging.getLogger()
 _root_logger.addHandler(_file_handler)
 _root_logger.setLevel(logging.INFO)
 _quiet_library_loggers()  # M5: httpx пишет URL с токеном Telegram на INFO
+
+# Отдельные файлы по подсистемам (tasks.log, llm.log, http.log, errors.log) рядом с backend.log
+_install_subsystem_handlers(_paths.log_dir(), _RedactingFormatter)
 
 # uvicorn пишет через свои логгеры с propagate=False ("uvicorn", "uvicorn.access").
 # "uvicorn.error" пропагирует в "uvicorn" — вешать хендлер и на него = каждая строка дважды.

@@ -34,6 +34,7 @@ from aria.core.plan_validator import (
     validate_plan,
 )
 from aria.core.secretscanner import ScanResult, assert_no_secrets, scan_changed_files
+from aria.db.base import release_write_lock
 from aria.db.enums import PLAN_PHASES, AuditVerdict, IntegrityVerdict, PlanStatus, TaskStatus
 from aria.db.models import IntegrityEvent, Task, TaskPlan, ToolCall
 from aria.storage.obsidian_vault import search_vault, vault_root, write_note_atomic
@@ -585,6 +586,7 @@ async def _stage2_plan(
                         ),
                     ),
                 ]
+                release_write_lock(session)  # BUG-5: план на reasoning-модели идёт ~100 с, писатель не держим
                 result = await router.route_chat(
                     "premium_reasoning", messages, tools=[],
                     allow_degrade=True, db=session,
@@ -1297,6 +1299,7 @@ async def _llm_generate_content(
         ),
         ChatMessage(role="user", content=objective),
     ]
+    release_write_lock(session)
     result = await router.route_chat(
         "subagent_execution", messages, tools=[],
         allow_degrade=True, db=session,
@@ -1324,6 +1327,7 @@ async def _llm_generate_command(
         ),
         ChatMessage(role="user", content=objective),
     ]
+    release_write_lock(session)
     result = await router.route_chat(
         "subagent_execution", messages, tools=[],
         allow_degrade=True, db=session,

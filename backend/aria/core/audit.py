@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session as OrmSession
 from aria.config import get_settings
 from aria.core import timing
 from aria.db import models as m
+from aria.db.base import release_write_lock
 from aria.db import repository as repo
 from aria.core.criteria_audit import (
     STATUS_FAIL,
@@ -287,6 +288,7 @@ async def run_audit(
                         ),
                     ),
                 ]
+                release_write_lock(db)  # BUG-5
                 with timing.stage("audit_model_call"):  # вторая модель отдельно от структурной проверки
                     result = await router.route_chat(
                         auditor_class, messages, tools=[], allow_degrade=True, db=db, prefer_provider_id=auditor_prefer,

@@ -28,6 +28,7 @@ from aria.core.events import event_bus
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
+from aria.logsetup import reset_task as reset_task_log_context, set_task as set_task_log_context
 from aria.db.enums import TaskStatus
 
 logger = logging.getLogger("local_agent.taskrunner")
@@ -387,6 +388,13 @@ class TaskRunner:
 
     async def _run(self, job: Job) -> dict[str, Any]:
         key = str(job.task_id)
+        _task_log_token = set_task_log_context(key)  # task_id в каждой строке лога этой задачи
+        try:
+            return await self._run_logged(job, key)
+        finally:
+            reset_task_log_context(_task_log_token)
+
+    async def _run_logged(self, job: Job, key: str) -> dict[str, Any]:
         event_bus.emit("task.started", {"task_id": key, "mode": job.mode, "source": job.source}, session_id=None, task_id=job.task_id)
         try:
             if job.approval_item_id is not None:

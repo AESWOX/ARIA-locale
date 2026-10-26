@@ -124,7 +124,10 @@ def test_polling_access_lines_are_hidden_but_errors_stay(monkeypatch):
     assert f.filter(_access("GET", "/chat/sessions", 200)) is False
     assert f.filter(_access("GET", "/status", 200)) is False
     assert f.filter(_access("GET", "/chat/sessions", 500)) is True
-    assert f.filter(_access("POST", "/chat/sessions/x/send", 200)) is True
+    # 0016: успешные запросы не пишутся вообще, любой путь и метод; остаются коды 400 и выше
+    assert f.filter(_access("POST", "/chat/sessions/x/send", 200)) is False
+    assert f.filter(_access("GET", "/tasks/abc/plan", 200)) is False
+    assert f.filter(_access("POST", "/chat/sessions/x/send", 500)) is True
     assert f.filter(logging.LogRecord("aria.core", logging.INFO, __file__, 1, "msg", (), None)) is True
     monkeypatch.setenv("ARIA_LOG_ACCESS", "1")
     assert f.filter(_access("GET", "/status", 200)) is True
