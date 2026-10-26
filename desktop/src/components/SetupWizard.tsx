@@ -69,6 +69,10 @@ const EN: typeof RU = {
   },
 };
 
+// The kit Button sets line-height 0: if a label wraps, its lines are drawn on top of
+// each other (UI-1: "Skipmpowfor", "Chegk"). Labels must never wrap or shrink.
+const FOOTER_BTN = "whitespace-nowrap shrink-0";
+
 const STEPS: Step[] = ["provider", "key", "model", "done"];
 
 export function SetupWizard({ onDone }: { onDone: () => void }) {
@@ -213,28 +217,28 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
 
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
 
-          <div className="flex items-center justify-between gap-2 pt-1">
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
             {step !== "done" ? (
-              <Button ghost onClick={onDone} className="text-muted-foreground">{tx.skip}</Button>
+              <Button ghost onClick={onDone} className="text-muted-foreground whitespace-nowrap shrink-0">{tx.skip}</Button>
             ) : (
               <span />
             )}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {(step === "key" || step === "model") && (
-                <Button outlined disabled={busy} onClick={() => { setError(null); setStep(step === "key" ? "provider" : "key"); }}>
+                <Button outlined className={FOOTER_BTN} disabled={busy} onClick={() => { setError(null); setStep(step === "key" ? "provider" : "key"); }}>
                   {tx.back}
                 </Button>
               )}
-              {step === "provider" && <Button disabled={!provider} onClick={() => setStep("key")}>{tx.next}</Button>}
+              {step === "provider" && <Button className={FOOTER_BTN} disabled={!provider} onClick={() => setStep("key")}>{tx.next}</Button>}
               {step === "key" && (
-                <Button disabled={busy || key.trim().length < 8} onClick={validate}>
+                <Button className={FOOTER_BTN} disabled={busy || key.trim().length < 8} onClick={validate}>
                   {busy ? <><Loader2 className="h-4 w-4 animate-spin" /> {tx.checking}</> : tx.check}
                 </Button>
               )}
               {step === "model" && (
-                <Button disabled={busy || !model} onClick={apply}>{busy ? tx.saving : tx.save}</Button>
+                <Button className={FOOTER_BTN} disabled={busy || !model} onClick={apply}>{busy ? tx.saving : tx.save}</Button>
               )}
-              {step === "done" && <Button onClick={onDone}>{tx.start}</Button>}
+              {step === "done" && <Button className={FOOTER_BTN} onClick={onDone}>{tx.start}</Button>}
             </div>
           </div>
 
