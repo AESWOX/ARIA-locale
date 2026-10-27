@@ -71,6 +71,7 @@ class Skip(Exception):
     pass
 
 
+LLM_ON = False
 RESULTS: list[dict] = []
 DETAILS: dict[str, object] = {}
 CREATED: list[tuple[str, str]] = []   # (метод, путь) для cleanup
@@ -537,16 +538,23 @@ def flow_chat(api: Api):
         expect(api, "GET", f"/chat/sessions/{sid}/messages")
         expect(api, "GET", f"/chat/sessions/{sid}/profile", soft=True)
     check("flows", "chat: создание сессии и чтение сообщений", make)
-    check("flows", "chat: без ключа отправка отвечает 503, а не 500", lambda: _chat_send_nokey(api, made))
+    check("flows", "chat: отправка сообщения модели (200, либо честная ошибка провайдера)", lambda: _chat_send(api, made))
 
 
-def _chat_send_nokey(api: Api, made: dict):
+def _chat_send(api: Api, made: dict):
+    """Настоящая отправка в модель: тратит токены, поэтому только при --llm on.
+    Ждём ответ или честную ошибку провайдера (502/503), но не 500."""
+    if not LLM_ON:
+        raise Skip("отправка в модель только при --llm on (иначе уходит реальный запрос и тратятся токены)")
     sid = find_id(made, ("session_id", "id"))
     if not sid:
         raise Skip("нет сессии")
-    status, data = api.call("POST", f"/chat/sessions/{sid}/send", {"content": "ping e2e"}, timeout=120)
-    if status >= 500 and status != 503:
-        raise AssertionError(f"{status}: {short(data)}")
+    status, data = api.call("POST", f"/chat/sessions/{sid}/send", {"content": "ping e2e"}, timeout=180)
+    if status == 200:
+        return
+    if status in (502, 503):
+        raise Warn(f"{status}: {short(data)} (ошибка провайдера или пустой ответ модели, не дефект ARIA)")
+    raise AssertionError(f"{status}: {short(data)}")
 
 
 def st_flows(ctx):
@@ -714,6 +722,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"FAIL: токен не найден: {exc}. Передай --token")
         return 1
+    global LLM_ON
+    LLM_ON = args.llm == "on"
     api = Api(base, token)
     repo = Path(args.repo) if args.repo else HERE.parents[1]
     st, spec = api.call("GET", "/openapi.json")
