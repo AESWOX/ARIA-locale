@@ -29,6 +29,8 @@ def _root() -> str:
 
 def _resolve(rel_path: str) -> tuple[str, str]:
     """Return (absolute_path, normalized_rel_path) for a sandbox-relative path."""
+    if not isinstance(rel_path, str):
+        raise HTTPException(status_code=422, detail="path must be a string")
     clean = rel_path.replace("\\", "/").strip("/")
     parts = [p for p in clean.split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts):
@@ -120,7 +122,10 @@ async def read_file(path: str = Query(...), _: str = Depends(require_runtime_tok
 
 @router.post("/files/mkdir")
 async def create_directory(body: dict[str, Any], _: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    path = (body.get("path") or "").strip()
+    raw = body.get("path") or ""
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=422, detail="path must be a string")
+    path = raw.strip()
     if not path:
         raise HTTPException(status_code=422, detail="path is required")
     abs_path, rel = _resolve(path)
@@ -170,11 +175,17 @@ async def upload_stream(
 
 @router.delete("/files")
 async def delete_file(body: dict[str, Any], _: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    path = (body.get("path") or "").strip()
+    raw = body.get("path") or ""
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=422, detail="path must be a string")
+    path = raw.strip()
     if not path:
         raise HTTPException(status_code=422, detail="path is required")
     recursive = bool(body.get("recursive", False))
     abs_path, rel = _resolve(path)
+    if not rel:
+        # "/", ".", "./" all resolve to the sandbox root: never delete the root itself.
+        raise HTTPException(status_code=400, detail="cannot delete the managed root")
     if not os.path.lexists(abs_path):
         raise HTTPException(status_code=404, detail=f"no such path: {rel}")
     try:

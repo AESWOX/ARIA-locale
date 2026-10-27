@@ -81,8 +81,10 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
             "stdout": stdout.decode(errors="replace")[-20000:],
             "stderr": stderr.decode(errors="replace")[-20000:],
         }
-    except asyncio.TimeoutError:
-        await _terminate_then_kill(proc)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Cancel/Stop must not leave the child running (it used to survive until the OS reaped it).
+        if proc.returncode is None:
+            await asyncio.shield(_terminate_then_kill(proc))
         raise
 
 
