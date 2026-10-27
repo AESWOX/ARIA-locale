@@ -2,6 +2,8 @@
 #
 # Порог --cov-fail-under задаётся в одном месте (COV_MIN) и растёт по плану DoD B3: 55 -> 60 -> 70 -> 80 -> 90.
 # Тесты гоняются в СЛУЧАЙНОМ порядке (pytest-randomly): падение «только в некоторых порядках» — это баг теста (B7).
+# Seed один на все джобы запуска (github.run_id) и печатается в лог: упавший порядок воспроизводится локально
+# командой  python -m pytest tests -q -p randomly --randomly-seed=<число из лога>.
 # Сеть и реальные ключи не нужны: conftest.py создаёт временную БД/vault и вычищает ключи провайдеров из окружения.
 
 name: backend-tests
@@ -49,7 +51,8 @@ jobs:
         working-directory: backend
         shell: bash
         run: |
-          python -m pytest tests -q --cov=aria --cov-branch --cov-report=term --cov-report=xml \
+          echo "Using --randomly-seed=${GITHUB_RUN_ID}"
+          python -m pytest tests -q -p randomly --randomly-seed="${GITHUB_RUN_ID}" --cov=aria --cov-branch --cov-report=term --cov-report=xml \
             --cov-fail-under="${COV_MIN}"
 
       - name: pytest (fixed order must give the same result)
