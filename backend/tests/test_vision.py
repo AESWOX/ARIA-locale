@@ -8,7 +8,10 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from aria.tools.handlers.vision import vision_analyze, _detect_mime
 
@@ -22,6 +25,22 @@ SAMPLE_GEMINI_RESPONSE = {
 }
 
 SAMPLE_ERROR_RESPONSE = json.dumps({"error": {"message": "API key not valid"}})
+
+
+@pytest.fixture
+def no_deepseek_key():
+    """Settings without a DeepSeek key, whatever other tests left in env or the key store.
+
+    vision.py reads the DeepSeek key through get_settings(), not through secret_provider,
+    so patching get_key_list alone does not isolate it (CI py3.12 failure, run #17).
+    """
+    stub = SimpleNamespace(
+        deepseek_api_key_resolved="",
+        deepseek_base_url="https://api.deepseek.com",
+        deepseek_vision_model="deepseek-flash",
+    )
+    with patch("aria.config.get_settings", return_value=stub):
+        yield
 
 
 class TestVisionMimeDetection:
@@ -75,7 +94,7 @@ class TestVisionAnalyzeOffline:
         assert "text" in result
         assert result["text"] == "This is a red square pixel."
 
-    async def test_http_error_triggers_key_rotation(self):
+    async def test_http_error_triggers_key_rotation(self, no_deepseek_key):
         from urllib.error import HTTPError
         with patch("aria.secrets.secret_provider.get_key_list", return_value=["bad-key", "bad-key-2"]):
             with patch("urllib.request.urlopen", side_effect=[
@@ -85,9 +104,9 @@ class TestVisionAnalyzeOffline:
                 result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
 
         assert "error" in result
-        assert "429" in result["error"] or "Too Many" in result.get("error", "")
+        assert "429" in result["error"]
 
-    async def test_no_keys_returns_error(self):
+    async def test_no_keys_returns_error(self, no_deepseek_key):
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
             result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
         assert "error" in result
@@ -172,7 +191,7 @@ class TestVisionDeepSeekBackend:
         assert "error" in result and "PNG/JPEG/WebP/GIF" in result["error"]
         mock.assert_not_called()
 
-    async def test_no_keys_at_all_names_every_option(self, monkeypatch):
+    async def test_no_keys_at_all_names_every_option(self, monkeypatch, no_deepseek_key):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         with patch("aria.secrets.secret_provider.get_key_list", return_value=[]):
             result = await vision_analyze({"file_path": str(TEST_IMAGE)}, sandbox_root=SANDBOX)
