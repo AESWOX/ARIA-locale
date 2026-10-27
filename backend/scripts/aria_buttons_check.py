@@ -370,10 +370,20 @@ def flow_files(api: Api):
     check("flows", "files: список и чтение", lambda: (
         expect(api, "GET", f"/files?path={d}"), expect(api, "GET", f"/files/read?path={d}/%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82.txt"), None)[-1])
     check("flows", "files: выход за песочницу запрещён", lambda: expect(api, "GET", "/files?path=../x", ok=(400,)) and None)
-    check("flows", "files: корень песочницы не удаляется", lambda: expect(
-        api, "DELETE", "/files", {"path": "/", "recursive": True}, ok=(400,)) and None)
+    check("flows", "files: корень песочницы не удаляется (без recursive, проба безопасна)", lambda: _root_delete_probe(api))
     check("flows", "files: удаление папки требует recursive", lambda: expect(api, "DELETE", "/files", {"path": d}, ok=(409,)) and None)
     check("flows", "files: удаление recursive", lambda: expect(api, "DELETE", "/files", {"path": d, "recursive": True}) and None)
+
+
+def _root_delete_probe(api: Api):
+    """НИКОГДА не передавать recursive=true на живом приложении: сборка без фикса 0018a сотрёт песочницу.
+    С фиксом корень отклоняется кодом 400 до проверки recursive; без фикса ответ 409 (каталог не пуст)."""
+    status, data = api.call("DELETE", "/files", {"path": "/", "recursive": False}, timeout=30)
+    if status == 400:
+        return
+    if status == 409:
+        raise Warn("корень отклонён только требованием recursive: в установленной сборке нет фикса 0018a, нужна пересборка")
+    raise AssertionError(f"DELETE / (recursive=false) -> {status}: {short(data)}")
 
 
 def flow_cron(api: Api):
@@ -469,7 +479,7 @@ def _selftest(api: Api):
 def _version(api: Api):
     txt = json.dumps(expect(api, "GET", "/system/stats"))
     if "0.0.0" in txt:
-        raise AssertionError("в /system/stats версия 0.0.0 (dev): метаданные пакета не найдены")
+        raise AssertionError("в /system/stats версия 0.0.0 (dev): в установленной сборке нет фикса 0017d, нужна пересборка")
 
 
 def flow_settings(api: Api):
