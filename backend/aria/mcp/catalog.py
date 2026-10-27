@@ -39,7 +39,7 @@ CATALOG: list[dict[str, Any]] = [
         "args": ["mcp-server-fetch"],
         "url": None,
         "read_tools": [],
-        "post_install": "Requires uv (uvx) on this machine. Page text is untrusted data.",
+        "post_install": "Runs through uv (uvx): the installer puts it next to the app, otherwise install uv. Page text is untrusted data.",
     },
     {
         "name": "memory",

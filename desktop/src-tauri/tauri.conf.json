@@ -42,8 +42,10 @@
     "targets": "all",
     "icon": ["icons/icon.ico"],
     "externalBin": ["bin/backend"],
+    "resources": ["install_uv.ps1"],
     "windows": {
-      "webviewInstallMode": { "type": "embedBootstrapper" }
+      "webviewInstallMode": { "type": "embedBootstrapper" },
+      "nsis": { "installerHooks": "installer-hooks.nsh" }
     }
   }
 }

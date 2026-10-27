@@ -17,11 +17,11 @@ import itertools
 import json
 import logging
 import os
-import shutil
 from typing import Any, Callable
 
 import httpx
 from aria.core.winproc import NO_WINDOW
+from aria.mcp.executables import resolve_executable
 
 logger = logging.getLogger("local_agent.mcp")
 
@@ -82,7 +82,7 @@ class StdioTransport:
 
     async def start(self) -> None:
         # На Windows «npx» — это npx.cmd; create_subprocess_exec сам расширение не подставляет.
-        exe = shutil.which(self.command) or self.command
+        exe = resolve_executable(self.command)
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 exe, *self.args,
