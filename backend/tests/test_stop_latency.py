@@ -64,7 +64,9 @@ def test_cancel_of_running_task_finishes_within_budget():
     assert _status_of(task_id) == "cancelled"
 
 
-def test_cancel_stops_all_parallel_tasks_within_budget():
+def test_cancel_stops_all_parallel_tasks_within_budget(monkeypatch):
+    # TaskRunner drops to 1 worker when little RAM is free; this test needs all 3 running in parallel.
+    monkeypatch.setattr("aria.core.taskrunner.available_ram_mb", lambda: None)
     ids = [_make_task(objective=f"stop latency parallel {i}") for i in range(3)]
     runner = _runner(3)
     took: list[float] = []
