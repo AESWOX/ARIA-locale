@@ -332,6 +332,39 @@ async def chat_messages(session_id: uuid.UUID, _: str = Depends(require_runtime_
         return [serialize_message(msg) for msg in repo.list_messages(db, session_id, limit=1000)]
 
 
+@router.get("/sessions/{session_id}/usage")
+async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Контекст сессии для шапки чата. Стоимость не считается: в базе нет учёта токенов ответов.
+
+    ``context_tokens``: оценка токенов истории, которая реально уходит в промпт (без сжатых сообщений).
+    ``session_cost``: всегда None, ``priced``: False, чтобы UI не показывал выдуманное число.
+    """
+    with session_scope() as db:
+        if repo.get_session(db, session_id) is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        history = repo.list_messages_for_prompt(db, session_id)
+        context_tokens = compression.history_tokens(history)
+        profile = runprofile.get_profile(db, session_id) or runprofile.builtin_profile()
+        main_seat = profile.get("main") if isinstance(profile, dict) else None
+        provider_id = main_seat.get("model") if isinstance(main_seat, dict) else None  # в профиле это provider_id
+        context_window: int | None = None
+        if provider_id:
+            windows = [
+                int(row.context_window)
+                for row in repo.list_provider_models(db, provider_id)
+                if row.context_window
+            ]
+            context_window = min(windows) if windows else None  # минимум: не занижаем заполненность
+    context_pct = round(context_tokens / context_window * 100, 1) if context_window else None
+    return {
+        "context_tokens": context_tokens,
+        "context_window": context_window,
+        "context_pct": context_pct,
+        "session_cost": None,
+        "priced": False,
+    }
+
+
 @router.post("/sessions/{session_id}/send")
 async def chat_send(
     session_id: uuid.UUID,
