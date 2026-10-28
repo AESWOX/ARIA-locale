@@ -564,6 +564,9 @@ export const api = {
     }),
   clearLogs: () =>
     fetchJSON<{ ok: boolean; cleared: boolean; removed_backups: number }>("/api/logs/clear", { method: "POST" }),
+  openLogsFolder: () =>
+    fetchJSON<{ ok: boolean; path: string }>("/api/logs/open-folder", { method: "POST" }),
+  diagnosticsUrl: () => "/api/logs/diagnostics",
   getAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),
