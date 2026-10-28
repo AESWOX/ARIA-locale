@@ -135,4 +135,4 @@ def release_write_lock(db) -> None:
             pass
         import logging
 
-        logging.getLogger("local_agent.db").warning("release_write_lock: commit failed", exc_info=True)
+        logging.getLogger("local_agent.db").error("release_write_lock: commit failed", exc_info=True)
