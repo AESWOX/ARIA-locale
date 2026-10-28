@@ -1,40 +1,23 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
-import { Check, ShieldCheck, Trash2, Users, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { ShieldCheck, Users } from "lucide-react";
 import { Badge } from "@vendor/ui/ui/components/badge";
-import { Button } from "@vendor/ui/ui/components/button";
 import { Spinner } from "@vendor/ui/ui/components/spinner";
 import { H2 } from "@vendor/ui/ui/components/typography/h2";
 import { api } from "@/lib/api";
 import type { PairingResponse, PairingUser } from "@/lib/api";
-import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useToast } from "@vendor/ui/hooks/use-toast";
-import { useConfirmDelete } from "@vendor/ui/hooks/use-confirm-delete";
 import { Toast } from "@vendor/ui/ui/components/toast";
 import { Card, CardContent } from "@vendor/ui/ui/components/card";
-import { usePageHeader } from "@/contexts/usePageHeader";
 
 function getUserKey(user: PairingUser): string {
   return `${user.platform}:${user.user_id}`;
-}
-
-function splitUserKey(key: string): { platform: string; user_id: string } {
-  const idx = key.indexOf(":");
-  if (idx === -1) return { platform: "", user_id: key };
-  return { platform: key.slice(0, idx), user_id: key.slice(idx + 1) };
-}
-
-function getUserLabel(user: PairingUser): string {
-  return user.user_name || user.user_id;
 }
 
 export default function PairingPage() {
   const [pending, setPending] = useState<PairingUser[]>([]);
   const [approved, setApproved] = useState<PairingUser[]>([]);
   const [loading, setLoading] = useState(true);
-  const [approving, setApproving] = useState<string | null>(null);
-  const [clearing, setClearing] = useState(false);
   const { toast, showToast } = useToast();
-  const { setEnd } = usePageHeader();
 
   const loadPairing = useCallback(() => {
     api
@@ -51,78 +34,6 @@ export default function PairingPage() {
     loadPairing();
   }, [loadPairing]);
 
-  const handleApprove = async (user: PairingUser) => {
-    if (!user.code) {
-      showToast("Missing pairing code", "error");
-      return;
-    }
-    const key = getUserKey(user);
-    setApproving(key);
-    try {
-      await api.approvePairing(user.platform, user.code);
-      showToast(`Approved: "${getUserLabel(user)}"`, "success");
-      loadPairing();
-    } catch (e) {
-      showToast(`Error: ${e}`, "error");
-    } finally {
-      setApproving(null);
-    }
-  };
-
-  const handleClearPending = async () => {
-    if (!window.confirm("Clear all pending pairing requests?")) return;
-    setClearing(true);
-    try {
-      const res = await api.clearPendingPairing();
-      showToast(`Cleared ${res.cleared} pending request(s)`, "success");
-      loadPairing();
-    } catch (e) {
-      showToast(`Error: ${e}`, "error");
-    } finally {
-      setClearing(false);
-    }
-  };
-
-  const userRevoke = useConfirmDelete({
-    onDelete: useCallback(
-      async (key: string) => {
-        const { platform, user_id } = splitUserKey(key);
-        const user = approved.find((u) => getUserKey(u) === key);
-        try {
-          await api.revokePairing(platform, user_id);
-          showToast(
-            `Revoked: "${user ? getUserLabel(user) : user_id}"`,
-            "success",
-          );
-          loadPairing();
-        } catch (e) {
-          showToast(`Error: ${e}`, "error");
-          throw e;
-        }
-      },
-      [approved, loadPairing, showToast],
-    ),
-  });
-
-  // Put "Clear pending" button in page header
-  useLayoutEffect(() => {
-    setEnd(
-      <Button
-        className="uppercase"
-        size="sm"
-        onClick={handleClearPending}
-        disabled={clearing}
-        prefix={clearing ? <Spinner /> : <Trash2 className="h-4 w-4" />}
-      >
-        Clear pending
-      </Button>,
-    );
-    return () => {
-      setEnd(null);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setEnd, clearing]);
-
   if (loading) {
     return (
       <div className="flex items-center justify-center py-24">
@@ -131,27 +42,9 @@ export default function PairingPage() {
     );
   }
 
-  const pendingRevokeUser = userRevoke.pendingId
-    ? approved.find((u) => getUserKey(u) === userRevoke.pendingId)
-    : null;
-
   return (
     <div className="flex flex-col gap-6">
       <Toast toast={toast} />
-
-      <DeleteConfirmDialog
-        open={userRevoke.isOpen}
-        onCancel={userRevoke.cancel}
-        onConfirm={userRevoke.confirm}
-        title="Revoke access"
-        description={
-          pendingRevokeUser
-            ? `"${getUserLabel(pendingRevokeUser)}" will lose access. This cannot be undone.`
-            : "This user will lose access. This cannot be undone."
-        }
-        confirmLabel="Revoke"
-        loading={userRevoke.isDeleting}
-      />
 
       {/* Pending requests */}
       <div className="flex flex-col gap-3">
@@ -192,24 +85,6 @@ export default function PairingPage() {
                       <span>{user.age_minutes}m ago</span>
                     )}
                   </div>
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0">
-                  <Button
-                    size="sm"
-                    className="uppercase"
-                    onClick={() => handleApprove(user)}
-                    disabled={approving === key || !user.code}
-                    prefix={
-                      approving === key ? (
-                        <Spinner />
-                      ) : (
-                        <Check className="h-4 w-4" />
-                      )
-                    }
-                  >
-                    Approve
-                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -252,19 +127,6 @@ export default function PairingPage() {
                       {user.user_name}
                     </div>
                   )}
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0">
-                  <Button
-                    ghost
-                    size="icon"
-                    title="Revoke"
-                    aria-label="Revoke"
-                    className="text-destructive"
-                    onClick={() => userRevoke.requestDelete(key)}
-                  >
-                    <X />
-                  </Button>
                 </div>
               </CardContent>
             </Card>
