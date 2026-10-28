@@ -170,6 +170,40 @@ class _StripApiPrefixMiddleware:
 app.add_middleware(_StripApiPrefixMiddleware)
 
 
+# ── UI-12: перезагрузка окна на странице SPA, чей путь совпадает с маршрутом API ──
+# /sessions, /logs, /files, /config, /skills, /profiles, /env, /webhooks, /pairing, /plugins есть и в интерфейсе,
+# и в API. Обновление окна открывает такой адрес как документ (Accept: text/html, без токена), и раньше
+# отвечал маршрут API: JSON {"detail": "invalid runtime token"}. Теперь навигация браузера получает страницу
+# приложения. Запросы fetch (Accept */* или application/json) и запросы с токеном идут в API как раньше.
+_SPA_NAV_SKIP = ("/api", "/openapi.json", "/redoc")
+
+
+class _SpaNavigationMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("method") == "GET":
+            path = scope.get("path", "")
+            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            wants_html = headers.get(b"accept", b"").lower().startswith(b"text/html")
+            if (
+                wants_html
+                and b"x-local-agent-token" not in headers
+                and not any(path == p or path.startswith(p + "/") for p in _SPA_NAV_SKIP)
+            ):
+                candidate = _DIST_DIR / path.lstrip("/")
+                if path != "/" and candidate.is_file():
+                    response = FileResponse(candidate)
+                else:
+                    response = HTMLResponse(_render_index())
+                return await response(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+app.add_middleware(_SpaNavigationMiddleware)
+
+
 # ── HOST-гард (блок A / пункт HOST): чужой Host отбивается 400 до логики роутов ──
 def allowed_hosts() -> list[str]:
     """127.0.0.1 / localhost / testserver + ARIA_ALLOWED_HOSTS (через запятую)."""
