@@ -182,3 +182,16 @@ def _isolate_mcp_tool_registry():
     _drop_mcp_tools()
     yield
     _drop_mcp_tools()
+
+
+import pytest as _pytest  # noqa: E402
+
+
+@_pytest.fixture(autouse=True)
+def _reset_settings_cache_after_test():
+    """Settings is lru_cached: a test that builds it inside patch.dict(os.environ) would leak its keys
+    into the field fallback of deepseek_api_key_resolved for every later test (CI py3.12, run #17)."""
+    yield
+    from aria.config import get_settings
+
+    get_settings.cache_clear()
