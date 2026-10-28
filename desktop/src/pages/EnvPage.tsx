@@ -771,7 +771,6 @@ export default function EnvPage() {
       <div id="section-oauth">
         <OAuthProvidersCard
           onError={(msg) => showToast(msg, "error")}
-          onSuccess={(msg) => showToast(msg, "success")}
         />
       </div>
 
