@@ -8,9 +8,12 @@ Unknown logical names fall back to backend.log. Lines are filtered by level
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -184,3 +187,25 @@ async def clear_logs(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
             pass
     logging.getLogger("local_agent.logs").info("log cleared by user")
     return {"ok": True, "cleared": cleared, "removed_backups": removed}
+
+
+def _open_in_file_manager(path: Path) -> None:
+    """Открыть каталог в файловом менеджере системы (Windows: Проводник, macOS: Finder, Linux: xdg-open)."""
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])  # noqa: S603, S607
+    else:
+        subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607
+
+
+@router.post("/logs/open-folder")
+async def open_logs_folder(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Открыть каталог логов. Путь берётся только из log_dir(), из запроса не принимается."""
+    path = _paths.log_dir()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(_open_in_file_manager, path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not open the logs folder: {exc}") from exc
+    return {"ok": True, "path": str(path)}
