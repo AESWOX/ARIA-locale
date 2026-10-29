@@ -48,17 +48,70 @@ def test_get_config_hides_secrets_and_has_defaults(client):
     assert body["audit_max_attempts"] == 3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_is_secret сравнивает имена с учётом регистра: UPPERCASE-поля B2_KEY_ID, "
-    "B2_APPLICATION_KEY, LOCAL_AGENT_UI_PIN попадают в /config, /config/defaults и /config/schema",
-)
 def test_uppercase_secret_fields_are_not_exposed(client):
     for path, key in (("/config", None), ("/config/defaults", None), ("/config/schema", "fields")):
         body = client.get(path, headers=_h()).json()
         payload = body[key] if key else body
         leaked = [name for name in UPPERCASE_SECRETS if name in payload]
         assert leaked == [], f"{path} leaks {leaked}"
+    raw = client.get("/config/raw", headers=_h()).json()["yaml"]
+    leaked = [name for name in UPPERCASE_SECRETS if name in raw]
+    assert leaked == [], f"/config/raw leaks {leaked}"
+
+
+def test_config_endpoints_do_not_write_secret_values_to_logs(client, monkeypatch):
+    from aria import paths
+    from aria.config import get_settings
+
+    canary = "zzq-log-canary-42"
+    monkeypatch.setattr(get_settings(), "B2_APPLICATION_KEY", canary, raising=False)
+    client.get("/config", headers=_h())
+    client.get("/config/raw", headers=_h())
+    log_dir = paths.log_dir()
+    blob = ""
+    if log_dir.is_dir():
+        blob = "".join(
+            p.read_text(encoding="utf-8", errors="replace") for p in log_dir.glob("*.log")
+        )
+    assert canary not in blob
+
+
+def test_diagnostics_zip_masks_uppercase_secret_values(client, monkeypatch):
+    import io
+    import zipfile
+
+    from aria import paths
+    from aria.config import get_settings
+
+    values = {
+        "B2_KEY_ID": "keyid-zzq-987",
+        "B2_APPLICATION_KEY": "appkey-zzq-654",
+        "LOCAL_AGENT_UI_PIN": "pin-zzq-321",
+    }
+    settings = get_settings()
+    for name, value in values.items():
+        monkeypatch.setattr(settings, name, value, raising=False)
+        monkeypatch.setenv(name, value)
+    log_dir = paths.log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    probe = log_dir / "zzq-diagnostics.log"
+    probe.write_text(
+        "B2_APPLICATION_KEY=appkey-zzq-654 B2_KEY_ID=keyid-zzq-987 LOCAL_AGENT_UI_PIN=pin-zzq-321\n",
+        encoding="utf-8",
+    )
+    try:
+        r = client.get("/logs/diagnostics", headers=_h())
+        assert r.status_code == 200, r.text
+        archive = zipfile.ZipFile(io.BytesIO(r.content))
+        names = archive.namelist()
+        assert "system.json" in names and "zzq-diagnostics.log" in [n.split("/")[-1] for n in names]
+        blob = "\n".join(
+            archive.read(name).decode("utf-8", errors="replace") for name in names
+        )
+        leaked = [name for name, value in values.items() if value in blob]
+        assert leaked == [], f"diagnostics zip leaks {leaked}"
+    finally:
+        probe.unlink(missing_ok=True)
 
 
 def test_defaults_match_current_core_values(client):

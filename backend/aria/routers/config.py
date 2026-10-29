@@ -98,7 +98,8 @@ _CATEGORY_ORDER = [
 
 
 def _is_secret(name: str) -> bool:
-    return any(tok in name for tok in ("api_key", "apikey", "application_key", "key_id", "token", "pin"))
+    lowered = name.lower()
+    return any(tok in lowered for tok in ("api_key", "apikey", "application_key", "key_id", "token", "pin"))
 
 
 def _category_for(name: str) -> str:
