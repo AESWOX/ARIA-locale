@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 
@@ -201,7 +201,6 @@ def _next_run_after(expr: str, base: datetime) -> datetime | None:
 
 def _enqueue_scheduled_task(job_name: str, objective: str, role: str, tools: list, runner) -> str | None:
     """Незарегистрированный cron-job превращается в задачу для TaskRunner."""
-    from aria.db import models as m
 
     with session_scope() as db:
         session = repo.create_session(db, title=f"cron: {job_name}"[:120], active_role=role)

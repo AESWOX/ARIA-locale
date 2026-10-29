@@ -10,7 +10,7 @@ from pathlib import Path
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from aria.db.enums import IdempotencyClass, RiskLevel
 from aria.storage import obsidian_vault, vault_index
@@ -808,7 +808,7 @@ async def _delegate_task(
 
     # Проверка: роль должна существовать
     try:
-        role_def = _get_role(role_name)
+        _get_role(role_name)
     except (KeyError, PermissionError):
         return {"status": "failed", "summary": "", "error": f"unknown or disabled role: {role_name}"}
 

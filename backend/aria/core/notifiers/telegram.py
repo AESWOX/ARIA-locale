@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 from datetime import datetime, timezone
 
-from aria.core.notifiers.protocol import Notifier, NotifierError
+from aria.core.notifiers.protocol import NotifierError
 
 logger = logging.getLogger(__name__)
 

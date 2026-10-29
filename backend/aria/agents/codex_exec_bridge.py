@@ -24,7 +24,6 @@ import asyncio
 import json
 import os
 import uuid
-from typing import Any
 
 from aria.config import get_settings
 from aria.core.events import event_bus

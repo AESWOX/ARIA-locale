@@ -152,7 +152,7 @@ def test_runner_cancel_stops_a_running_task_and_marks_it_cancelled():
 
 
 def test_runner_resume_pending_requeues_unfinished_tasks():
-    task_id = _make_task(objective="wave1 resume test")
+    _make_task(objective="wave1 resume test")
     runner = TaskRunner(_router_with_stub(), "/tmp/aria_wave1_sandbox", max_workers=1)
     resumed = asyncio.run(runner.resume_pending())
     assert resumed >= 1

@@ -1,7 +1,6 @@
 """П.4 ТЗ: выключатель гейта и триаж (границы слов, конфигурируемые глаголы)."""
 from __future__ import annotations
 
-import pytest
 
 from aria.config import get_settings
 from aria.core import clarifier

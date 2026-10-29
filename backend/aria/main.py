@@ -382,7 +382,6 @@ async def startup() -> None:
     from aria.scheduler.jobs import (
         RefreshGate,
         expire_stale_attention_items_job,
-        refresh_provider_models_job,
         run_due_jobs,
     )
 

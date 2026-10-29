@@ -85,7 +85,7 @@ def _detect_tool_failure(tool_name: str, result: dict | str | None) -> tuple[boo
 
     if isinstance(result, dict):
         if result.get("error"):
-            return True, f" [error]"
+            return True, " [error]"
         exit_code = result.get("exit_code")
         if exit_code is not None and exit_code != 0:
             return True, f" [exit {exit_code}]"

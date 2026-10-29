@@ -22,7 +22,6 @@ from aria.db import models as m
 from aria.db.base import release_write_lock
 from aria.db import repository as repo
 from aria.core.criteria_audit import (
-    STATUS_FAIL,
     check_criteria,
     failed_criteria,
     merge_statuses,

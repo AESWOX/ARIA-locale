@@ -15,9 +15,6 @@ from aria import paths
 from aria.version import APP_VERSION
 
 import json
-import os
-import platform
-from pathlib import Path
 from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException

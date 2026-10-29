@@ -11,7 +11,6 @@ from aria import paths
 
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request

@@ -68,7 +68,6 @@ def test_shadow_map_is_not_stored_as_plaintext():
     with session_scope() as db:
         session = repo.create_session(db, "dlp")
         repo.save_shadow_map(db, session.id, {"⟦SECRET_1⟧": "sk-live-very-secret-0001"})
-        raw = db.get(type(session), session.id)  # sanity: строка существует
         from aria.db.models import PrivacyShadowMap
 
         row = db.get(PrivacyShadowMap, session.id)
@@ -150,7 +149,6 @@ def test_crypto_box_rejects_tampered_tag():
 def test_crypto_box_legacy_v1_decrypt_and_lazy_migration(monkeypatch):
     """enc:v1: (раунд 1) читается; при повторной записи лениво перешифровывается в v2."""
     import base64 as _b64
-    import hashlib as _h
     import os as _os
 
     raw = "sk-legacy-v1-value-0001"

@@ -142,7 +142,6 @@ def list_child_tasks(db: OrmSession, parent_task_id: uuid.UUID) -> list[m.Task]:
 def get_task_tree(db: OrmSession, root_task_id: uuid.UUID, max_depth: int = 3) -> dict:
     """Рекурсивное дерево задач от корня до max_depth уровня.
     Возвращает вложенный dict {id, children: [...]} для UI-панели делегирования."""
-    from collections import defaultdict
 
     def _fetch_level(task_ids: list[uuid.UUID], depth: int) -> list[dict]:
         if depth > max_depth or not task_ids:

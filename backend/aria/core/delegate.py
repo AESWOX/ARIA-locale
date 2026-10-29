@@ -12,7 +12,6 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from aria.config import get_settings
 from aria.core.roles import get_role
-from aria.llm.router import ProviderRouter
 
 # Значения по умолчанию (§7.2). Реальные лимиты читаются из Settings (.env) через max_depth()/max_parallel().
 MAX_DEPTH = 1

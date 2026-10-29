@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from aria.core.integrity import IntegrityFlag
+
 
 class PlanStep(BaseModel):
     """Один шаг плана задачи. Обязателен tool_ref или skill_ref."""
@@ -263,8 +265,6 @@ def check_oracle_naebal(
         IntegrityFlag.NAEBAL если plan_attempts > MAX_REPLAN_ATTEMPTS, иначе None.
     """
     if plan_attempts > MAX_REPLAN_ATTEMPTS:
-        from aria.core.integrity import IntegrityFlag
-
         return IntegrityFlag.NAEBAL(
             reason=(
                 f"Oracle НАЕБАЛ: {plan_attempts} invalid plans подряд. "

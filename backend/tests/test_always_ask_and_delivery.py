@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -137,7 +136,7 @@ def test_finished_plan_task_posts_the_result_into_the_chat(env):
         s = repo.create_session(db, "deliver")
         t = repo.create_task(db, s, role="general", objective="навыки blender", draft_tz_md="# tz\n")
         repo.set_task_status(db, t, TaskStatus.approved)
-        sid, tid = s.id, t.id
+        sid = s.id
         res = asyncio.run(executor.run_task(db, t, router=_Script()))
     assert res["status"] == "done", res
     with session_scope() as db:

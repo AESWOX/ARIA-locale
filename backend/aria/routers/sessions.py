@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import func
-from sqlalchemy.orm import joinedload
 
 from aria.api.auth import require_runtime_token
 from aria.core import clarifier
@@ -28,7 +27,6 @@ from aria.http_utils import (
     iso,
     render_session_export_markdown,
     serialize_attention,
-    serialize_session,
     session_snapshot_payload,
     utc_now,
 )

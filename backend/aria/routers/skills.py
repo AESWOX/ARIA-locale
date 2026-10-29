@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from aria import paths
 
-import os
 import re
 from pathlib import Path
 from typing import Any

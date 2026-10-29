@@ -68,10 +68,6 @@ class TestVisionAnalyzeOffline:
 
     async def test_successful_analysis_with_file_path(self):
         """Mock the Gemini API call and verify response is parsed correctly."""
-        with open(TEST_IMAGE, "rb") as f:
-            img_data = f.read()
-        b64 = base64.b64encode(img_data).decode("ascii")
-
         with patch("aria.secrets.secret_provider.get_key_list", return_value=["fake-key"]):
             with patch("urllib.request.urlopen", new_callable=MagicMock) as mock:
                 mock.return_value.__enter__.return_value.read.return_value = json.dumps(SAMPLE_GEMINI_RESPONSE).encode("utf-8")

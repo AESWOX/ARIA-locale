@@ -221,7 +221,7 @@ def test_one_failing_delegation_does_not_break_the_others(world):
 
 def test_delegations_run_alongside_ordinary_tool_calls(world):
     router, stubs, sandbox, parent_id = world
-    prem, sub = stubs["premium_reasoning"], stubs["subagent_execution"]
+    prem = stubs["premium_reasoning"]
     prem.push(_calls(("file_read", {"path": "note.txt"}), _deleg(1), _deleg(2)))
     prem.push(final_answer("combined"))
 

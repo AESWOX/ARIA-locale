@@ -27,7 +27,7 @@ from aria.db.enums import ApprovalStatus, TaskStatus, ToolStatus
 from aria.llm.providers.stub import StubProvider, final_answer, tool_call
 from aria.llm.router import ProviderRouter
 from aria.tools.registry import TOOL_REGISTRY
-from aria.tools.validators import classify_shell_command, is_high_risk_command
+from aria.tools.validators import classify_shell_command
 
 # --- Варианты SEC-2: любой порядок/написание флагов rm, плюс обёртки и составные команды -------------------
 SEC2_DANGEROUS = [

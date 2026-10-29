@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
 import re
 import socket
 import time
