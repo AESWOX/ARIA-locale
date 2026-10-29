@@ -12,6 +12,7 @@ behind POST /sessions/{id}/messages for real tasks.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -57,6 +58,15 @@ NOT_CONFIGURED_HINT = (
     "No language model is configured. Open Keys and add a key for any provider "
     "(DeepSeek, Gemini or Groq), then send the message again."
 )
+
+
+@dataclass
+class _ChatStream:
+    stop_event: asyncio.Event
+    task: asyncio.Task | None = None
+
+
+_ACTIVE_STREAMS: dict[uuid.UUID, _ChatStream] = {}
 
 
 def _real_provider_ids(request: Request) -> list[str]:
@@ -384,6 +394,16 @@ async def chat_send(
         return await _chat_send(session_id, payload, request)
 
 
+@router.post("/sessions/{session_id}/stop")
+async def chat_stop(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Прервать идущую генерацию ответа; сессия остаётся живой и принимает новое сообщение."""
+    entry = _ACTIVE_STREAMS.get(session_id)
+    if entry is None:
+        return {"ok": True, "stopped": False}
+    entry.stop_event.set()
+    return {"ok": True, "stopped": True}
+
+
 @dataclass
 class _Prepared:
     user_payload: dict[str, Any]
@@ -557,6 +577,9 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
 
     Любой сбой стрима — не-стрим fallback через ``_run_nonstream``; тогда клиент получает только
     ``done`` с полным ответом (частичные delta до этого отбрасываются фронтендом).
+
+    Stop (19.2): ``provider.stream()`` идёт в отдельной задаче; генератор гоняется с stop-событием
+    сессии и при Stop отменяет задачу, отдавая ``{"type":"stopped"}`` без сохранения ассистента.
     """
     provider = _pick_stream_provider(request, prepared)
     if provider is None or prepared.dlp_applied:
@@ -564,18 +587,54 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
         yield _ndjson_line({"type": "done", "result": result})
         return
 
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    stop_event = asyncio.Event()
+    entry = _ChatStream(stop_event=stop_event)
+    _ACTIVE_STREAMS[session_id] = entry
+
+    async def consume() -> None:
+        try:
+            async for chunk in provider.stream(prepared.prompt, [], 60):
+                await queue.put(("chunk", chunk))
+                if chunk.final:
+                    return
+            await queue.put(("end", None))
+        except Exception as exc:  # noqa: BLE001 — fallback на не-стрим
+            await queue.put(("error", exc))
+
+    entry.task = asyncio.create_task(consume())
     reply_parts: list[str] = []
+    stopped = False
     try:
-        async for chunk in provider.stream(prepared.prompt, [], 60):
+        while True:
+            getter = asyncio.ensure_future(queue.get())
+            stopper = asyncio.ensure_future(stop_event.wait())
+            await asyncio.wait({getter, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if stopper.done():
+                stopped = True
+                getter.cancel()
+                break
+            stopper.cancel()
+            kind, payload = getter.result()
+            if kind == "error":
+                logger.warning("chat: stream failed (%s), falling back to non-stream", type(payload).__name__)
+                result = await _run_nonstream(session_id, request, prepared)
+                yield _ndjson_line({"type": "done", "result": result})
+                return
+            if kind == "end":
+                break
+            chunk = payload
             if chunk.text and not chunk.final:
                 reply_parts.append(chunk.text)
                 yield _ndjson_line({"type": "delta", "text": chunk.text})
             if chunk.final:
                 break
-    except Exception as exc:  # noqa: BLE001 — fallback на не-стрим
-        logger.warning("chat: stream failed (%s), falling back to non-stream", type(exc).__name__)
-        result = await _run_nonstream(session_id, request, prepared)
-        yield _ndjson_line({"type": "done", "result": result})
+    finally:
+        entry.task.cancel()
+        _ACTIVE_STREAMS.pop(session_id, None)
+
+    if stopped:
+        yield _ndjson_line({"type": "stopped"})
         return
 
     reply = "".join(reply_parts).strip()

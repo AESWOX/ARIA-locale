@@ -56,7 +56,6 @@ def test_make_plan_tool_is_registered():
     assert "make_plan" in TOOL_REGISTRY
 
 
-@pytest.mark.xfail(strict=True, reason=BETA + "Stop для чата: прервать генерацию, задача остаётся живой")
 def test_chat_has_a_stop_endpoint():
     assert ("POST", "/chat/sessions/{session_id}/stop") in _routes()
 
