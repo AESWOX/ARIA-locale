@@ -349,29 +349,9 @@ class Settings(BaseSettings):
             return key
         return self.deepseek_api_key or None
 
-    # --- Codex exec bridge (cheap-path integration, see app/agents/codex_exec_bridge.py) ---
-    # Off by default: with this false, /tasks/{id}/start keeps using the
-    # existing demo executor. Flip to true only once `codex` is installed and
-    # OPENAI_API_KEY / `codex login` is set up locally.
-    codex_enabled: bool = False
-    codex_binary_path: str = "codex"
-    # read-only | workspace-write | danger-full-access — see docs/sandbox.md
-    # in the Codex repo. workspace-write is the sane default: Codex can edit
-    # files under codex_workspace_dir but nothing outside it.
-    codex_sandbox_mode: str = "workspace-write"
-    codex_workspace_dir: str = "."
-    # Only needed if you're not using `codex login` (ChatGPT account) locally.
-    # Never commit a real value — set it in your local .env only.
+    # Optional OpenAI-compatible key. Never commit a real value — set it in
+    # your local .env only.
     openai_api_key: str = ""
-    # Multi-provider path: name of the [model_providers.<id>] block in
-    # ~/.codex/config.toml that points at your local LiteLLM proxy (see
-    # codex_config.toml.snippet + litellm-config.yaml). Leave empty to use
-    # Codex's built-in OpenAI provider with openai_api_key above instead.
-    codex_model_provider: str = ""
-    # Default model alias (must match a model_name in litellm-config.yaml,
-    # e.g. "qwen" | "deepseek" | "gemini" | "openrouter" | "groq" | "grok").
-    # Can be overridden per-task via the `model` field on POST /tasks/{id}/start.
-    codex_default_model: str = ""
 
     # --- Research notes bridge (unofficial API, cookie-based auth) ---
     # Off by default: requires a Google session cookies file.
