@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import {
   Activity,
   Brain,
@@ -831,9 +830,6 @@ export default function SystemPage() {
                   {memory?.active || "built-in only"}
                 </span>
               </span>
-              <Link to="/plugins" className="underline">
-                Change in Plugins →
-              </Link>
               <span className="ml-auto">
                 New credentials:{" "}
                 <span className="font-mono">aria memory setup</span>

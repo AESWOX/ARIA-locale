@@ -43,7 +43,6 @@ def test_cancel_task_endpoint_exists():
     assert ("POST", "/tasks/{task_id}/cancel") in _routes()
 
 
-@pytest.mark.xfail(strict=True, reason=BETA + "навигация из 5 пунктов: Chat, Sessions, Files, Logs, Settings")
 def test_navigation_has_exactly_five_items():
     assert _nav_items() == 5, f"сейчас {_nav_items()} пунктов"
 

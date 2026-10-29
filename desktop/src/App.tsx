@@ -24,7 +24,6 @@ import {
 import {
   Activity,
   BarChart3,
-  BookOpen,
   Clock,
   Code,
   Cpu,
@@ -39,22 +38,17 @@ import {
   Menu,
   MessageSquare,
   MessageCircle,
-  NotebookText,
   Package,
   PanelLeftClose,
   PanelLeftOpen,
-  Plug,
   Puzzle,
-  Radio,
   RotateCw,
   Settings,
   Shield,
-  ShieldCheck,
   Sparkles,
   Star,
   Terminal,
   Users,
-  Webhook,
   Wrench,
   X,
   Zap,
@@ -115,6 +109,7 @@ const PairingPage = lazy(() => import("@/pages/PairingPage"));
 const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
 const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 // ChatPage is rendered persistently (kept mounted across tab switches so the
 // PTY child / WebSocket / xterm instance survive) — see the host block near
 // the bottom of this file. It is STILL lazy: the xterm bundle only downloads
@@ -171,6 +166,7 @@ const BUILTIN_ROUTES_CORE: Record<string, RouteComponent> = {
   "/channels": ChannelsPage,
   "/webhooks": WebhooksPage,
   "/system": SystemPage,
+  "/settings": SettingsPage,
   "/profiles": ProfilesPage,
   "/profiles/new": ProfileBuilderPage,
   "/config": ConfigPage,
@@ -194,20 +190,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: MessageSquare,
   },
   { path: "/files", label: "Files", icon: FolderOpen },
-  { path: "/notes", label: "Notes", icon: NotebookText },
-  {
-    path: "/analytics",
-    labelKey: "analytics",
-    label: "Analytics",
-    icon: BarChart3,
-  },
-  {
-    path: "/models",
-    labelKey: "models",
-    label: "Models",
-    icon: Cpu,
-    group: "settings",
-  },
   {
     path: "/logs",
     labelKey: "logs",
@@ -215,60 +197,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: FileText,
     group: "settings",
   },
-  {
-    path: "/cron",
-    labelKey: "cron",
-    label: "Cron",
-    icon: Clock,
-    group: "settings",
-  },
-  {
-    path: "/skills",
-    labelKey: "skills",
-    label: "Skills",
-    icon: Package,
-    group: "settings",
-  },
-  {
-    path: "/plugins",
-    labelKey: "plugins",
-    label: "Plugins",
-    icon: Puzzle,
-    group: "settings",
-  },
-  { path: "/mcp", label: "MCP", icon: Plug, group: "settings" },
-  { path: "/channels", label: "Channels", icon: Radio, group: "settings" },
-  { path: "/webhooks", label: "Webhooks", icon: Webhook, group: "settings" },
-  { path: "/pairing", label: "Pairing", icon: ShieldCheck, group: "settings" },
-  {
-    path: "/profiles",
-    labelKey: "profiles",
-    label: "Profiles",
-    icon: Users,
-    group: "settings",
-  },
-  {
-    path: "/config",
-    labelKey: "config",
-    label: "Config",
-    icon: Settings,
-    group: "settings",
-  },
-  {
-    path: "/env",
-    labelKey: "keys",
-    label: "Keys",
-    icon: KeyRound,
-    group: "settings",
-  },
-  { path: "/system", label: "System", icon: Wrench, group: "settings" },
-  {
-    path: "/docs",
-    labelKey: "documentation",
-    label: "Documentation",
-    icon: BookOpen,
-    group: "settings",
-  },
+  { path: "/settings", label: "Settings", icon: Settings, group: "settings" },
 ];
 
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
