@@ -981,20 +981,6 @@ export const api = {
       },
     );
   },
-  startOAuthLogin: async (providerId: string) => {
-    const token = await getSessionToken();
-    return fetchJSON<OAuthStartResponse>(
-      `/api/providers/oauth/${encodeURIComponent(providerId)}/start`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [SESSION_HEADER]: token,
-        },
-        body: "{}",
-      },
-    );
-  },
   submitOAuthCode: async (providerId: string, sessionId: string, code: string) => {
     const token = await getSessionToken();
     return fetchJSON<OAuthSubmitResponse>(
@@ -2393,6 +2379,7 @@ export interface VaultCandidate {
   sources: string[];
   is_obsidian_vault: boolean;
   note_count: number;
+  note_count_capped?: boolean;
   last_modified: string | null;
   open_in_obsidian: boolean;
   current: boolean;
@@ -2610,23 +2597,6 @@ export interface OAuthProvider {
 export interface OAuthProvidersResponse {
   providers: OAuthProvider[];
 }
-
-/** Discriminated union — the shape of /start depends on the flow. */
-export type OAuthStartResponse =
-  | {
-      session_id: string;
-      flow: "pkce";
-      auth_url: string;
-      expires_in: number;
-    }
-  | {
-      session_id: string;
-      flow: "device_code";
-      user_code: string;
-      verification_url: string;
-      expires_in: number;
-      poll_interval: number;
-    };
 
 export interface OAuthSubmitResponse {
   ok: boolean;
