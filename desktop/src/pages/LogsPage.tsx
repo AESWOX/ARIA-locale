@@ -19,6 +19,11 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 
 const FILES = ["agent", "errors", "gateway"] as const;
+const FILE_LABELS: Record<(typeof FILES)[number], string> = {
+  agent: "backend.log",
+  errors: "backend.log",
+  gateway: "gateway.log",
+};
 const LEVELS = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR"] as const;
 const COMPONENTS = ["all", "gateway", "agent", "tools", "cli", "cron"] as const;
 const LINE_COUNTS = [50, 100, 200, 500] as const;
@@ -71,6 +76,7 @@ export default function LogsPage() {
   const [lineCount, setLineCount] = useState<(typeof LINE_COUNTS)[number]>(100);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
+  const [servedFile, setServedFile] = useState<string>(FILE_LABELS.agent);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -85,6 +91,7 @@ export default function LogsPage() {
       .getLogs({ file, lines: lineCount, level, component })
       .then((resp) => {
         setLines(resp.lines);
+        setServedFile(resp.file || FILE_LABELS[file]);
         setTimeout(() => {
           if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -264,7 +271,10 @@ export default function LogsPage() {
           <Segmented
             className={segmentedClass}
             value={file}
-            onChange={setFile}
+            onChange={(value) => {
+              setFile(value);
+              setServedFile(FILE_LABELS[value]);
+            }}
             options={toSegmentOptions(FILES)}
           />
         </FilterGroup>
@@ -306,7 +316,7 @@ export default function LogsPage() {
         <CardHeader className="py-3 px-4">
           <CardTitle className="text-sm flex items-center gap-2">
             <FileText className="h-4 w-4" />
-            {file}.log
+            {servedFile}
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
