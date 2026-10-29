@@ -13,6 +13,7 @@ import os
 import uuid
 from typing import Any
 
+from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from aria.api.auth import require_runtime_token
@@ -25,6 +26,13 @@ router = APIRouter(tags=["cron"])
 
 # job_id (str) -> {deliver, profile}; runtime-only, see module docstring.
 _JOB_META: dict[str, dict[str, str]] = {}
+
+
+def _validate_schedule(expr: str) -> str:
+    """Reject expressions the scheduler itself cannot parse (croniter, 5 fields)."""
+    if not croniter.is_valid(expr):
+        raise HTTPException(status_code=422, detail=f"invalid cron schedule: {expr!r}")
+    return expr
 
 
 def _serialize_job(row: m.SchedulerJob) -> dict[str, Any]:
@@ -88,6 +96,7 @@ async def create_cron_job(
     schedule = (body.get("schedule") or "").strip()
     if not prompt or not schedule:
         raise HTTPException(status_code=400, detail="prompt and schedule are required")
+    _validate_schedule(schedule)
     name = (body.get("name") or "").strip() or f"Job {uuid.uuid4().hex[:6]}"
     skills = list(body.get("skills") or [])
     with session_scope() as db:
@@ -114,7 +123,7 @@ async def update_cron_job(
     if "name" in updates_raw:
         fields["name"] = (updates_raw.get("name") or "").strip() or None
     if "schedule" in updates_raw:
-        fields["schedule"] = (updates_raw.get("schedule") or "").strip()
+        fields["schedule"] = _validate_schedule((updates_raw.get("schedule") or "").strip())
     if "prompt" in updates_raw:
         fields["objective"] = (updates_raw.get("prompt") or "").strip()
     if "skills" in updates_raw:

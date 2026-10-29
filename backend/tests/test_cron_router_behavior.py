@@ -165,6 +165,30 @@ def test_blueprints_empty_and_instantiate_is_404(client):
     assert client.post("/cron/blueprints/instantiate", json={}, headers=_h()).status_code == 404
 
 
+@pytest.mark.parametrize("schedule", ["not a cron", "every day", "* * *", "61 * * * *", "*/0 * * * *"])
+def test_create_rejects_invalid_schedule(client, schedule):
+    r = client.post("/cron/jobs", json={"prompt": "p", "schedule": schedule}, headers=_h())
+    assert r.status_code == 422, r.text
+    assert client.get("/cron/jobs", headers=_h()).json() == []
+
+
+@pytest.mark.parametrize("schedule", ["0 9 * * *", "*/5 * * * *", "30 8 * * 1"])
+def test_create_accepts_valid_schedule(client, schedule):
+    r = client.post("/cron/jobs", json={"prompt": "p", "schedule": schedule}, headers=_h())
+    assert r.status_code == 200, r.text
+    assert r.json()["schedule_display"] == schedule
+
+
+def test_update_rejects_invalid_schedule_and_keeps_old(client):
+    job = _create(client)
+    r = client.put(
+        f"/cron/jobs/{job['id']}", json={"updates": {"schedule": "not a cron"}}, headers=_h()
+    )
+    assert r.status_code == 422
+    listed = next(j for j in client.get("/cron/jobs", headers=_h()).json() if j["id"] == job["id"])
+    assert listed["schedule_display"] == "0 9 * * *"
+
+
 def test_job_ids_must_be_uuid(client):
     assert client.delete("/cron/jobs/not-a-uuid", headers=_h()).status_code == 422
 
