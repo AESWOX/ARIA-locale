@@ -195,9 +195,8 @@ const BUILTIN_NAV_REST: NavItem[] = [
     labelKey: "logs",
     label: "Logs",
     icon: FileText,
-    group: "settings",
   },
-  { path: "/settings", label: "Settings", icon: Settings, group: "settings" },
+  { path: "/settings", label: "Settings", icon: Settings },
 ];
 
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
