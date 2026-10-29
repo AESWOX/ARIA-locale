@@ -195,3 +195,29 @@ def _reset_settings_cache_after_test():
     from aria.config import get_settings
 
     get_settings.cache_clear()
+
+
+_NO_REAL_LAUNCH_CALLS: list[str] = []
+
+
+def _no_real_launch(path) -> None:
+    """Test stub: record the launch instead of opening Explorer/Finder/xdg-open."""
+    _NO_REAL_LAUNCH_CALLS.append(str(path))
+
+
+_no_real_launch.calls = _NO_REAL_LAUNCH_CALLS
+
+
+@_pytest.fixture(autouse=True)
+def _never_launch_file_manager(monkeypatch):
+    """POST /logs/open-folder must never spawn a real file manager during tests.
+
+    test_api_fuzz_contract walks every route with a token, so the endpoint is
+    reached in the full run; without this fixture each body opens a window.
+    """
+    from aria.routers import logs as logs_router
+
+    _NO_REAL_LAUNCH_CALLS.clear()
+    monkeypatch.setattr(logs_router, "_open_in_file_manager", _no_real_launch)
+    yield
+    _NO_REAL_LAUNCH_CALLS.clear()
