@@ -433,7 +433,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     )
                 continue
 
-            output, status, error_code, error_message = await _execute_tool(spec, call.arguments, sandbox_root)
+            output, status, error_code, error_message = await _execute_tool(spec, call.arguments, sandbox_root, router=router, task_id=task_id)
 
             # После tool call — guardrail recording для loop detection
             guardrails.after_call(spec.tool_name, call.arguments, output)
@@ -539,7 +539,7 @@ async def _run_delegate_batch(
     return parent_paused
 
 
-async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: bool = False):
+async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: bool = False, router=None, task_id=None):
     settings = get_settings()
     # Аргументы приходят от модели: сверяем с input_schema ДО handler'а. Ошибка уходит модели понятным
     # текстом (какой аргумент и что не так), а не «KeyError: 'path'» и не молчаливым «ok» на пустой вызов.
@@ -553,6 +553,7 @@ async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: b
         output = await asyncio.wait_for(
             spec.handler(
                 input_json=arguments, timeout_sec=spec.timeout_sec, sandbox_root=sandbox_root,
+                router=router, task_id=task_id,
                 **({"approved": True} if approved else {}),
             ),
             timeout=spec.timeout_sec,
@@ -727,7 +728,7 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
                 {"hook_blocked": True, "reason": hook_decision.reason}, ToolStatus.blocked_policy, "hook_blocked", hook_decision.reason,
             )
         else:
-            output, status, error_code, error_message = await _execute_tool(spec, arguments, sandbox_root, approved=True)
+            output, status, error_code, error_message = await _execute_tool(spec, arguments, sandbox_root, approved=True, router=router, task_id=task_id)
             await toolhooks.post_tool(
                 tool_name, arguments, output, status.value,
                 session_id=sess_id, task_id=task_id, sandbox_root=sandbox_root,

@@ -9,8 +9,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 from aria.llm.providers.base import LlmProvider
 from aria.main import app
 from aria.tools.registry import TOOL_REGISTRY
@@ -51,7 +49,6 @@ def test_providers_can_stream():
     assert hasattr(LlmProvider, "stream")
 
 
-@pytest.mark.xfail(strict=True, reason=BETA + "агент сам строит план инструментом make_plan")
 def test_make_plan_tool_is_registered():
     assert "make_plan" in TOOL_REGISTRY
 

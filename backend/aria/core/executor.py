@@ -524,6 +524,9 @@ async def _run_task_impl(
 # ═══════════════════════════════════════════════════════════════════
 
 
+PLAN_LLM_TIMEOUT_SEC = 30  # B3: потолок на Oracle-планирование — при таймауте откат на flash (thinking=high)
+
+
 async def _stage2_plan(
     session: OrmSession,
     task: Task,
@@ -590,7 +593,9 @@ async def _stage2_plan(
                 result = await router.route_chat(
                     "premium_reasoning", messages, tools=[],
                     allow_degrade=True, db=session,
-                    resilient=True, fallback_classes=("standard_reasoning", "free_tier_reasoning"),
+                    resilient=True,
+                    fallback_classes=("plan_flash_reasoning", "standard_reasoning", "free_tier_reasoning"),
+                    timeout_sec=PLAN_LLM_TIMEOUT_SEC,
                 )
                 raw = result.response.text.strip()
                 # Парсим JSON из ответа

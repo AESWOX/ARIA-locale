@@ -162,6 +162,9 @@ class Settings(BaseSettings):
     # off = {"thinking": {"type": "disabled"}}; low|high|max = reasoning_effort.
     deepseek_chat_thinking: str = "off"
     deepseek_reasoner_thinking: str = "high"
+    # B3: fallback-класс планирования (deepseek-flash-plan). Flash берёт thinking=high,
+    # чтобы качество откатного плана не проседало при таймауте premium-модели.
+    deepseek_plan_fallback_thinking: str = "high"
 
     # Legacy single-key fallback (used only if GEMINI_API_KEYS is empty).
     gemini_api_key: str = ""

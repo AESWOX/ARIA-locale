@@ -533,6 +533,19 @@ def build_default_router() -> ProviderRouter:
                 extra_payload=thinking_payload(settings.deepseek_reasoner_thinking),
             )
         )
+        # B3: отдельный fallback-класс планирования. Тот же физический endpoint,
+        # но класс "plan_flash_reasoning" изолирован от premium-контура: при таймауте
+        # Oracle (deepseek-v4-pro) план перестраивает flash с thinking=high.
+        router.register(
+            OpenAICompatibleProvider(
+                provider_id="deepseek-flash-plan",
+                provider_class="plan_flash_reasoning",
+                base_url=settings.deepseek_base_url,
+                model=settings.deepseek_chat_model,
+                api_key=settings.deepseek_api_key_resolved,
+                extra_payload=thinking_payload(settings.deepseek_plan_fallback_thinking),
+            )
+        )
 
     # Порядок регистрации внутри одного provider_class = порядок fallback
     # в _pick_available(): Gemini первый, Groq — если Gemini недоступен

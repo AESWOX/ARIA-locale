@@ -60,7 +60,21 @@ def deepseek_only(monkeypatch):
 def test_only_deepseek_classes_exist_with_one_key(deepseek_only):
     router, _ = deepseek_only
     present = {cls for cls, providers in router.providers_by_class.items() if providers}
-    assert present == {"standard_reasoning", "premium_reasoning"}
+    assert present == {"standard_reasoning", "premium_reasoning", "plan_flash_reasoning"}
+
+
+def test_plan_flash_reasoning_reuses_deepseek_key_without_second_pool(deepseek_only):
+    router, _ = deepseek_only
+    plan_providers = router.providers_by_class["plan_flash_reasoning"]
+    assert plan_providers, "plan_flash_reasoning должен быть зарегистрирован"
+    provider = plan_providers[0]
+    deepseek_keys = {
+        p.api_key
+        for p in router.providers_by_class["standard_reasoning"] + router.providers_by_class["premium_reasoning"]
+    }
+    assert provider.api_key in deepseek_keys, "plan_flash_reasoning должен использовать тот же DeepSeek-ключ"
+    assert provider.key_pool is None, "plan_flash_reasoning не должен создавать второй пул ключей"
+    assert provider.base_url == next(iter(router.providers_by_class["standard_reasoning"])).base_url
 
 
 @pytest.mark.parametrize("site", sorted(CALL_SITES))
