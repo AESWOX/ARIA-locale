@@ -83,6 +83,7 @@ export default function NativeChatPage() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
   const [taskQuestions, setTaskQuestions] = useState<ClarifyQuestion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -370,7 +371,12 @@ export default function NativeChatPage() {
         ]);
         setInput("");
       }
-      const sent = await api.chatSend(sid, retry ? { retry: true } : { content: text });
+      const sent = await api.chatSendStream(
+        sid,
+        retry ? { retry: true } : { content: text },
+        (delta) => setStreamingText((prev) => (prev ?? "") + delta),
+      );
+      setStreamingText(null);
       // П.3.1 ТЗ: бэкенд вернул пакет уточнений -> показываем карточку, а не просто текст.
       const qs = (sent as unknown as { questions?: ClarifyQuestion[] })?.questions ?? null;
       setTaskQuestions(qs && qs.length > 0 ? qs : null);
@@ -388,6 +394,7 @@ export default function NativeChatPage() {
         }
       }
     } finally {
+      setStreamingText(null);
       setSending(false);
       void refreshSessions();
     }
@@ -519,7 +526,19 @@ export default function NativeChatPage() {
               </div>
             </div>
           ))}
-          {sending && (
+          {sending && streamingText !== null && streamingText !== "" && (
+            <div className="flex justify-start">
+              <div
+                className={cn(
+                  focus ? "max-w-[92%]" : "max-w-[85%]",
+                  "border border-border bg-background/60 px-3 py-2",
+                )}
+              >
+                <Markdown content={streamingText} />
+              </div>
+            </div>
+          )}
+          {sending && (streamingText === null || streamingText === "") && (
             <div className="text-xs text-muted-foreground">
               <Loader2 className="inline h-3 w-3 animate-spin" /> thinking...
             </div>

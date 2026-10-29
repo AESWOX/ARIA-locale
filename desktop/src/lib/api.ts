@@ -813,6 +813,65 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  /**
+   * Streaming variant of ``chatSend`` (backend: routers/chat.py NDJSON stream).
+   *
+   * Sends ``{..., stream: true}`` and reads the ``application/x-ndjson`` body
+   * line by line: each ``{"type":"delta","text":...}`` is forwarded to
+   * ``onDelta``, and the final ``{"type":"done","result":...}`` resolves with
+   * the same shape as ``chatSend``. Auth mirrors ``fetchJSON`` (runtime token +
+   * legacy session token); a non-2xx throws the same ``"<status>: <body>"``
+   * error so ``errMessage()`` can still extract the backend ``detail``.
+   */
+  chatSendStream: async (
+    sessionId: string,
+    body: { content?: string; retry?: boolean },
+    onDelta?: (text: string) => void,
+  ): Promise<ChatSendResult> => {
+    const base = await resolveBase();
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (_runtimeToken && !headers.has("X-Local-Agent-Token")) {
+      headers.set("X-Local-Agent-Token", _runtimeToken);
+    }
+    const token = window.__ARIA_SESSION_TOKEN__;
+    if (token) setSessionHeader(headers, token);
+    const res = await fetch(`${base}/api/chat/sessions/${encodeURIComponent(sessionId)}/send`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify({ ...body, stream: true }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    if (!res.body) throw new Error("streaming response has no body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let result: ChatSendResult | null = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        let evt: { type?: string; text?: string; result?: ChatSendResult };
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (evt.type === "delta" && evt.text) onDelta?.(evt.text);
+        else if (evt.type === "done" && evt.result) result = evt.result;
+      }
+    }
+    if (!result) throw new Error("stream ended without a done event");
+    return result;
+  },
   chatModels: () => fetchJSON<ChatModels>("/api/chat/models"),
   chatDefaultProfile: () => fetchJSON<{ profile: RunProfile; saved: boolean }>("/api/chat/profile"),
   chatSaveProfile: (sessionId: string, profile: RunProfile) =>
@@ -2317,6 +2376,8 @@ export interface ChatSendResult {
   assistant: ChatMsg;
   provider_id: string;
   degraded: boolean;
+  /** set when the answer came from a fallback class after the preferred provider failed */
+  fallback?: boolean;
 }
 
 /** Encode each path segment but keep the "/" separators. */

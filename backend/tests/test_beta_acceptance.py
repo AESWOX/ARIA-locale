@@ -47,7 +47,6 @@ def test_navigation_has_exactly_five_items():
     assert _nav_items() == 5, f"сейчас {_nav_items()} пунктов"
 
 
-@pytest.mark.xfail(strict=True, reason=BETA + "стриминг ответа: у провайдера есть потоковый метод")
 def test_providers_can_stream():
     assert hasattr(LlmProvider, "stream")
 

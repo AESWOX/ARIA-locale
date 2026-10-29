@@ -12,14 +12,18 @@ behind POST /sessions/{id}/messages for real tasks.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
 from aria.api.auth import require_runtime_token
@@ -32,7 +36,7 @@ from aria.db.enums import SourceTrust
 from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
 from aria.llm import compression
 from aria.llm.key_pool import NoAvailableKeys
-from aria.llm.providers.base import ChatMessage
+from aria.llm.providers.base import ChatMessage, LlmProvider
 from aria.llm.router import ProviderUnavailable, tried_suffix
 from aria.memory import store as memory_store
 
@@ -371,14 +375,27 @@ async def chat_send(
     payload: dict[str, Any],
     request: Request,
     _: str = Depends(require_runtime_token),
-) -> dict[str, Any]:
+) -> Any:
     # chat_total: весь хендлер, от запроса до сохранённого ответа (4xx/5xx считаются как errors).
     # Не декоратор: при ``from __future__ import annotations`` FastAPI разбирает аннотации в globals обёртки.
     with timing.stage("chat_total"):
+        if payload.get("stream"):
+            return await _chat_send_stream(session_id, payload, request)
         return await _chat_send(session_id, payload, request)
 
 
-async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+@dataclass
+class _Prepared:
+    user_payload: dict[str, Any]
+    prompt: list[ChatMessage]
+    chat_class: str
+    chat_fallback: tuple[str, ...]
+    chat_prefer: str | None
+    dlp_applied: bool
+
+
+async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> _Prepared:
+    """Запись user-сообщения, сжатие истории, память и сборка промпта — общая для стрима и не-стрима."""
     t_start = time.monotonic()
     content = str(payload.get("content") or "").strip()
     retry = bool(payload.get("retry"))  # re-ask using the last stored user message (no duplicate)
@@ -446,22 +463,34 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
     prompt, dlp_applied = _dlp_mask(prompt, session_id)
     # всё до вызова модели (запись сообщения, сжатие, память, сборка промпта): то, что пользователь ждёт зря
     timing.record("chat_prepare", (time.monotonic() - t_start) * 1000.0)
+    return _Prepared(
+        user_payload=user_payload,
+        prompt=prompt,
+        chat_class=chat_class,
+        chat_fallback=chat_fallback,
+        chat_prefer=chat_prefer,
+        dlp_applied=dlp_applied,
+    )
+
+
+async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> dict[str, Any]:
+    """Полный не-стрим ответ: route_chat + DLP-restore + проверки + запись ассистента."""
     try:
         result = await request.app.state.router.route_chat(
-            chat_class,
-            prompt,
+            prepared.chat_class,
+            prepared.prompt,
             [],
             timeout_sec=60,
             resilient=True,
-            fallback_classes=chat_fallback,
-            prefer_provider_id=chat_prefer,
+            fallback_classes=prepared.chat_fallback,
+            prefer_provider_id=prepared.chat_prefer,
             reject_empty=True,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a clear HTTP error below
         logger.warning("chat: model call failed: %s", exc)
         raise _explain_llm_error(exc) from exc
     reply = (result.response.text or "").strip()
-    if dlp_applied and reply:
+    if prepared.dlp_applied and reply:
         reply = _dlp_restore(reply, session_id)
     if not reply:
         raise HTTPException(status_code=502, detail="The model returned an empty answer. Try again.")
@@ -478,9 +507,105 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
         assistant_payload = serialize_message(assistant_msg)
     emit_message_created(assistant_msg, session_id, None)
     return {
-        "user": user_payload,
+        "user": prepared.user_payload,
         "assistant": assistant_payload,
         "provider_id": result.provider_id,
         "degraded": bool(result.degraded_to_free),
         "fallback": bool(result.fallback),
     }
+
+
+async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    prepared = await _prepare_chat(session_id, payload, request)
+    return await _run_nonstream(session_id, request, prepared)
+
+
+def _ndjson_line(obj: dict[str, Any]) -> str:
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+def _pick_stream_provider(request: Request, prepared: _Prepared) -> LlmProvider | None:
+    """Прямая выборка провайдера для стрима (router.py не меняется): prefer -> класс -> fallback.
+
+    Stub-провайдеры пропускаются: стримить заглушку бессмысленно — не-стрим путь вернёт NOT_CONFIGURED.
+    """
+    llm_router = getattr(request.app.state, "router", None)
+    if llm_router is None:
+        return None
+    if prepared.chat_prefer:
+        p = llm_router.find_provider(prepared.chat_prefer)
+        if p is not None and not p.provider_id.startswith("stub"):
+            return p
+    for cls in (prepared.chat_class, *prepared.chat_fallback):
+        for p in llm_router.providers_by_class.get(cls, []):
+            if not p.provider_id.startswith("stub"):
+                return p
+    return None
+
+
+async def _chat_send_stream(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> StreamingResponse:
+    prepared = await _prepare_chat(session_id, payload, request)
+    return StreamingResponse(
+        _stream_events(session_id, request, prepared),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> AsyncIterator[str]:
+    """NDJSON: {"type":"delta","text":"…"} … {"type":"done","result":{…}} / {"type":"error",…}.
+
+    Любой сбой стрима — не-стрим fallback через ``_run_nonstream``; тогда клиент получает только
+    ``done`` с полным ответом (частичные delta до этого отбрасываются фронтендом).
+    """
+    provider = _pick_stream_provider(request, prepared)
+    if provider is None or prepared.dlp_applied:
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+
+    reply_parts: list[str] = []
+    try:
+        async for chunk in provider.stream(prepared.prompt, [], 60):
+            if chunk.text and not chunk.final:
+                reply_parts.append(chunk.text)
+                yield _ndjson_line({"type": "delta", "text": chunk.text})
+            if chunk.final:
+                break
+    except Exception as exc:  # noqa: BLE001 — fallback на не-стрим
+        logger.warning("chat: stream failed (%s), falling back to non-stream", type(exc).__name__)
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+
+    reply = "".join(reply_parts).strip()
+    if not reply:
+        logger.warning("chat: stream produced an empty reply, falling back to non-stream")
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+    if provider.provider_id.startswith("stub"):
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+
+    with timing.stage("chat_store"), session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:  # deleted while the model was streaming
+            raise HTTPException(status_code=404, detail="session was deleted")
+        assistant_msg = repo.append_message(db, session, role="assistant", content=reply, source_trust=SourceTrust.trusted)
+        session.updated_at = datetime.now(timezone.utc)
+        assistant_payload = serialize_message(assistant_msg)
+    emit_message_created(assistant_msg, session_id, None)
+    yield _ndjson_line(
+        {
+            "type": "done",
+            "result": {
+                "user": prepared.user_payload,
+                "assistant": assistant_payload,
+                "provider_id": provider.provider_id,
+                "degraded": False,
+                "fallback": False,
+            },
+        }
+    )
