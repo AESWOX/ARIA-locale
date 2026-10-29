@@ -23,6 +23,7 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
 from aria import paths
+from aria.http_utils import _ssl_context
 
 logger = logging.getLogger("aria.web")
 
@@ -200,7 +201,7 @@ def _ddg_get(url: str) -> str:
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.8",
     })
-    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT_SEC) as resp:
+    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT_SEC, context=_ssl_context()) as resp:
         return resp.read(MAX_SEARCH_BYTES).decode("utf-8", errors="replace")
 
 
@@ -349,7 +350,10 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def _open_url(req: urllib.request.Request, timeout: float):
     """Единственная точка сетевого доступа web_fetch (в тестах подменяется)."""
-    return urllib.request.build_opener(_SafeRedirectHandler).open(req, timeout=timeout)
+    opener = urllib.request.build_opener(
+        _SafeRedirectHandler, urllib.request.HTTPSHandler(context=_ssl_context())
+    )
+    return opener.open(req, timeout=timeout)
 
 
 _ZERO_WIDTH = re.compile("[​-‏‪-‮⁠-⁤﻿]")

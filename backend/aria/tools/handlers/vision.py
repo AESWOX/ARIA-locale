@@ -14,6 +14,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from aria.http_utils import _ssl_context
+
 logger = logging.getLogger("aria.vision")
 
 # DeepSeek Vision принимает только эти форматы (docs: Vision → Limits) и до 32 MiB на картинку.
@@ -151,7 +153,7 @@ def _request_backends(backends: list[dict], prompt: str, content_type: str, b64_
                         "User-Agent": "ARIA/1.0",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:
                     result = json.loads(resp.read().decode("utf-8"))
                 text = result["choices"][0]["message"]["content"]
                 if not (text or "").strip():

@@ -110,7 +110,7 @@ def make_urlopen(pages: dict):
     """Подмена urllib.request.urlopen: ключ — подстрока URL, значение — HTML (str) или исключение."""
     calls: list[str] = []
 
-    def fake(req, timeout=None):
+    def fake(req, timeout=None, **kwargs):
         url = req.full_url if hasattr(req, "full_url") else str(req)
         calls.append(url)
         for key, val in pages.items():
