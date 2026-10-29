@@ -9,6 +9,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import HTTPException
 
@@ -132,6 +133,12 @@ def _safe_export_filename(title: str, session_id: uuid.UUID) -> str:
     stem = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in (title or 'session')).strip('-')
     stem = stem[:48] or 'session'
     return f"{stem}-{session_id}.md"
+
+
+def content_disposition(filename: str) -> str:
+    """RFC 5987 header value: ASCII fallback plus the UTF-8 name (headers are latin-1)."""
+    fallback = filename.encode("ascii", "replace").decode("ascii").replace('"', "-")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 def render_session_export_markdown(

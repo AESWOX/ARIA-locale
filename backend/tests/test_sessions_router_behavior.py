@@ -6,6 +6,8 @@ Destructive routes (/sessions/prune, DELETE /sessions/empty) are not exercised.
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -211,13 +213,26 @@ def test_export_markdown_headers(client):
     assert "#" in r.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="кириллический заголовок сессии → Content-Disposition latin-1 → UnicodeEncodeError → HTTP 500",
-)
+def test_export_filename_cyrillic_is_not_latin1():
+    """Причина 500: имя файла содержит кириллицу, а HTTP-заголовки Starlette кодирует в latin-1."""
+    from aria.http_utils import _safe_export_filename
+
+    name = _safe_export_filename("экспорт", uuid.uuid4())
+    assert "экспорт" in name
+    with pytest.raises(UnicodeEncodeError):
+        name.encode("latin-1")
+
+
 def test_export_markdown_with_cyrillic_title(client):
+    from urllib.parse import unquote
+
     sid = _create(client, "экспорт")["session_id"]
-    assert client.get(f"/sessions/{sid}/export.md", headers=_h()).status_code == 200
+    r = client.get(f"/sessions/{sid}/export.md", headers=_h())
+    assert r.status_code == 200, r.text
+    disposition = r.headers["content-disposition"]
+    disposition.encode("latin-1")
+    assert "filename*=UTF-8''" in disposition
+    assert "экспорт" in unquote(disposition.split("filename*=UTF-8''", 1)[1])
 
 
 def test_export_unknown_404(client):

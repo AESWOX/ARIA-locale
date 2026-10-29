@@ -19,6 +19,7 @@ from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import (
+    content_disposition,
     serialize_message,
     _safe_export_filename,
     emit_message_created,
@@ -469,7 +470,7 @@ async def export_session_markdown(session_id: uuid.UUID, _: str = Depends(requir
         tool_calls = repo.list_tool_calls_by_session(db, session_id)
         audit_reports = repo.list_audit_reports_by_session(db, session_id)
     content = render_session_export_markdown(session, task, messages, tool_calls, audit_reports)
-    headers = {"Content-Disposition": f'attachment; filename="{_safe_export_filename(session.title, session_id)}"'}
+    headers = {"Content-Disposition": content_disposition(_safe_export_filename(session.title, session_id))}
     return PlainTextResponse(content=content, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
