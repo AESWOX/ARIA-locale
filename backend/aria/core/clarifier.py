@@ -229,7 +229,14 @@ def _strip_fence(raw: str) -> str:
     return text.strip()
 
 
-async def _ask_model(router: ProviderRouter, content: str, spec: TaskSpec) -> dict:
+async def _ask_model(
+    router: ProviderRouter,
+    content: str,
+    spec: TaskSpec,
+    *,
+    session_id: object | None = None,
+    task_id: object | None = None,
+) -> dict:
     """Один запрос к clarifier-роли. Любой сбой = пустой payload, а не падение задачи."""
     messages = [
         ChatMessage(role="system", content=_prompt_text()),
@@ -247,6 +254,7 @@ async def _ask_model(router: ProviderRouter, content: str, spec: TaskSpec) -> di
     result = await router.route_chat(
         "standard_reasoning", messages, tools=[], allow_degrade=True,
         resilient=True, fallback_classes=("free_tier_reasoning", "premium_reasoning"),
+        purpose="clarifier", session_id=session_id, task_id=task_id,
     )
     import json
 
@@ -499,7 +507,7 @@ async def run_gate(
         new_assumptions.append(AUTONOMOUS_NOTE)
     elif router is not None and rounds < MAX_CLARIFY_ROUNDS:
         try:
-            payload = await _ask_model(router, content, spec)
+            payload = await _ask_model(router, content, spec, task_id=task_id)
         except Exception as exc:  # noqa: BLE001 — clarifier недоступен, работаем детерминированно
             logger.warning("clarifier недоступен (%s), гейт работает детерминированно", type(exc).__name__)
             payload = {}

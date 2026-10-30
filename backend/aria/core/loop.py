@@ -253,6 +253,8 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             routing = await router.route_chat(
                 model_class, messages, tool_schemas, allow_degrade=True, prefer_provider_id=preferred_model,
                 resilient=True, fallback_classes=AGENT_FALLBACK_CLASSES,
+                purpose="subagent" if delegation_depth > 0 else "agent",
+                session_id=session.id, task_id=task.id,
             )
         except (ProviderUnavailable, httpx.HTTPStatusError) as exc:
             if isinstance(exc, httpx.HTTPStatusError):

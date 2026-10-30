@@ -293,6 +293,7 @@ async def run_audit(
                         auditor_class, messages, tools=[], allow_degrade=True, db=db, prefer_provider_id=auditor_prefer,
                         resilient=True, fallback_classes=("standard_reasoning", "free_tier_reasoning"),
                         reject_empty=True,
+                        purpose="audit", session_id=task.session_id, task_id=task.id,
                     )
                 auditor_model = result.provider_id
                 budget_degraded = result.degraded_to_free

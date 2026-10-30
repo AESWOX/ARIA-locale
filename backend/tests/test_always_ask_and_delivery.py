@@ -57,7 +57,7 @@ def test_question_message_lists_lettered_options_and_marks_recommended():
 
 
 def test_gate_asks_even_when_model_says_request_is_clear(env, monkeypatch):
-    async def clear(router, content, spec):
+    async def clear(router, content, spec, **kwargs):
         return {"goal": "Составить список навыков Blender", "questions": [],
                 "acceptance_criteria": [{"id": "ac-1", "statement": "ответ содержит перечень из 15 пунктов"}]}
 

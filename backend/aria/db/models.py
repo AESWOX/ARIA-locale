@@ -285,6 +285,28 @@ class ProviderModel(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class LlmUsage(Base):
+    """E1: одна строка на успешный вызов модели — токены, назначение, цена (E2), tier."""
+
+    __tablename__ = "llm_usage"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    provider_id: Mapped[str] = mapped_column(String)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    purpose: Mapped[str] = mapped_column(String, default="other")
+    prompt_hit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_miss: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_total: Mapped[int] = mapped_column(Integer, default=0)
+    completion: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tier: Mapped[str] = mapped_column(String, default="n/a")
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class ProviderTierHint(Base):
     """Ручная подсказка по free/paid tier для провайдеров (§5.2 v8.0)."""
 

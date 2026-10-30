@@ -261,6 +261,9 @@ class ProviderRouter:
         retry_backoff_sec: float = RETRY_BACKOFF_SEC,
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
     ) -> RoutingResult:
         """П.5.2 ТЗ: запрос держит слот класса провайдера — параллельные волны EXECUTE
         и делегирование не выбивают квоты free-tier одним залпом."""
@@ -268,7 +271,7 @@ class ProviderRouter:
         async with self.provider_slot(provider_class):
             timing.record("provider_slot_wait", (time.monotonic() - t_wait) * 1000.0)
             with timing.stage("route_chat"):
-                return await self._route_chat_impl(
+                result = await self._route_chat_impl(
                     provider_class,
                     messages,
                     tools,
@@ -281,6 +284,20 @@ class ProviderRouter:
                     prefer_provider_id=prefer_provider_id,
                     reject_empty=reject_empty,
                 )
+        # E1: ровно одна строка на успешный route_chat (не в _timed_chat: preferred-fallthrough
+        # и empty-reply дают несколько попыток на один вызов).
+        from aria.llm.usage import record_usage
+
+        provider = self.find_provider(result.provider_id)
+        record_usage(
+            provider_id=result.provider_id,
+            model=getattr(provider, "model", None) if provider is not None else None,
+            usage=getattr(result.response, "usage", None),
+            purpose=purpose,
+            session_id=session_id,
+            task_id=task_id,
+        )
+        return result
 
     async def _route_chat_impl(
         self,

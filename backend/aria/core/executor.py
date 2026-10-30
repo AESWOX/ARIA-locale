@@ -606,6 +606,7 @@ async def _stage2_plan(
                     resilient=True,
                     fallback_classes=("plan_flash_reasoning", "standard_reasoning", "free_tier_reasoning"),
                     timeout_sec=PLAN_LLM_TIMEOUT_SEC,
+                    purpose="plan", session_id=task.session_id, task_id=task.id,
                 )
                 raw = result.response.text.strip()
                 # Парсим JSON из ответа
@@ -976,6 +977,7 @@ async def _execute_step_isolated(
                 "subagent_execution", messages, tools=[],
                 allow_degrade=True, db=None,
                 resilient=True, fallback_classes=("free_tier_reasoning", "standard_reasoning"),
+                purpose="subagent", session_id=session_id, task_id=task_id,
             )
             spec = type("Spec", (), {"tool_name": "llm_task", "risk_level": type("R", (), {"value": "medium"})()})()
             handler_input = {"objective": objective, "role": role}
@@ -1503,6 +1505,7 @@ async def _llm_generate_content(
         "subagent_execution", messages, tools=[],
         allow_degrade=True, db=session,
         resilient=True, fallback_classes=("free_tier_reasoning", "standard_reasoning"),
+        purpose="other",
     )
     return result.response.text or ""
 
@@ -1531,6 +1534,7 @@ async def _llm_generate_command(
         "subagent_execution", messages, tools=[],
         allow_degrade=True, db=session,
         resilient=True, fallback_classes=("free_tier_reasoning", "standard_reasoning"),
+        purpose="other",
     )
     return result.response.text.strip().strip("`").strip() or "echo 'no command generated'"
 

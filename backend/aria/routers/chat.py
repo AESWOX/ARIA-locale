@@ -611,6 +611,8 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
             fallback_classes=prepared.chat_fallback,
             prefer_provider_id=prepared.chat_prefer,
             reject_empty=True,
+            purpose="chat",
+            session_id=session_id,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a clear HTTP error below
         logger.warning("chat: model call failed: %s", exc)
@@ -789,6 +791,17 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
         )
         session.updated_at = datetime.now(timezone.utc)
         assistant_payload = serialize_message(assistant_msg)
+    if final_usage:
+        # E1: стрим идёт мимо route_chat — пишем строку ledger'а здесь, один раз.
+        from aria.llm import usage as llm_usage
+
+        llm_usage.record_usage(
+            provider_id=provider.provider_id,
+            model=getattr(provider, "model", None),
+            usage=final_usage,
+            purpose="chat",
+            session_id=session_id,
+        )
     emit_message_created(assistant_msg, session_id, None)
     yield _ndjson_line(
         {
