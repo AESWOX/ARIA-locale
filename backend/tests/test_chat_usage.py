@@ -13,7 +13,15 @@ from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.main import app
 
-KEYS = {"context_tokens", "context_window", "context_pct", "session_cost", "priced"}
+KEYS = {
+    "context_tokens",
+    "context_window",
+    "context_pct",
+    "session_cost",
+    "priced",
+    "priced_messages",
+    "unpriced_messages",
+}
 
 
 @pytest.fixture

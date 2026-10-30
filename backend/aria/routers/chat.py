@@ -36,6 +36,7 @@ from aria.db.base import session_scope
 from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
 from aria.llm import compression
+from aria.llm import usage as llm_usage
 from aria.llm.key_pool import NoAvailableKeys
 from aria.llm.providers.base import ChatMessage, LlmProvider
 from aria.llm.router import ProviderUnavailable, tried_suffix
@@ -397,12 +398,27 @@ async def chat_messages(session_id: uuid.UUID, _: str = Depends(require_runtime_
         return [serialize_message(msg) for msg in repo.list_messages(db, session_id, limit=1000)]
 
 
+def _priced_model_row(rows: list[m.ProviderModel], model: str | None):
+    """Строка с ценами для модели; иначе единственная ценовая строка провайдера."""
+    priced = [
+        row
+        for row in rows
+        if row.price_prompt_usd is not None and row.price_completion_usd is not None
+    ]
+    if model:
+        exact = [row for row in priced if row.model_id == model]
+        if exact:
+            return exact[0]
+    return priced[0] if len(priced) == 1 else None
+
+
 @router.get("/sessions/{session_id}/usage")
 async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    """Контекст сессии для шапки чата. Стоимость не считается: в базе нет учёта токенов ответов.
+    """Контекст сессии и стоимость по usage из ответов провайдера (19.6a).
 
     ``context_tokens``: оценка токенов истории, которая реально уходит в промпт (без сжатых сообщений).
-    ``session_cost``: всегда None, ``priced``: False, чтобы UI не показывал выдуманное число.
+    ``session_cost``: сумма по сообщениям, для которых есть usage и цены ProviderModel;
+    если цены неизвестны — None (``priced: False``), выдуманных тарифов нет.
     """
     with session_scope() as db:
         if repo.get_session(db, session_id) is None:
@@ -420,13 +436,40 @@ async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_run
                 if row.context_window
             ]
             context_window = min(windows) if windows else None  # минимум: не занижаем заполненность
+        priced_total = 0.0
+        priced_messages = 0
+        unpriced_messages = 0
+        price_cache: dict[str, list] = {}
+        for msg in repo.list_messages(db, session_id, limit=1000):
+            if msg.role != "assistant":
+                continue
+            meta = msg.content_json if isinstance(msg.content_json, dict) else {}
+            msg_provider = str(meta.get("provider_id") or "")
+            tokens = llm_usage.usage_tokens(meta.get("usage"))
+            row = None
+            if msg_provider and tokens is not None:
+                if msg_provider not in price_cache:
+                    price_cache[msg_provider] = repo.list_provider_models(db, msg_provider)
+                row = _priced_model_row(price_cache[msg_provider], meta.get("model"))
+            cost = (
+                llm_usage.usage_cost(meta.get("usage"), row.price_prompt_usd, row.price_completion_usd)
+                if row is not None
+                else None
+            )
+            if cost is None:
+                unpriced_messages += 1
+            else:
+                priced_total += cost
+                priced_messages += 1
     context_pct = round(context_tokens / context_window * 100, 1) if context_window else None
     return {
         "context_tokens": context_tokens,
         "context_window": context_window,
         "context_pct": context_pct,
-        "session_cost": None,
-        "priced": False,
+        "session_cost": round(priced_total, 6) if priced_messages else None,
+        "priced": priced_messages > 0,
+        "priced_messages": priced_messages,
+        "unpriced_messages": unpriced_messages,
     }
 
 
@@ -580,12 +623,27 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
     if result.provider_id.startswith("stub"):
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_HINT)
 
+    # 19.6a: usage из ответа провайдера — для /usage и стоимости сессии.
+    provider = request.app.state.router.find_provider(result.provider_id)
+    assistant_meta = {
+        "model": getattr(provider, "model", None),
+        "provider_id": result.provider_id,
+        "usage": dict(result.response.usage or {}),
+    }
+
     # 3) store the assistant message
     with timing.stage("chat_store"), session_scope() as db:
         session = repo.get_session(db, session_id)
         if session is None:  # deleted while the model was thinking
             raise HTTPException(status_code=404, detail="session was deleted")
-        assistant_msg = repo.append_message(db, session, role="assistant", content=reply, source_trust=SourceTrust.trusted)
+        assistant_msg = repo.append_message(
+            db,
+            session,
+            role="assistant",
+            content=reply,
+            source_trust=SourceTrust.trusted,
+            content_json=assistant_meta,
+        )
         session.updated_at = datetime.now(timezone.utc)
         assistant_payload = serialize_message(assistant_msg)
     emit_message_created(assistant_msg, session_id, None)
@@ -667,6 +725,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
 
     entry.task = asyncio.create_task(consume())
     reply_parts: list[str] = []
+    final_usage: dict = {}
     stopped = False
     try:
         while True:
@@ -691,6 +750,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
                 reply_parts.append(chunk.text)
                 yield _ndjson_line({"type": "delta", "text": chunk.text})
             if chunk.final:
+                final_usage = dict(chunk.usage or {})
                 break
     finally:
         entry.task.cancel()
@@ -715,7 +775,18 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
         session = repo.get_session(db, session_id)
         if session is None:  # deleted while the model was streaming
             raise HTTPException(status_code=404, detail="session was deleted")
-        assistant_msg = repo.append_message(db, session, role="assistant", content=reply, source_trust=SourceTrust.trusted)
+        assistant_msg = repo.append_message(
+            db,
+            session,
+            role="assistant",
+            content=reply,
+            source_trust=SourceTrust.trusted,
+            content_json={
+                "model": getattr(provider, "model", None),
+                "provider_id": provider.provider_id,
+                "usage": final_usage,
+            },
+        )
         session.updated_at = datetime.now(timezone.utc)
         assistant_payload = serialize_message(assistant_msg)
     emit_message_created(assistant_msg, session_id, None)
