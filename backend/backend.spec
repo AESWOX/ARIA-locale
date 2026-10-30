@@ -3,6 +3,7 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas = [
     ('aria/prompts', 'aria/prompts'),
+    ('aria/llm/prices.json', 'aria/llm'),
     ('alembic.ini', '.'),
     ('alembic', 'alembic'),
     # Same-origin SPA: embed the built frontend so the frozen backend can

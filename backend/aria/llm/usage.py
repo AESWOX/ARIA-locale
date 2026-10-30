@@ -72,6 +72,18 @@ def record_usage(
     if parsed is None:
         logger.warning("llm_usage_missing provider=%s purpose=%s", provider_id, purpose)
         return None
+    if cost_usd is None:
+        # E2: цена из prices.json; без цен остаёмся на None/"n/a" (не выдумываем).
+        try:
+            from aria.llm import pricing
+
+            hit = parsed["prompt_hit"] or 0
+            miss = parsed["prompt_miss"]
+            if miss is None:
+                miss = max(parsed["prompt_total"] - hit, 0)
+            cost_usd, tier = pricing.cost_usd(model, hit, miss, parsed["completion"])
+        except Exception:  # noqa: BLE001 — стоимость не должна ломать запись
+            logger.warning("llm_usage_pricing_failed provider=%s purpose=%s", provider_id, purpose, exc_info=True)
     try:
         from aria.db import models
         from aria.db.base import session_scope
