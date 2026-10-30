@@ -75,6 +75,27 @@ def request_task_tz_approval(db: OrmSession, session: m.Session, task: m.Task, d
     return item
 
 
+def request_budget_estimate_approval(
+    db: OrmSession, session: m.Session, task: m.Task, estimate: dict, mode: str
+) -> m.AttentionItem:
+    """E3: дорогая задача не стартует без Approve владельца (оценка p50–p90)."""
+    item = repo.create_attention_item(
+        db,
+        type_=AttentionType.budget_escalation,
+        title=f"Оценка задачи: ${estimate.get('p50', 0):.2f}–${estimate.get('p90', 0):.2f}"
+        f" ({estimate.get('source')})",
+        body_md=(
+            "Задача может стоить дороже порога предоценки. Approve — запустить, Reject — отменить.\n\n"
+            f"p50: ${estimate.get('p50', 0):.2f}\np90: ${estimate.get('p90', 0):.2f}\n"
+            f"Задач в выборке: {estimate.get('n', 0)}\nРежим: {mode}"
+        ),
+        session=session,
+        task=task,
+        payload_json={"kind": "estimate", "mode": mode, **estimate},
+    )
+    return item
+
+
 def request_budget_escalation(db: OrmSession, session: m.Session, task: m.Task | None, provider_class: str, current_pct: float) -> m.AttentionItem:
     """§12.4: при >=80% создаётся attention item типа budget_escalation_notice."""
     return repo.create_attention_item(

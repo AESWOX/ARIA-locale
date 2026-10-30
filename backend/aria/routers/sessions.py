@@ -28,6 +28,7 @@ from aria.http_utils import (
     iso,
     render_session_export_markdown,
     serialize_attention,
+    serialize_task,
     session_snapshot_payload,
     utc_now,
 )
@@ -434,6 +435,54 @@ async def post_message(
                 "questions": outcome.questions,
             }
 
+    # E3: дорогая задача не стартует без Approve (оценка p90 выше порога).
+    if task is not None and role == "user" and task.status == TaskStatus.approved and mode != "chat":
+        settings = get_settings()
+        threshold = float(getattr(settings, "budget_estimate_approval_usd", 0) or 0)
+        if threshold > 0:
+            from aria.core import approvals
+            from aria.llm import budget as budget_mod
+
+            estimate = budget_mod.estimate_task_cost("project_q")
+            if float(estimate["p90"]) > threshold:
+                with session_scope() as db:
+                    fresh = repo.get_task(db, task.id)
+                    if fresh is not None and fresh.status == TaskStatus.approved:
+                        pending = [
+                            item
+                            for item in repo.list_attention_items(db, only_pending=True)
+                            if item.task_id == fresh.id and (item.payload_json or {}).get("kind") == "estimate"
+                        ]
+                        if not pending:
+                            repo.set_task_status(db, fresh, TaskStatus.in_progress)
+                            approvals.request_budget_estimate_approval(
+                                db, repo.get_session(db, fresh.session_id), fresh, estimate, mode
+                            )
+                            repo.set_task_status(db, fresh, TaskStatus.awaiting_attention)
+                            # emit в открытой сессии (db=db): без db event_bus открывает вторую и ловит SQLite-lock.
+                            from aria.core.events import event_bus
+
+                            event_bus.emit(
+                                "task.status_changed",
+                                serialize_task(fresh) or {},
+                                session_id=fresh.session_id,
+                                task_id=fresh.id,
+                                db=db,
+                            )
+                        task_id = fresh.id
+                    else:
+                        task_id = None
+                if task_id is not None:
+                    return {
+                        "ok": True,
+                        "queued": False,
+                        "task_id": str(task_id),
+                        "status": "awaiting_attention",
+                        "questions": [],
+                        "attention_required": True,
+                        "estimate": estimate,
+                    }
+
     if task and role == "user" and task.status in (TaskStatus.approved, TaskStatus.in_progress):
         settings = get_settings()
         runner = getattr(request.app.state, "task_runner", None)
@@ -513,10 +562,25 @@ async def approve_attention(item_id: uuid.UUID, request: Request, _: str = Depen
     # A22: подтверждённая команда должна реально исполниться, а задача — продолжиться.
     # Возобновление идёт через очередь, не внутри HTTP-запроса (A10).
     resumed = False
-    if resolved.type in (AttentionType.high_risk_shell, AttentionType.mcp_tool_approval) and resolved.task_id is not None:
+    payload = resolved.payload_json if isinstance(resolved.payload_json, dict) else {}
+    is_estimate = (
+        resolved.type == AttentionType.budget_escalation and payload.get("kind") == "estimate"
+    )
+    if (
+        resolved.type in (AttentionType.high_risk_shell, AttentionType.mcp_tool_approval) or is_estimate
+    ) and resolved.task_id is not None:
         runner = getattr(request.app.state, "task_runner", None)
         if runner is not None:
-            queued = runner.submit(resolved.task_id, mode="agent", source="approval", approval_item_id=resolved.id)
+            if is_estimate:
+                # E3: задача ещё не стартовала — обычный submit в сохранённом режиме,
+                # без approval_item_id (он уводит в agent-ветку resume_after_approval).
+                queued = runner.submit(
+                    resolved.task_id,
+                    mode=str(payload.get("mode") or "agent"),
+                    source="approval",
+                )
+            else:
+                queued = runner.submit(resolved.task_id, mode="agent", source="approval", approval_item_id=resolved.id)
             resumed = bool(queued.get("queued"))
         else:
             logger.warning("approve %s: task runner is not running, task %s was not resumed", item_id, resolved.task_id)

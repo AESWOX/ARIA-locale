@@ -2310,6 +2310,9 @@ export interface RunPostResult {
   queued?: boolean;
   task_id?: string;
   mode?: RunMode;
+  /** E3: дорогая задача ждёт Approve, задача ещё не стартовала */
+  attention_required?: boolean;
+  estimate?: { p50: number; p90: number; n: number; source: string };
 }
 
 export interface RunAttentionItem {

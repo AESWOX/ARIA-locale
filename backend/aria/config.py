@@ -75,10 +75,13 @@ class Settings(BaseSettings):
     budget_warn_threshold_pct: int = 80
     aria_dev_mode: bool = False
     budget_block_threshold_pct: int = 100
-    # Spend limits in USD (0 = limit disabled). Spend is estimated from message token counts
-    # at DeepSeek Flash peak rates, so it is an upper bound for Flash and a lower bound for Pro.
-    budget_daily_usd: float = 0.0
-    budget_weekly_usd: float = 0.0
+    # Spend limits in USD (0 = limit disabled). Spend is the real sum of llm_usage.cost_usd (E1/E2/E3).
+    budget_daily_usd: float = 1.0
+    budget_weekly_usd: float = 2.0
+    # E3: per-task guardrails and pre-start estimate approval (owner-approved 30.10).
+    budget_task_warn_usd: float = 0.30
+    budget_task_hard_usd: float = 0.40
+    budget_estimate_approval_usd: float = 0.15
 
     @field_validator("aria_dev_mode", mode="before")
     @classmethod

@@ -346,7 +346,10 @@ export default function NativeChatPage() {
     setMessages(await api.chatMessages(sid));
     setRun(await api.runState(sid));
     void loadUsage(sid);
-    if (res.queued === false && !hasQuestions) setError("This task is already queued or running.");
+    // E3: дорогая задача ждёт Approve (attention_required) — это не ошибка «already queued».
+    if (res.queued === false && !hasQuestions && !res.attention_required) {
+      setError("This task is already queued or running.");
+    }
   };
 
   const decide = async (itemId: string, approve: boolean) => {

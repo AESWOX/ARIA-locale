@@ -1,5 +1,7 @@
-"""19.6a: usage провайдера сохраняется, session_cost считается из цен ProviderModel."""
+"""19.6a/E3: /usage считает стоимость из llm_usage и честно сообщает неполноту."""
 from __future__ import annotations
+
+import uuid
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -7,37 +9,16 @@ from fastapi.testclient import TestClient
 from aria.api.auth import require_runtime_token
 from aria.db import models as m
 from aria.db.base import session_scope
-from aria.llm import usage as usage_mod
-from aria.llm.providers.base import LlmProvider, LlmResponse
-from aria.llm.router import ProviderRouter
 from aria.routers import chat as chat_mod
 
 USAGE = {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
 
 
-class UsageLlm(LlmProvider):
-    def __init__(self, provider_id: str, model: str, usage: dict):
-        self.provider_id = provider_id
-        self.provider_class = "free_tier_reasoning"
-        self.model = model
-        self.usage = usage
-        self.calls = 0
-
-    async def check_connectivity(self, timeout_sec):
-        return True
-
-    async def chat(self, messages, tools, timeout_sec):
-        self.calls += 1
-        return LlmResponse(text="ok", usage=dict(self.usage))
-
-
-def _client(provider: UsageLlm) -> TestClient:
+def _client() -> TestClient:
     app = FastAPI()
     app.include_router(chat_mod.router)
     app.dependency_overrides[require_runtime_token] = lambda: "t"
-    router = ProviderRouter()
-    router.register(provider)
-    app.state.router = router
+    app.state.router = None
     return TestClient(app)
 
 
@@ -45,66 +26,58 @@ def _session(client: TestClient) -> str:
     return client.post("/chat/sessions", json={}).json()["session_id"]
 
 
-def _add_price(provider_id: str, model_id: str, prompt: float, completion: float) -> None:
+def _add_usage(session_id: str, cost: float | None, purpose: str = "chat") -> None:
     with session_scope() as db:
         db.add(
-            m.ProviderModel(
-                id=f"{provider_id}:{model_id}",
-                provider_id=provider_id,
-                model_id=model_id,
-                price_prompt_usd=prompt,
-                price_completion_usd=completion,
+            m.LlmUsage(
+                session_id=uuid.UUID(session_id),
+                provider_id="deepseek-chat",
+                model="deepseek-flash",
+                purpose=purpose,
+                prompt_total=1000,
+                completion=500,
+                cost_usd=cost,
+                tier="off",
             )
         )
 
 
-def test_usage_tokens_accepts_both_shapes():
-    assert usage_mod.usage_tokens({"prompt_tokens": 10, "completion_tokens": 5}) == (10, 5)
-    assert usage_mod.usage_tokens({"input_tokens": 7, "output_tokens": 3}) == (7, 3)
-    assert usage_mod.usage_tokens({}) is None
-    assert usage_mod.usage_tokens(None) is None
-
-
-def test_usage_cost_multiplies_per_token_prices():
-    assert usage_mod.usage_cost(USAGE, 1e-6, 2e-6) == 0.002
-    assert usage_mod.usage_cost(USAGE, None, 2e-6) is None
-    assert usage_mod.usage_cost({}, 1e-6, 2e-6) is None
-
-
-def test_session_cost_is_computed_from_provider_prices():
-    client = _client(UsageLlm("cost-prov-3", "m3", USAGE))
-    _add_price("cost-prov-3", "m3", 1e-6, 2e-6)
+def test_session_cost_sums_llm_usage_rows():
+    client = _client()
     sid = _session(client)
+    _add_usage(sid, 0.001)
+    _add_usage(sid, 0.001)
 
-    sent = client.post(f"/chat/sessions/{sid}/send", json={"content": "hi"})
-    assert sent.status_code == 200, sent.text
     body = client.get(f"/chat/sessions/{sid}/usage").json()
 
     assert body["session_cost"] == 0.002
-    assert body["priced"] is True
-    assert body["priced_messages"] == 1 and body["unpriced_messages"] == 0
+    assert body["session_cost_complete"] is True and body["priced"] is True
+    assert body["priced_messages"] == 2 and body["unpriced_messages"] == 0
 
 
-def test_session_cost_is_null_without_prices():
-    client = _client(UsageLlm("cost-prov-4", "m4", USAGE))
+def test_unknown_price_makes_cost_incomplete():
+    client = _client()
     sid = _session(client)
+    _add_usage(sid, 0.001)
+    _add_usage(sid, None)
 
-    client.post(f"/chat/sessions/{sid}/send", json={"content": "hi"})
     body = client.get(f"/chat/sessions/{sid}/usage").json()
 
-    assert body["session_cost"] is None
-    assert body["priced"] is False
-    assert body["unpriced_messages"] == 1
+    assert body["session_cost_complete"] is False and body["priced"] is False
+    assert body["priced_messages"] == 1 and body["unpriced_messages"] == 1
 
 
-def test_streaming_usage_is_persisted():
-    client = _client(UsageLlm("cost-prov-5", "m5", USAGE))
-    _add_price("cost-prov-5", "m5", 1e-6, 2e-6)
+def test_empty_session_has_no_cost():
+    client = _client()
     sid = _session(client)
 
-    streamed = client.post(f"/chat/sessions/{sid}/send", json={"content": "hi", "stream": True})
-    assert streamed.status_code == 200, streamed.text
     body = client.get(f"/chat/sessions/{sid}/usage").json()
 
-    assert body["session_cost"] == 0.002
-    assert body["priced"] is True and body["priced_messages"] == 1
+    assert body["session_cost"] is None and body["priced"] is False
+    assert body["session_cost_complete"] is False
+
+
+def test_usage_endpoint_unknown_session_404():
+    client = _client()
+    response = client.get(f"/chat/sessions/{uuid.uuid4()}/usage")
+    assert response.status_code == 404

@@ -36,7 +36,6 @@ from aria.db.base import session_scope
 from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
 from aria.llm import compression
-from aria.llm import usage as llm_usage
 from aria.llm.key_pool import NoAvailableKeys
 from aria.llm.providers.base import ChatMessage, LlmProvider
 from aria.llm.router import ProviderUnavailable, tried_suffix
@@ -398,27 +397,12 @@ async def chat_messages(session_id: uuid.UUID, _: str = Depends(require_runtime_
         return [serialize_message(msg) for msg in repo.list_messages(db, session_id, limit=1000)]
 
 
-def _priced_model_row(rows: list[m.ProviderModel], model: str | None):
-    """Строка с ценами для модели; иначе единственная ценовая строка провайдера."""
-    priced = [
-        row
-        for row in rows
-        if row.price_prompt_usd is not None and row.price_completion_usd is not None
-    ]
-    if model:
-        exact = [row for row in priced if row.model_id == model]
-        if exact:
-            return exact[0]
-    return priced[0] if len(priced) == 1 else None
-
-
 @router.get("/sessions/{session_id}/usage")
 async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    """Контекст сессии и стоимость по usage из ответов провайдера (19.6a).
+    """???????? ?????? ? ????????? ?? llm_usage (E1/E2/E3).
 
-    ``context_tokens``: оценка токенов истории, которая реально уходит в промпт (без сжатых сообщений).
-    ``session_cost``: сумма по сообщениям, для которых есть usage и цены ProviderModel;
-    если цены неизвестны — None (``priced: False``), выдуманных тарифов нет.
+    ``session_cost`` ? ????? ???????? cost_usd ????? llm_usage ??????; ???? ? ????? ?????
+    ???? ??????????, ``session_cost_complete=False`` ? ``priced=False`` (????????? ????? ?? ??????????).
     """
     with session_scope() as db:
         if repo.get_session(db, session_id) is None:
@@ -427,7 +411,7 @@ async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_run
         context_tokens = compression.history_tokens(history)
         profile = runprofile.get_profile(db, session_id) or runprofile.builtin_profile()
         main_seat = profile.get("main") if isinstance(profile, dict) else None
-        provider_id = main_seat.get("model") if isinstance(main_seat, dict) else None  # в профиле это provider_id
+        provider_id = main_seat.get("model") if isinstance(main_seat, dict) else None  # ? ??????? ??? provider_id
         context_window: int | None = None
         if provider_id:
             windows = [
@@ -435,39 +419,22 @@ async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_run
                 for row in repo.list_provider_models(db, provider_id)
                 if row.context_window
             ]
-            context_window = min(windows) if windows else None  # минимум: не занижаем заполненность
-        priced_total = 0.0
-        priced_messages = 0
-        unpriced_messages = 0
-        price_cache: dict[str, list] = {}
-        for msg in repo.list_messages(db, session_id, limit=1000):
-            if msg.role != "assistant":
-                continue
-            meta = msg.content_json if isinstance(msg.content_json, dict) else {}
-            msg_provider = str(meta.get("provider_id") or "")
-            tokens = llm_usage.usage_tokens(meta.get("usage"))
-            row = None
-            if msg_provider and tokens is not None:
-                if msg_provider not in price_cache:
-                    price_cache[msg_provider] = repo.list_provider_models(db, msg_provider)
-                row = _priced_model_row(price_cache[msg_provider], meta.get("model"))
-            cost = (
-                llm_usage.usage_cost(meta.get("usage"), row.price_prompt_usd, row.price_completion_usd)
-                if row is not None
-                else None
-            )
-            if cost is None:
-                unpriced_messages += 1
-            else:
-                priced_total += cost
-                priced_messages += 1
+            context_window = min(windows) if windows else None
+        costs = list(
+            db.execute(select(m.LlmUsage.cost_usd).where(m.LlmUsage.session_id == session_id)).scalars()
+        )
+    priced_messages = sum(1 for c in costs if c is not None)
+    unpriced_messages = len(costs) - priced_messages
+    session_cost_complete = bool(costs) and unpriced_messages == 0
+    priced_total = sum(float(c) for c in costs if c is not None)
     context_pct = round(context_tokens / context_window * 100, 1) if context_window else None
     return {
         "context_tokens": context_tokens,
         "context_window": context_window,
         "context_pct": context_pct,
         "session_cost": round(priced_total, 6) if priced_messages else None,
-        "priced": priced_messages > 0,
+        "session_cost_complete": session_cost_complete,
+        "priced": priced_messages > 0 and session_cost_complete,
         "priced_messages": priced_messages,
         "unpriced_messages": unpriced_messages,
     }
