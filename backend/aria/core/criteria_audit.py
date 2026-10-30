@@ -81,7 +81,8 @@ def check_criteria(criteria, tool_calls: list[dict]) -> dict[str, dict]:
                     status, note = STATUS_FAIL, f"артефакт {paths[0]} не найден в результатах инструментов"
 
         if status == STATUS_UNKNOWN and tool_calls:
-            failed = [tc for tc in tool_calls if tc.get("status") != "ok"]
+            # 19.4d D-22: пропущенный шаг (упавшая зависимость) — не ошибка исполнения.
+            failed = [tc for tc in tool_calls if tc.get("status") not in ("ok", "skipped")]
             if failed:
                 status, note = STATUS_FAIL, f"{len(failed)} tool call(s) завершились ошибкой"
             else:

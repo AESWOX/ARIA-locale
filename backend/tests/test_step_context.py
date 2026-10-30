@@ -100,6 +100,7 @@ def test_file_write_step_gets_context_with_earlier_file_content(tmp_path, monkey
 
 
 def test_failed_dependency_is_reported_to_next_step(tmp_path, monkeypatch):
+    """19.4d: зависимый шаг не исполняется, а получает skipped с причиной."""
     plan = [
         {"step_id": S1, "objective": "прочитай contracts/TaskSpec.md", "role": "general",
          "tool_ref": "file_read", "path": "contracts/TaskSpec.md", "depends_on": []},
@@ -109,7 +110,8 @@ def test_failed_dependency_is_reported_to_next_step(tmp_path, monkeypatch):
     router = _Router(["итог"])
     calls = asyncio.run(ex._stage3_execute(db, task, p, router=router))
     assert calls[0]["status"] == "error" and "not found" in calls[0]["output_json"]["error"]
-    assert "шаг не выполнен" in _text(router.sent[0])
+    assert calls[1]["status"] == "skipped" and "шаг не выполнен" in calls[1]["output_json"]["reason"]
+    assert router.sent == [], "провайдер вызван для шага с упавшей зависимостью"
 
 
 def test_missing_file_is_not_a_successful_read(tmp_path, monkeypatch):

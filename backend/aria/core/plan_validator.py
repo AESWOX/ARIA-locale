@@ -33,7 +33,7 @@ class PlanStep(BaseModel):
     command: str | None = None
     url: str | None = None
     input: dict[str, Any] | None = None
-    status: Literal["pending", "in_progress", "done", "failed"] = "pending"
+    status: Literal["pending", "in_progress", "done", "failed", "skipped"] = "pending"
     tool_call_ids: list[uuid.UUID] = []
     # PR-4: план — это DAG, а не список. depends_on — id шагов-предшественников,
     # covers — id критериев приёмки TaskSpec, которые закрывает шаг,

@@ -678,6 +678,91 @@ def _failed_step_payload(step: dict, exc: BaseException) -> dict:
     }
 
 
+def _failed_dependency_indices(
+    index: int, deps: list[set[int]], results: dict[int, dict]
+) -> list[int]:
+    """D-22: индексы зависимостей, которые уже завершились не ok (или пропущены)."""
+    blocked: list[int] = []
+    for dep in sorted(deps[index] if index < len(deps) else set()):
+        outcome = results.get(dep)
+        if outcome is None:
+            # Зависимости ещё нет в результатах (kill-switch/нестандартный план) — не блокируем.
+            continue
+        if outcome.get("status") != "ok":
+            blocked.append(dep)
+    return blocked
+
+
+def _skipped_step_payload(
+    step: dict, blocked_by: list[int], steps: list[dict], results: dict[int, dict]
+) -> dict:
+    """Payload пропущенного узла: причина — невыполненные зависимости."""
+    step_id = str(step.get("step_id", ""))
+    parts: list[str] = []
+    for dep in blocked_by:
+        other = steps[dep] if 0 <= dep < len(steps) else {}
+        status = str((results.get(dep) or {}).get("status") or "?")
+        parts.append(f"{other.get('step_id') or dep} «{other.get('objective') or ''}» -> {status}")
+    reason = "шаг не выполнен: не выполнены зависимости: " + "; ".join(parts)
+    return {
+        "id": f"tc-{step_id[:8]}" if step_id else "tc-skipped",
+        "tool_name": step.get("tool_ref") or step.get("skill_ref") or "unknown",
+        "input_json": {"objective": step.get("objective", "")},
+        "output_json": {
+            "skipped": True,
+            "reason": reason,
+            "blocked_by": [
+                str((steps[d] if 0 <= d < len(steps) else {}).get("step_id") or d) for d in blocked_by
+            ],
+        },
+        "status": "skipped",
+    }
+
+
+def _persist_skipped_call(task_id: Any, step: dict, payload: dict) -> str:
+    """19.4d: записывает ToolCall со статусом skipped в отдельном коротком scope.
+
+    Свой scope нужен, чтобы не держать writer-lock волны и не блокировать
+    параллельные узлы. Сбой записи не роняет прогон.
+    """
+    from aria.db import repository as repo
+    from aria.db.base import session_scope
+    from aria.db.enums import ToolStatus
+
+    fallback_id = str(payload.get("id") or "tc-skipped")
+    try:
+        with session_scope() as db:
+            task = repo.get_task(db, task_id)
+            agent_session = (
+                repo.get_session(db, task.session_id) if task is not None and task.session_id else None
+            )
+            if task is None or agent_session is None:
+                return fallback_id
+            call = repo.start_tool_call(
+                db=db,
+                session=agent_session,
+                task=task,
+                tool_name=str(payload.get("tool_name") or "unknown"),
+                role=str(step.get("role") or "general"),
+                risk_level="low",
+                input_json=payload.get("input_json") or {},
+                attempt_no=1,
+            )
+            output_json = payload.get("output_json") or {}
+            repo.finish_tool_call(
+                db=db,
+                call=call,
+                status=ToolStatus.skipped,
+                output_json=output_json,
+                error_code="dependency_failed",
+                error_message=str(output_json.get("reason") or "")[:400],
+            )
+            return str(call.id)
+    except Exception:  # noqa: BLE001 — пропуск не должен ронять волну
+        logger.exception("Stage 3: не удалось записать skipped ToolCall")
+        return fallback_id
+
+
 def _execute_parallelism() -> int:
     """Сколько узлов плана исполнять одновременно (PR-5).
 
@@ -1077,6 +1162,17 @@ async def _stage3_execute(
     base_context = _dialog_context(session, task)
     results: dict[int, dict] = {}
     tool_calls_raw: list[dict] = []
+
+    def _record_outcome(idx: int, outcome: dict) -> None:
+        results[idx] = outcome
+        if outcome.get("status") == "ok":
+            steps[idx]["status"] = "done"
+            # tool_call_ids — ТОЛЬКО при ok, чтобы ЗАБЫЛ-детектор срабатывал на failure/skip
+            steps[idx]["tool_call_ids"] = [outcome["id"]]
+        else:
+            steps[idx]["status"] = "skipped" if outcome.get("status") == "skipped" else "failed"
+            steps[idx].pop("tool_call_ids", None)
+
     for wave_no, wave in enumerate(waves, start=1):
         session.commit()  # PR-5: writer-lock отпущен перед параллельной волной
         for group in _serialize_by_write_scope(steps, wave):
@@ -1085,7 +1181,25 @@ async def _stage3_execute(
                 wave_no, len(waves), group, min(limit, len(group)),
             )
             reuse_map = reuse or {}
-            run_idx = [i for i in group if _step_signature(steps[i]) not in reuse_map]
+            # D-22: пропуск проверяется ДО reuse-map — кэш не должен маскировать
+            # упавшую зависимость.
+            skip_reasons: dict[int, list[int]] = {}
+            run_idx: list[int] = []
+            for idx in group:
+                blocked = _failed_dependency_indices(idx, deps, results)
+                if blocked:
+                    skip_reasons[idx] = blocked
+                elif _step_signature(steps[idx]) not in reuse_map:
+                    run_idx.append(idx)
+            # Пропущенные узлы пишут ToolCall сразу в своём scope — до await run_bounded.
+            for idx, blocked in skip_reasons.items():
+                outcome = _skipped_step_payload(steps[idx], blocked, steps, results)
+                outcome["id"] = _persist_skipped_call(task.id, steps[idx], outcome)
+                _record_outcome(idx, outcome)
+                logger.warning(
+                    "Stage 3: шаг %s пропущен — не выполнены зависимости %s",
+                    str(steps[idx].get("step_id"))[:8], blocked,
+                )
             factories = [
                 (lambda i=idx: _execute_step_isolated(
                     steps[i], index=i, task_id=task.id, sandbox_root=sandbox_root, router=router,
@@ -1094,24 +1208,22 @@ async def _stage3_execute(
                 for idx in run_idx
             ]
             outcomes = await run_bounded(factories, limit=min(limit, len(run_idx))) if factories else []
-            pairs = list(zip(run_idx, outcomes))
-            # шаги, уже выполненные в прошлой итерации, не гоняем заново (см. _reusable_calls)
-            pairs += [(i, reuse_map[_step_signature(steps[i])]) for i in group if i not in run_idx]
-            for idx, outcome in pairs:
+            for idx, outcome in zip(run_idx, outcomes):
                 if isinstance(outcome, BaseException):
                     logger.warning(
                         "Stage 3: узел %s завершился исключением: %s",
                         steps[idx].get("step_id"), outcome,
                     )
                     outcome = _failed_step_payload(steps[idx], outcome)
-                tool_calls_raw.append(outcome)
-                results[idx] = outcome
-                steps[idx]["status"] = "done" if outcome.get("status") == "ok" else "failed"
-                # tool_call_ids — ТОЛЬКО при ok, чтобы ЗАБЫЛ-детектор срабатывал на failure
-                if outcome.get("status") == "ok":
-                    steps[idx]["tool_call_ids"] = [outcome["id"]]
-                else:
-                    steps[idx].pop("tool_call_ids", None)
+                _record_outcome(idx, outcome)
+            # шаги, уже выполненные в прошлой итерации, не гоняем заново (см. _reusable_calls)
+            for idx in group:
+                if idx in skip_reasons or idx in run_idx:
+                    continue
+                _record_outcome(idx, reuse_map[_step_signature(steps[idx])])
+
+    # Порядок вызовов — как порядок шагов плана (волны и reuse его перемешивали).
+    tool_calls_raw = [results[i] for i in range(len(steps)) if i in results]
 
     # Сохраняем обновлённый план
     task_plan.plan_json = steps
@@ -1441,8 +1553,11 @@ async def _stage4_audit(
     from aria.core.audit import run_audit
     from aria.db import repository as repo
 
+    # 19.4d D-22: пропущенные шаги не участвуют в НАЕБАЛ (у skipped file_write нет хешей,
+    # и детектор дал бы ложный НАЕБАЛ). ЗАБЫЛ считается по tool_call_ids и сохраняется.
+    integrity_calls = [c for c in tool_calls_raw if c.get("status") != "skipped"]
     flags = run_integrity_audit(
-        tool_calls=tool_calls_raw,
+        tool_calls=integrity_calls,
         plan_json=task_plan.plan_json,
     )
 
