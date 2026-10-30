@@ -10,7 +10,6 @@ premium/standard reasoning, простые подзадачи и sub-agents — 
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import re
 import time
@@ -503,16 +502,12 @@ def build_default_router() -> ProviderRouter:
     from aria.llm import gemini_pools
     from aria.llm.key_pool import KeyPool
     from aria.llm.providers.openai_compatible import OpenAICompatibleProvider, thinking_payload
-    from aria.llm.providers.stub import StubProvider
 
     settings = get_settings()
     router = ProviderRouter()
     gemini_pools.reset()  # новая сборка роутера (старт или смена .env): cooldown пулов начинается с нуля
 
-    has_any_real_provider = False
-
     if settings.deepseek_api_key_resolved:
-        has_any_real_provider = True
         router.register(
             OpenAICompatibleProvider(
                 provider_id="deepseek-chat",
@@ -552,7 +547,6 @@ def build_default_router() -> ProviderRouter:
     # или весь его пул ключей исчерпан (see KeyPool.mark_rate_limited/mark_dead).
     gemini_keys = settings.gemini_api_keys_list
     if gemini_keys:
-        has_any_real_provider = True
         # Квота Gemini считается на проект И МОДЕЛЬ (0020): пул ключей общий для всех, кто ходит в одну
         # модель этими ключами (реестр gemini_pools), и раздельный для разных моделей. С 0021 на класс
         # можно задать ЦЕПОЧКУ моделей (GEMINI_FLASH_MODELS / GEMINI_PRO_MODELS): у каждой модели своя
@@ -593,7 +587,6 @@ def build_default_router() -> ProviderRouter:
     groq_fast: list[str] = []
     groq_pools: dict[str, KeyPool] = {}
     if groq_keys:
-        has_any_real_provider = True
         # Цепочки не заданы в .env -> подобрать по списку моделей пула (кэш на 12 ч; сеть недоступна = GROQ_MODEL).
         if settings.groq_models_auto and not settings.groq_models:
             from aria.llm import groq_discovery
@@ -632,7 +625,6 @@ def build_default_router() -> ProviderRouter:
     # --- Vision (multimodal): отдельный пул, не разделяет состояние с main pool ---
     vision_keys = settings.vision_gemini_api_keys_list
     if vision_keys:
-        has_any_real_provider = True
         # Те же ключи и та же модель, что у чата, = тот же пул (одна квота, один cooldown). Отдельные
         # VISION_GEMINI_API_KEYS дают отдельный набор ключей и потому свой пул.
         vision_model = settings.gemini_flash_chain[0]

@@ -221,7 +221,6 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         role_prompt += "\n\n" + _hint
 
     iterations = 0
-    final_verdict_needed = True
     guardrails = ToolCallGuardrailController()
     delegate_failures: dict[tuple[str, str], int] = {}
     repeat_suppressed = 0
@@ -548,7 +547,6 @@ async def _run_delegate_batch(
 
 
 async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: bool = False, router=None, task_id=None):
-    settings = get_settings()
     # Аргументы приходят от модели: сверяем с input_schema ДО handler'а. Ошибка уходит модели понятным
     # текстом (какой аргумент и что не так), а не «KeyError: 'path'» и не молчаливым «ok» на пустой вызов.
     from aria.tools.validators import validate_tool_input

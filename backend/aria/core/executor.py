@@ -25,10 +25,9 @@ from sqlalchemy.orm import Session as OrmSession
 from aria.core.integrity import IntegrityFlag, run_integrity_audit
 from aria.core.locking import file_lock
 from aria.core.delegate import run_bounded
-from aria.core.notifiers.protocol import Notifier, NotifierError
+from aria.core.notifiers.protocol import Notifier
 from aria.core.plan_validator import (
     MAX_REPLAN_ATTEMPTS,
-    PlanStep,
     WebFetchUrlAmbiguous,
     check_oracle_naebal,
     effective_dependencies,
@@ -42,7 +41,7 @@ from aria.tools.validators import command_rejection_reason, is_windows_command
 from aria.core.secretscanner import ScanResult, assert_no_secrets, scan_changed_files
 from aria.db.base import release_write_lock
 from aria.db.enums import PLAN_PHASES, AuditVerdict, IntegrityVerdict, PlanStatus, TaskStatus
-from aria.db.models import IntegrityEvent, Task, TaskPlan, ToolCall
+from aria.db.models import IntegrityEvent, Task, TaskPlan
 from aria.storage.obsidian_vault import search_vault, vault_root, write_note_atomic
 from aria.config import get_settings
 from aria.llm.providers.base import ChatMessage
@@ -560,8 +559,6 @@ async def _stage2_plan(
     Returns:
         (TaskPlan, oracle_naebal_flags).
     """
-    task_id = str(task.id)
-
     # PR-4 (COMPILE): контракт задачи -> постановка для Oracle. Плана без критериев
     # приёмки не бывает, когда TaskSpec их содержит.
     from aria.core import clarifier as _clarifier
