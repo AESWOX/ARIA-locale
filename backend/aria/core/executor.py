@@ -771,7 +771,12 @@ def _execute_parallelism() -> int:
     дешевле выполнить последовательно, чем попасть в swap или быть убитым OOM.
     """
     settings = get_settings()
-    limit = max(1, min(int(settings.runner_max_workers), int(settings.delegate_max_parallel)))
+    if not bool(getattr(settings, "swarm_enabled", True)):
+        logger.warning("swarm_enabled=False — параллелизм EXECUTE снижен до 1 узла")
+        return 1
+    from aria.core.delegate import SWARM_CAP
+
+    limit = max(1, min(int(settings.runner_max_workers), int(settings.delegate_max_parallel), SWARM_CAP))
     try:
         import psutil
 

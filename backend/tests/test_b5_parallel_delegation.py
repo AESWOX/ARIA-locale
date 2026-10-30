@@ -74,6 +74,8 @@ class _Sub(StubProvider):
 @pytest.fixture()
 def world(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    # 19.5: параллельность не должна зависеть от свободной RAM машины (AGENTS §8).
+    monkeypatch.setattr("aria.core.taskrunner.available_ram_mb", lambda: 8192)
     router = ProviderRouter()
     stubs: dict[str, StubProvider] = {}
     for cls, factory in (("premium_reasoning", StubProvider), ("standard_reasoning", StubProvider), ("subagent_execution", _Sub)):

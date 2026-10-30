@@ -15,7 +15,10 @@ from aria.core.roles import get_role
 
 # Значения по умолчанию (§7.2). Реальные лимиты читаются из Settings (.env) через max_depth()/max_parallel().
 MAX_DEPTH = 1
-MAX_PARALLEL = 5
+MAX_PARALLEL = 3
+# 19.5: жёсткий потолок роя и порог свободной RAM (Q-6).
+SWARM_CAP = 3
+LOW_RAM_MB = 1500
 DEFAULT_TIMEOUT_SEC = 60
 RETRY_COUNT = 1
 
@@ -28,6 +31,29 @@ def max_depth() -> int:
 def max_parallel() -> int:
     """Максимум параллельных саб-агентов: settings.delegate_max_parallel (D2)."""
     return int(get_settings().delegate_max_parallel)
+
+
+def available_ram_mb() -> int | None:
+    """Свободная RAM через taskrunner (единая точка подмены в тестах)."""
+    from aria.core import taskrunner
+
+    return taskrunner.available_ram_mb()
+
+
+def parallel_limit() -> tuple[int, str]:
+    """Эффективный лимит субагентов и причина (19.5 Q-6).
+
+    Порядок: флаг роя → низкая RAM → потолок 3. Причина отдаётся в API.
+    """
+    if not bool(getattr(get_settings(), "swarm_enabled", True)):
+        return 1, "swarm disabled (swarm_enabled=false) — последовательный запуск"
+    ram = available_ram_mb()
+    if ram is not None and ram < LOW_RAM_MB:
+        return 1, f"мало свободной RAM: {ram} MB < {LOW_RAM_MB} MB — 1 саб-агент"
+    configured = max(1, max_parallel())
+    if configured > SWARM_CAP:
+        return SWARM_CAP, f"потолок роя {SWARM_CAP} (delegate_max_parallel={configured})"
+    return configured, f"delegate_max_parallel={configured}"
 
 
 @dataclass
@@ -88,7 +114,7 @@ async def run_bounded(factories: Sequence[Callable[[], Awaitable[Any]]], limit: 
     ``delegate_max_parallel`` из Settings (§7.2); избыточные вызовы не отбрасываются, а ждут своей очереди.
     Исключение одной корутины не обрывает остальные: оно возвращается на её месте как объект исключения.
     """
-    cap = max(1, int(limit if limit is not None else max_parallel()))
+    cap = max(1, int(limit)) if limit is not None else parallel_limit()[0]
     gate = asyncio.Semaphore(cap)
 
     async def _one(factory: Callable[[], Awaitable[Any]]) -> Any:

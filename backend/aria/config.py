@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     # цикл не маскируется — плейсхолдеры сломали бы пути и команды в tool calls.
     dlp_chat_enabled: bool = False
     dlp_names: str = ""  # имена/логины через запятую: то, что не ловится шаблоном
-    delegate_max_parallel: int = 5
+    delegate_max_parallel: int = 3
+    # 19.5: рой субагентов за флагом; False = строго последовательный запуск.
+    swarm_enabled: bool = True
     delegate_timeout_sec: int = 60
     tools_default_timeout_sec: int = 120
     providers_connectivity_timeout_sec: int = 2
