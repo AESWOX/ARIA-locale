@@ -77,6 +77,15 @@ def trap(monkeypatch):
     return SPAWNED
 
 
+@pytest.fixture(autouse=True)
+def _windows_runnable(monkeypatch):
+    # R3(c) (19.3 PLAN-1): C5 проверяет SEC-2 approve, а не применимость на Windows.
+    # Считаем команды «выполнимыми», чтобы они дошли до classify_shell_command → Approve.
+    import aria.core.loop as loop
+
+    monkeypatch.setattr(loop, "is_windows_command", lambda command: True)
+
+
 @pytest.fixture()
 def sandbox(tmp_path):
     root = tmp_path / "sandbox"

@@ -46,6 +46,8 @@ from aria.tools.validators import (
     ToolValidationError,
     assert_role_allowed,
     classify_shell_command,
+    command_rejection_reason,
+    is_windows_command,
 )
 from aria.core.guardrails import ToolCallGuardrailController
 
@@ -325,6 +327,12 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
                 if call.tool_name == "shell_execute":
                     command = call.arguments.get("command", "")
+                    if not is_windows_command(command):
+                        repo.append_message(
+                            db, session, role="tool",
+                            content=f"shell_execute -> rejected: {command_rejection_reason(command)}",
+                        )
+                        continue
                     if classify_shell_command(command) != "allow":
                         item = approvals.check_command_and_maybe_request_approval(db, session, task, command)
                         event_bus.emit(

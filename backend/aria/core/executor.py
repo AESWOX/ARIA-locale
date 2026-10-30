@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,9 @@ from aria.core.plan_validator import (
     effective_dependencies,
     topological_waves,
     validate_plan,
+    validate_plan_paths,
 )
+from aria.tools.validators import command_rejection_reason, is_windows_command
 from aria.core.secretscanner import ScanResult, assert_no_secrets, scan_changed_files
 from aria.db.base import release_write_lock
 from aria.db.enums import PLAN_PHASES, AuditVerdict, IntegrityVerdict, PlanStatus, TaskStatus
@@ -390,6 +393,14 @@ async def _run_task_impl(
     if blocked_cmds:
         return await _fail_approval_required(session, task, task_plan, blocked_cmds)
 
+    # R6: детерминированная ошибка шага → падение сразу, без ЗАБЫЛ-replan.
+    det = _deterministic_step_error(tool_calls_raw)
+    if det:
+        code, message = det
+        _transition(session, task, TaskStatus.failed, error_code=code, error_message=message[:500])
+        session.flush()
+        return {"status": "failed", "plan_id": str(task_plan.id), "integrity_flags": [], "note_path": None}
+
     # ── Stage 4: Audit ────────────────────────────────────────────
     logger.info("Stage 4: Audit for task %s", task_id[:8])
     _set_phase(session, task, "audit")
@@ -579,15 +590,14 @@ async def _stage2_plan(
                 oracle_prompt_path = Path(__file__).parent.parent / "prompts" / "oracle.md"
                 oracle_system = oracle_prompt_path.read_text(encoding="utf-8") if oracle_prompt_path.exists() else "Ты oracle — генератор плана."
 
+                user_content = _compiler.compile_task_input(spec, vault_context) if spec is not None else f"Objective: {task.objective}"
+                if feedback:
+                    user_content += f"\n\nОбратная связь от аудита (переделай план с учётом этого):\n{feedback}"
+                if last_error:
+                    user_content += f"\n\nПредыдущий план отклонён валидацией, исправь:\n{last_error}"
                 messages = [
                     ChatMessage(role="system", content=oracle_system),
-                    ChatMessage(
-                        role="user",
-                        content=(
-                            (_compiler.compile_task_input(spec, vault_context) if spec is not None else f"Objective: {task.objective}")
-                            + (f"\n\nОбратная связь от аудита (переделай план с учётом этого):\n{feedback}" if feedback else "")
-                        ),
-                    ),
+                    ChatMessage(role="user", content=user_content),
                 ]
                 release_write_lock(session)  # BUG-5: план на reasoning-модели идёт ~100 с, писатель не держим
                 result = await router.route_chat(
@@ -612,7 +622,11 @@ async def _stage2_plan(
                     "no LLM provider configured — Oracle plan cannot be generated"
                 )
 
-            plan_steps = validate_plan(plan_steps, criteria_ids=criteria_ids)
+            validated = validate_plan(plan_steps, criteria_ids=criteria_ids)
+            # R4: пути файловых шагов против sandbox (пропускается, если root не задан).
+            sandbox_root = str((Path(__file__).parent.parent.parent / get_settings().agent_sandbox_root).resolve())
+            validate_plan_paths(plan_steps, sandbox_root)
+            plan_steps = validated
             break
         except (ValueError, json.JSONDecodeError, KeyError) as e:
             last_error = str(e)
@@ -899,6 +913,12 @@ async def _execute_step_isolated(
                 handler_input = {"path": step.get("path", f"generated/{tc_id}.txt"), "content": content}
             elif tool_ref == "shell_execute":
                 command = await _llm_generate_command(router, None, role, objective, context=context)
+                if not is_windows_command(command):
+                    # R3(b): команда невыполнима на этой машине — не запускать и не
+                    # показывать Approve (повтор с теми же входными данными не поможет).
+                    raise ValueError(
+                        f"{command_rejection_reason(command)}: команда невыполнима на этой машине: {command!r}"
+                    )
                 handler_input = {"command": command}
             elif tool_ref == "file_read":
                 handler_input = {"path": step.get("path", ".")}
@@ -1200,28 +1220,78 @@ def build_failure_message(task: Task, remarks: list[str]) -> str:
 
 
 def _post_failure_message(session: OrmSession, task: Task) -> None:
-    """Сообщение об отказе в чат: раньше failed-задача оставляла пустой экран и ни одной строки в логе."""
-    try:
-        from aria.core.events import event_bus
-        from aria.db import repository as repo
-        from aria.http_utils import serialize_message
+    """Сообщение об отказе в чат: раньше failed-задача оставляла пустой экран и ни одной строки в логе.
 
-        agent_session = repo.get_session(session, task.session_id)
-        if agent_session is None:
+    R7: запись переживает transient-ошибки БД (``database is locked``) — те же константы,
+    что у ``_with_db_retry`` (MAX_DB_RETRIES, _DB_RETRY_DELAY_SEC, _TRANSIENT_DB_ERRORS).
+    После исчерпания ретраев — ошибка в лог с полным ``task_id``, а не молчание.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(MAX_DB_RETRIES):
+        try:
+            _append_failure_message(session, task)
             return
-        remarks: list[str] = []
-        reports = repo.list_audit_reports(session, task.id)
-        if reports:
-            last = reports[-1]
-            for item in [*(last.patch_suggestions or []), *(last.missing_requirements or [])]:
-                text = str(item).strip()
-                if text:
-                    remarks.append(text[:300])
-        msg = repo.append_message(session, agent_session, role="assistant", content=build_failure_message(task, remarks[:4]))
-        session.flush()
-        event_bus.emit("message.created", serialize_message(msg), session_id=task.session_id, task_id=task.id)
-    except Exception as exc:  # noqa: BLE001 - сбой доставки сообщения не должен ломать переход статуса
-        logger.warning("Failure message for task %s not posted: %s", str(task.id)[:8], exc)
+        except Exception as exc:  # noqa: BLE001 - сбой доставки не должен ломать переход статуса
+            if not any(t in str(exc).lower() for t in _TRANSIENT_DB_ERRORS):
+                logger.warning("Failure message for task %s not posted: %s", str(task.id)[:8], exc)
+                return
+            last_exc = exc
+            if attempt < MAX_DB_RETRIES - 1:
+                time.sleep(_DB_RETRY_DELAY_SEC[min(attempt, len(_DB_RETRY_DELAY_SEC) - 1)])
+    logger.error(
+        "Failure message for task %s not posted after %d retries: %s",
+        str(task.id), MAX_DB_RETRIES, last_exc,
+    )
+
+
+def _append_failure_message(session: OrmSession, task: Task) -> None:
+    from aria.core.events import event_bus
+    from aria.db import repository as repo
+    from aria.http_utils import serialize_message
+
+    agent_session = repo.get_session(session, task.session_id)
+    if agent_session is None:
+        return
+    remarks: list[str] = []
+    reports = repo.list_audit_reports(session, task.id)
+    if reports:
+        last = reports[-1]
+        for item in [*(last.patch_suggestions or []), *(last.missing_requirements or [])]:
+            text = str(item).strip()
+            if text:
+                remarks.append(text[:300])
+    msg = repo.append_message(session, agent_session, role="assistant", content=build_failure_message(task, remarks[:4]))
+    event_bus.emit("message.created", serialize_message(msg), session_id=task.session_id, task_id=task.id, db=session)
+
+
+_DETERMINISTIC_STEP_ERRORS: list[tuple[str, str]] = [
+    ("invalid_arguments", "invalid_arguments"),
+    ("unix_only_command", "unix_only_command"),
+    ("command_not_found_in_path", "command_not_found_in_path"),
+    ("hook_blocked", "hook_blocked"),
+    ("no LLM provider configured", "provider_unavailable"),
+]
+
+
+def _deterministic_step_error(tool_calls: list[dict]) -> tuple[str, str] | None:
+    """R6: детерминированная ошибка шага → (code, message), иначе None.
+
+    Повтор с теми же входными данными не меняет результат, поэтому такие ошибки
+    падают сразу, без ЗАБЫЛ-replan. ``unknown tool_ref`` сюда НЕ входит: replan
+    оправдан (Oracle может выбрать другой инструмент).
+    """
+    for c in tool_calls:
+        o = c.get("output_json")
+        if isinstance(o, dict) and o.get("status") == "approval_required":
+            return "approval_required", "approval_required: нужно подтверждение владельца"
+        if c.get("status") != "error":
+            continue
+        o = c.get("output_json") if isinstance(c.get("output_json"), dict) else {}
+        err = str(o.get("error") or "")
+        for prefix, code in _DETERMINISTIC_STEP_ERRORS:
+            if err.startswith(prefix):
+                return code, err
+    return None
 
 
 def _approval_blocked_commands(tool_calls: list[dict]) -> list[str]:

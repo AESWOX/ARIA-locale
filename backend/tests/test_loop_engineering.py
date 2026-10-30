@@ -255,22 +255,22 @@ class TestNaebalBlocksRetry:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# §7.7 Invalid plan replans max 2 test
+# §7.7 Invalid plan replans max 1 test (R5: первый план + один replan)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestInvalidPlanReplansMax2:
-    """Oracle 3× invalid → escalate."""
+    """Oracle 2× invalid → escalate (первая генерация + один replan с feedback)."""
 
-    def test_oracle_naebal_after_3_attempts(self):
-        """3 неудачные попытки → НАЕБАЛ от Oracle."""
+    def test_oracle_naebal_after_2_attempts(self):
+        """2 неудачные попытки → НАЕБАЛ от Oracle."""
         last_error = "freeform step forbidden: no tool_ref"
-        flag = check_oracle_naebal(plan_attempts=3, last_error=last_error)
+        flag = check_oracle_naebal(plan_attempts=2, last_error=last_error)
         assert flag is not None
         assert flag.kind == "naebal"
 
     def test_oracle_ok_before_limit(self):
-        """2 попытки → clean (no naebal)."""
-        flag = check_oracle_naebal(plan_attempts=2)
+        """1 попытка → clean (no naebal)."""
+        flag = check_oracle_naebal(plan_attempts=1)
         assert flag is None
 
     def test_oracle_naebal_annotation_resolves(self):

@@ -341,7 +341,7 @@ def test_on_error_fires_when_provider_is_unavailable(tmp_path):
 def test_on_approval_fires_on_request_and_on_resolution(tmp_path):
     hook, log = _event_logger(tmp_path, "on_approval")
     save_hooks([hook])
-    router, sandbox = _loop_env(tmp_path, [tool_call("shell_execute", {"command": "rm -rf somedir"}), final_answer("x")])
+    router, sandbox = _loop_env(tmp_path, [tool_call("shell_execute", {"command": "rd /s /q somedir"}), final_answer("x")])
     task_id, _ = _make_task()
     _run(execute_agent_loop(task_id, router, sandbox))
     with session_scope() as db:

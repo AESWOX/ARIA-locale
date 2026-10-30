@@ -6,12 +6,14 @@ Oracle 3× invalid plan → НАЕБАЛ, escalation.
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from aria.core.integrity import IntegrityFlag
+from aria.tools.validators import command_rejection_reason, is_windows_command
 
 
 class PlanStep(BaseModel):
@@ -23,6 +25,7 @@ class PlanStep(BaseModel):
     tool_ref: str | None = None
     skill_ref: str | None = None
     path: str | None = None
+    command: str | None = None
     status: Literal["pending", "in_progress", "done", "failed"] = "pending"
     tool_call_ids: list[uuid.UUID] = []
     # PR-4: план — это DAG, а не список. depends_on — id шагов-предшественников,
@@ -46,8 +49,9 @@ class PlanStep(BaseModel):
         return self
 
 
-# Максимум replan-попыток для Oracle до НАЕБАЛ
-MAX_REPLAN_ATTEMPTS = 2
+# Максимум replan-попыток для Oracle до НАЕБАЛ.
+# R5: один replan (первая генерация + одна повторная с feedback), затем НАЕБАЛ.
+MAX_REPLAN_ATTEMPTS = 1
 
 # PR-4: лимит 7 шагов пересмотрен — у DAG несколько ветвей идут параллельно, поэтому
 # 12 узлов дают примерно то же время прогона, что прежние 7 последовательных.
@@ -194,6 +198,93 @@ def topological_waves(steps: list[dict]) -> list[list[int]]:
     return waves
 
 
+def _ancestors(deps: list[set[int]], idx: int) -> set[int]:
+    """Транзитивное замыкание зависимостей шага idx (индексы всех предков)."""
+    seen: set[int] = set()
+    stack = list(deps[idx])
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        stack.extend(deps[n])
+    return seen
+
+
+def _normalize_abs(path: str, root: str) -> str:
+    p = os.path.normcase(os.path.normpath(path))
+    if not os.path.isabs(p):
+        p = os.path.normcase(os.path.abspath(os.path.join(root, p)))
+    return p
+
+
+def _in_sandbox(path: str, root: str) -> bool:
+    p = _normalize_abs(path, root)
+    return p == root or p.startswith(root + os.sep)
+
+
+def validate_plan_paths(steps: list[dict], sandbox_root: str | None) -> None:
+    """R4: файловые шаги плана не должны выходить за sandbox и читать несуществующее.
+
+    Только инструменты ``file_*``. ``sandbox_root`` пуст/None — проверка явно пропущена
+    (вызывающий решает, когда есть что проверять). Vault-инструменты не проверяются.
+
+    * ``file_read`` допустим, если файл существует на диске ИЛИ его пишет шаг-предок
+      (``file_write`` с тем же ``path`` или ``write_scope``).
+    * ``file_write``: путь внутри sandbox, новый файл допустим.
+    * ``file_search``/``file_grep``: glob не требует существования; только запрет выхода
+      за sandbox (``..``, абсолютные пути вне root).
+
+    Пути нормализуются (регистр, слэши Windows). Нарушение — ValueError с причиной.
+    """
+    if not sandbox_root:
+        return
+    root = _normalize_abs(str(sandbox_root), str(sandbox_root))
+    deps = effective_dependencies(steps)
+    ancestors = [_ancestors(deps, i) for i in range(len(steps))]
+
+    def written_by_ancestor(idx: int, path: str) -> bool:
+        for a in ancestors[idx]:
+            s = steps[a]
+            if str(s.get("tool_ref") or "").strip().lower() != "file_write":
+                continue
+            targets = [s.get("path"), *list(s.get("write_scope") or [])]
+            for t in targets:
+                if not t:
+                    continue
+                tn = _normalize_abs(str(t), root)
+                if path == tn or path.startswith(tn + os.sep):
+                    return True
+        return False
+
+    for i, step in enumerate(steps):
+        tool = str(step.get("tool_ref") or "").strip().lower()
+        if tool not in ("file_read", "file_write", "file_search", "file_grep"):
+            continue
+
+        if tool == "file_write":
+            path = step.get("path")
+            if path and not _in_sandbox(str(path), root):
+                raise ValueError(f"Plan validation failed: file_write path outside sandbox: {path!r}")
+            continue
+
+        if tool in ("file_search", "file_grep"):
+            glob_pat = step.get("glob") or step.get("path") or ""
+            if glob_pat and not _in_sandbox(str(glob_pat), root):
+                raise ValueError(f"Plan validation failed: {tool} glob escapes sandbox: {glob_pat!r}")
+            continue
+
+        # file_read
+        path = step.get("path")
+        if not path:
+            continue
+        pn = _normalize_abs(str(path), root)
+        if os.path.exists(pn):
+            continue
+        if not written_by_ancestor(i, pn):
+            raise ValueError(f"Plan validation failed: file_read of non-existent file: {path!r}")
+
+
 def validate_plan(steps: list[dict], criteria_ids: list[str] | None = None) -> list[PlanStep]:
     """Валидирует список словарей как PlanStep[] и проверяет целостность DAG.
 
@@ -226,6 +317,15 @@ def validate_plan(steps: list[dict], criteria_ids: list[str] | None = None) -> l
     cycles = find_cycles(normalized)
     if cycles:
         raise ValueError(f"Plan validation failed: цикл в depends_on: {' -> '.join(cycles)}")
+
+    # R3(a): команда в плане обязана быть выполнимой на Windows — иначе шаг заведомо
+    # не исполнится, и повтор с теми же входными данными ничего не изменит.
+    for step in result:
+        if step.command is not None and not is_windows_command(step.command):
+            raise ValueError(
+                f"Plan validation failed: step {step.step_id} command is not runnable on Windows "
+                f"({command_rejection_reason(step.command)}): {step.command!r}"
+            )
 
     if criteria_ids is not None:
         known = {str(c) for c in criteria_ids}
