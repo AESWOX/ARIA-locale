@@ -7,6 +7,7 @@ Oracle 3× invalid plan → НАЕБАЛ, escalation.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from typing import Literal
 
@@ -26,6 +27,7 @@ class PlanStep(BaseModel):
     skill_ref: str | None = None
     path: str | None = None
     command: str | None = None
+    url: str | None = None
     status: Literal["pending", "in_progress", "done", "failed"] = "pending"
     tool_call_ids: list[uuid.UUID] = []
     # PR-4: план — это DAG, а не список. depends_on — id шагов-предшественников,
@@ -47,6 +49,46 @@ class PlanStep(BaseModel):
                 "has neither tool_ref nor skill_ref"
             )
         return self
+
+
+class WebFetchUrlAmbiguous(ValueError):
+    """objective содержит несколько разных URL, а step.url/input пусты — выбрать нельзя."""
+
+
+_URL_RE = re.compile(r"https?://\S+")
+_URL_TRAIL = ".,;:)\"\u00bb"
+
+
+def _is_http_url(url: str) -> bool:
+    return url.startswith(("http://", "https://"))
+
+
+def resolve_web_fetch_url(step: dict) -> str | None:
+    """Находит URL для web_fetch: step.url -> input["url"] -> первый https?:// из objective.
+
+    Только схемы http/https (R6/SSRF: ftp://, file:// и т.п. не принимаются).
+    Возвращает None, если URL нет нигде. Бросает WebFetchUrlAmbiguous, если objective
+    содержит несколько разных http(s)-URL и их нельзя выбрать однозначно.
+    """
+    url = step.get("url")
+    if url is not None and str(url).strip():
+        url = str(url).strip()
+        return url if _is_http_url(url) else None
+
+    inp = step.get("input")
+    if isinstance(inp, dict):
+        url = inp.get("url")
+        if url is not None and str(url).strip():
+            url = str(url).strip()
+            return url if _is_http_url(url) else None
+
+    objective = str(step.get("objective") or "")
+    urls = {u.rstrip(_URL_TRAIL) for u in _URL_RE.findall(objective)}
+    if len(urls) > 1:
+        raise WebFetchUrlAmbiguous(
+            f"objective содержит несколько разных URL, а step.url/input пусты: {sorted(urls)}"
+        )
+    return urls.pop() if urls else None
 
 
 # Максимум replan-попыток для Oracle до НАЕБАЛ.
@@ -301,6 +343,22 @@ def validate_plan(steps: list[dict], criteria_ids: list[str] | None = None) -> l
             непокрытый критерий или шаг без covers при заданных критериях.
     """
     normalized = _normalize_step_ids(steps)
+    # A4 (19.4a): web_fetch без url (ни в step.url, ни в input, ни в objective) —
+    # заведомо неисполнимый шаг; отклоняем с причиной для feedback в replan (R5).
+    for i, raw in enumerate(normalized):
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("tool_ref") or "").strip().lower() != "web_fetch":
+            continue
+        try:
+            resolved = resolve_web_fetch_url(raw)
+        except WebFetchUrlAmbiguous as e:
+            raise ValueError(f"Plan validation failed: step[{i}] web_fetch: {e}")
+        if resolved is None:
+            raise ValueError(
+                f"Plan validation failed: step[{i}] web_fetch: url не указан ни в поле url, "
+                "ни в input, ни в objective"
+            )
     result: list[PlanStep] = []
     errors: list[str] = []
     for i, raw in enumerate(normalized):

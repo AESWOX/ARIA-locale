@@ -119,10 +119,27 @@ def _run(router):
 
 
 def test_invalid_arguments_does_not_replan(env):
-    plan = [_step("s1", "web_fetch", "прочитать справку")]  # без url -> invalid_arguments
+    # Триггер (file_read + path="") держится на том, что validate_plan пропускает пустой path; если валидацию ужесточат — сменить триггер.
+    plan = [_step("s1", "file_read", "прочитать файл", path="")]
     router = Script([plan])
     _, status, code, msg = _run(router)
     assert (status, code) == ("failed", "invalid_arguments"), (code, msg)
+    assert router.oracle_calls == 1, "детерминированная ошибка не должна запускать replan"
+
+
+def test_hook_blocked_does_not_replan(env, monkeypatch):
+    from aria.core import toolhooks
+
+    decision = SimpleNamespace(blocked=True, reason="deny by test")
+
+    async def _pre_tool(*args, **kwargs):
+        return decision, None
+
+    monkeypatch.setattr(toolhooks, "pre_tool", _pre_tool)
+    plan = [_step("s1", "shell_execute", "выполнить echo ok")]
+    router = Script([plan])
+    _, status, code, msg = _run(router)
+    assert (status, code) == ("failed", "hook_blocked"), (code, msg)
     assert router.oracle_calls == 1, "детерминированная ошибка не должна запускать replan"
 
 

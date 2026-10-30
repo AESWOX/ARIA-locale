@@ -29,8 +29,10 @@ from aria.core.notifiers.protocol import Notifier, NotifierError
 from aria.core.plan_validator import (
     MAX_REPLAN_ATTEMPTS,
     PlanStep,
+    WebFetchUrlAmbiguous,
     check_oracle_naebal,
     effective_dependencies,
+    resolve_web_fetch_url,
     topological_waves,
     validate_plan,
     validate_plan_paths,
@@ -927,7 +929,16 @@ async def _execute_step_isolated(
             elif tool_ref == "web_search":
                 handler_input = {"query": step.get("query", objective), "max_results": step.get("max_results", 5)}
             elif tool_ref == "web_fetch":
-                handler_input = {"url": step.get("url", ""), "max_chars": step.get("max_chars", 8000)}
+                try:
+                    resolved_url = resolve_web_fetch_url(step)
+                except WebFetchUrlAmbiguous as e:
+                    raise ValueError(f"invalid_arguments (web_fetch): {e}")
+                if not resolved_url:
+                    raise ValueError(
+                        f"invalid_arguments (web_fetch): url не указан ни в поле url, ни в input, "
+                        f"ни в objective (шаг {step_id[:8] or index})"
+                    )
+                handler_input = {"url": resolved_url, "max_chars": step.get("max_chars", 8000)}
             else:
                 # Остальные registry-инструменты — input прямо из шага
                 handler_input = step.get("input") or step.get("input_json") or {}
