@@ -850,6 +850,7 @@ export const api = {
     const decoder = new TextDecoder();
     let buf = "";
     let result: ChatSendResult | null = null;
+    let stopped = false;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -867,11 +868,21 @@ export const api = {
         }
         if (evt.type === "delta" && evt.text) onDelta?.(evt.text);
         else if (evt.type === "done" && evt.result) result = evt.result;
+        else if (evt.type === "stopped") stopped = true;
       }
+      if (stopped) break;
     }
+    if (stopped) return { stopped: true };
     if (!result) throw new Error("stream ended without a done event");
     return result;
   },
+  chatUsage: (sessionId: string) =>
+    fetchJSON<ChatUsage>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/usage`),
+  chatStop: (sessionId: string) =>
+    fetchJSON<{ ok: boolean; stopped: boolean }>(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/stop`,
+      { method: "POST" },
+    ),
   chatModels: () => fetchJSON<ChatModels>("/api/chat/models"),
   chatDefaultProfile: () => fetchJSON<{ profile: RunProfile; saved: boolean }>("/api/chat/profile"),
   chatSaveProfile: (sessionId: string, profile: RunProfile) =>
@@ -2383,6 +2394,19 @@ export interface ChatSendResult {
   mode?: "chat" | "agent";
   task_id?: string;
   queued?: boolean;
+  /** 19.6: the user pressed Stop; no assistant message was stored */
+  stopped?: boolean;
+}
+
+/** 19.6a/19.6: context and cost of the open chat (GET /chat/sessions/{id}/usage). */
+export interface ChatUsage {
+  context_tokens: number;
+  context_window: number | null;
+  context_pct: number | null;
+  session_cost: number | null;
+  priced: boolean;
+  priced_messages: number;
+  unpriced_messages: number;
 }
 
 /** Encode each path segment but keep the "/" separators. */

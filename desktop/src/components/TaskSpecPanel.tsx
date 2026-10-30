@@ -22,7 +22,7 @@ type Labels = {
   clarifySend?: string; clarifyAccept?: string;
   planTitle?: string; planRequest?: string; planApprove?: string; planReject?: string;
   planNoDeps?: string; planNoneDeps?: string; planWaves?: string;
-  waves?: string; subtasks?: string; noSubtasks?: string;
+  waves?: string; subtasks?: string; noSubtasks?: string; planning?: string;
   auditTitle?: string; auditVerdict?: string; auditCriteria?: string;
 };
 
@@ -42,20 +42,21 @@ function depsText(step: PlanStepView, L: Labels): string {
 }
 
 export function TaskSpecPanel({
-  taskId, taskStatus, questions, labels, onAnswered, onError,
+  taskId, taskStatus, questions, labels, busy = false, onAnswered, onError,
 }: {
   taskId: string | null;
   taskStatus?: string | null;
   sessionId: string | null;
   questions: ClarifyQuestion[] | null;
   labels?: Labels;
+  busy?: boolean;
   onAnswered?: () => void;
   onError?: (m: string) => void;
 }) {
   const { t } = useI18n();
   const L: Labels = labels ?? ((t as unknown as { taskSpec?: Labels }).taskSpec ?? {});
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
+  const [working, setWorking] = useState(false);
   const [plan, setPlan] = useState<TaskPlanView | null>(null);
   const [children, setChildren] = useState<ChildTask[]>([]);
   const [audits, setAudits] = useState<AuditRow[]>([]);
@@ -75,9 +76,17 @@ export function TaskSpecPanel({
 
   useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [taskId]);
 
+  // 19.6: пока задача идёт, панель должна показывать актуальные шаги, а не снимок старта.
+  useEffect(() => {
+    if (!busy || !taskId) return;
+    const timer = setInterval(() => { void load(); }, 2000);
+    return () => clearInterval(timer);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [busy, taskId]);
+
   const submit = async (accept: boolean) => {
     if (!taskId) return;
-    setBusy(true);
+    setWorking(true);
     try {
       const payload = accept
         ? { answers: [], accept_assumptions: true }
@@ -97,20 +106,21 @@ export function TaskSpecPanel({
     } catch (e) {
       onError?.(errMessage(e));
     } finally {
-      setBusy(false);
+      setWorking(false);
     }
   };
 
   const requestApproval = async () => {
     if (!taskId) return;
-    setBusy(true);
+    setWorking(true);
     try { await api.taskRequestPlanApproval(taskId); onAnswered?.(); await load(); }
     catch (e) { onError?.(errMessage(e)); }
-    finally { setBusy(false); }
+    finally { setWorking(false); }
   };
 
   const hasQuestions = !!questions && questions.length > 0;
-  if (!hasQuestions && !plan && children.length === 0 && audits.length === 0) return null;
+  // 19.6 D-26: пока задача идёт, панель видна даже до появления плана («planning…»).
+  if (!busy && !hasQuestions && !plan && children.length === 0 && audits.length === 0) return null;
 
   const lastAudit = audits.length > 0 ? audits[audits.length - 1] : null;
 
@@ -166,11 +176,11 @@ export function TaskSpecPanel({
                 );
               })}
               <div className="sticky bottom-0 -mx-2 -mb-2 flex gap-2 border-t border-amber-500/40 bg-background px-2 py-2">
-                <Button size="sm" disabled={busy} onClick={() => void submit(false)}>
-                  {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Check className="mr-1 h-3 w-3" />}
+                <Button size="sm" disabled={working} onClick={() => void submit(false)}>
+                  {working ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Check className="mr-1 h-3 w-3" />}
                   {L.clarifySend ?? "Send answers"}
                 </Button>
-                <Button ghost size="sm" disabled={busy} onClick={() => void submit(true)}>
+                <Button ghost size="sm" disabled={working} onClick={() => void submit(true)}>
                   <ShieldCheck className="mr-1 h-3 w-3" /> {L.clarifyAccept ?? "Accept assumptions"}
                 </Button>
               </div>
@@ -185,7 +195,7 @@ export function TaskSpecPanel({
                   {L.planWaves ?? "waves"}: {plan.waves.length} · {String(plan.phase ?? "")}
                 </span>
                 {(!taskStatus || ["draft", "awaiting_clarification"].includes(taskStatus)) && (
-                  <Button ghost size="sm" className="ml-auto" disabled={busy} onClick={() => void requestApproval()}>
+                  <Button ghost size="sm" className="ml-auto" disabled={working} onClick={() => void requestApproval()}>
                     {L.planRequest ?? "Request approval"}
                   </Button>
                 )}
@@ -210,10 +220,16 @@ export function TaskSpecPanel({
             </div>
           )}
 
+          {!plan && busy && (
+            <div className="flex items-center gap-1 border border-border p-2 text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" /> {L.planning ?? "planning…"}
+            </div>
+          )}
+
           <div className="border border-border p-2">
             <div className="font-medium">{L.subtasks ?? "Subtasks"}</div>
             {children.length === 0
-              ? <div className="text-muted-foreground">{L.noSubtasks ?? "none yet"}</div>
+              ? <div className="text-muted-foreground">{busy ? (L.planning ?? "planning…") : (L.noSubtasks ?? "none yet")}</div>
               : <ul className="space-y-0.5">
                   {children.map((c) => (
                     <li key={c.id}>
@@ -252,8 +268,8 @@ export function TaskSpecPanel({
           )}
 
           <div className="flex gap-2">
-            <Button ghost size="sm" disabled={busy} onClick={() => void load()}>
-              {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+            <Button ghost size="sm" disabled={working} onClick={() => void load()}>
+              {working ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
               {L.planReject ? "" : ""}Refresh
             </Button>
           </div>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, Check, Loader2, MessageCircle, Plus, RotateCcw, Send, Square, X } from "lucide-react";
 import { api } from "@/lib/api";
-import type { ChatModels, ChatMsg, ChatSessionRow, ChatStatus, RunProfile, RunState } from "@/lib/api";
+import type { ChatModels, ChatMsg, ChatSessionRow, ChatStatus, ChatUsage, RunProfile, RunState } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@vendor/ui/ui/components/button";
 import { Markdown } from "@/components/Markdown";
@@ -89,6 +89,9 @@ export default function NativeChatPage() {
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<Mode>("chat");
   const [run, setRun] = useState<RunState | null>(null);
+  const [usage, setUsage] = useState<ChatUsage | null>(null);
+  const usageInFlight = useRef(false);
+  const usageTick = useRef(0);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [profile, setProfile] = useState<RunProfile | null>(null);
   const [models, setModels] = useState<ChatModels | null>(null);
@@ -192,6 +195,23 @@ export default function NativeChatPage() {
     }
   }, []);
 
+  // 19.6: context and cost of the open chat. Informational: failures never block the chat.
+  const loadUsage = useCallback(async (sid: string | null) => {
+    if (!sid || usageInFlight.current) return;
+    usageInFlight.current = true;
+    try {
+      setUsage(await api.chatUsage(sid));
+    } catch {
+      /* usage is informational */
+    } finally {
+      usageInFlight.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUsage(activeId);
+  }, [activeId, loadUsage]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -244,6 +264,8 @@ export default function NativeChatPage() {
         setRun(state);
         setMessages(msgs);
         if (state.terminal) void refreshSessions();
+        usageTick.current += 1;
+        if (usageTick.current % 3 === 0) void loadUsage(sid);
       } catch (e) {
         if (!stopped) setError(errMessage(e));
       }
@@ -253,7 +275,7 @@ export default function NativeChatPage() {
       stopped = true;
       clearInterval(timer);
     };
-  }, [watching, activeId, refreshSessions]);
+  }, [watching, activeId, refreshSessions, loadUsage]);
 
   // keep the list fresh so other chats can start blinking while you work in this one
   useEffect(() => {
@@ -273,7 +295,7 @@ export default function NativeChatPage() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages, sending]);
+  }, [messages, sending, run, taskQuestions, streamingText]);
 
   const openSession = async (id: string) => {
     if (sending || id === activeId) return;
@@ -296,6 +318,11 @@ export default function NativeChatPage() {
     setMessages([]);
     setError(null);
     setRun(null);
+    // 19.6 D-25: карточка уточнений и хвост стрима прошлой задачи не должны переживать New chat.
+    setTaskQuestions(null);
+    setStreamingText(null);
+    setUsage(null);
+    setMode("chat");
   };
 
   const sendRun = async (text: string, runMode: "agent" | "plan") => {
@@ -318,6 +345,7 @@ export default function NativeChatPage() {
     setTaskQuestions(hasQuestions ? qs : null);
     setMessages(await api.chatMessages(sid));
     setRun(await api.runState(sid));
+    void loadUsage(sid);
     if (res.queued === false && !hasQuestions) setError("This task is already queued or running.");
   };
 
@@ -377,6 +405,12 @@ export default function NativeChatPage() {
         (delta) => setStreamingText((prev) => (prev ?? "") + delta),
       );
       setStreamingText(null);
+      // 19.6: Stop вернул {"type":"stopped"} — ассистент не сохранён, это не ошибка.
+      if (sent.stopped) {
+        await loadMessages(sid);
+        void loadUsage(sid);
+        return;
+      }
       // 19.4b B2: запросу нужен инструмент — бэкенд перевёл сессию в Agent.
       // Переключаем вкладку и включаем опрос запуска: шаги и ответ придут существующим polling.
       if (sent.mode === "agent") {
@@ -387,6 +421,7 @@ export default function NativeChatPage() {
       const qs = (sent as unknown as { questions?: ClarifyQuestion[] })?.questions ?? null;
       setTaskQuestions(qs && qs.length > 0 ? qs : null);
       await loadMessages(sid);
+      void loadUsage(sid);
       setStatus(await api.chatStatus());
     } catch (e) {
       setError(errMessage(e));
@@ -484,6 +519,7 @@ export default function NativeChatPage() {
           busy={runBusy(run) || sending}
           waiting={(run?.attention.length ?? 0) > 0}
           costToday={costToday}
+          usage={usage}
           focus={focus}
           onToggleFocus={() => applyFocus(!focus)}
         />
@@ -622,10 +658,12 @@ export default function NativeChatPage() {
         )}
 
         <TaskSpecPanel
+          key={run?.task_id ?? "none"}
           taskId={run?.task_id ?? null}
           taskStatus={run?.status ?? null}
           sessionId={activeId}
           questions={taskQuestions}
+          busy={mode !== "chat" && (runBusy(run) || sending)}
           onAnswered={async () => {
             setTaskQuestions(null);
             if (activeId) {
@@ -674,6 +712,16 @@ export default function NativeChatPage() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
           />
+          {mode === "chat" && sending && activeId && (
+            <Button
+              ghost
+              onClick={() => void api.chatStop(activeId).catch(() => undefined)}
+              aria-label="Stop"
+              title="Stop the answer (the chat stays open)"
+            >
+              <Square className="h-4 w-4" />
+            </Button>
+          )}
           <Button onClick={() => void send(false)} disabled={sending || runBusy(run) || !input.trim()} aria-label="Send">
             {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           </Button>
