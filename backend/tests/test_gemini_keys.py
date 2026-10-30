@@ -85,7 +85,7 @@ def test_429_backoff_honours_retry_after_and_daily_quota(monkeypatch):
     plain = {"error": {"status": "RESOURCE_EXHAUSTED", "message": "rate limit"}}
     prov, pool = _provider(["k1", "k2"], _by_key({"k1": (429, plain, {}), "k2": (200, OK, {})}), monkeypatch)
     _chat(prov)
-    assert 50 < pool._cooldown_until["k1"] - __import__("time").monotonic() <= 60
+    assert 50 < pool._cooldown_until["k1"] - __import__("time").monotonic() <= 60 + 1e-6
 
 
 def test_cooldown_never_shortens(monkeypatch):
