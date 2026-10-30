@@ -16,7 +16,9 @@ from aria.tools.registry import _make_plan
 
 
 def _step(goal: str, tool: str = "read_note") -> dict:
-    return {"objective": goal, "tool_ref": tool}
+    # 19.4c: read_note требует note_name; фикстура приведена к схеме инструмента.
+    extra = {"note_name": "INDEX"} if tool == "read_note" else {}
+    return {"objective": goal, "tool_ref": tool, **extra}
 
 
 def _plan_json(steps: list[dict]) -> str:

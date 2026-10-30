@@ -9,16 +9,20 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aria.core.integrity import IntegrityFlag
-from aria.tools.validators import command_rejection_reason, is_windows_command
+from aria.tools.validators import command_rejection_reason, is_windows_command, validate_tool_input
 
 
 class PlanStep(BaseModel):
     """Один шаг плана задачи. Обязателен tool_ref или skill_ref."""
+
+    # D-24: аргументы инструмента могут лежать в input (dict), а модель часто кладёт их
+    # в корень шага. extra="allow" сохраняет такие ключи до PlanStep.model_dump.
+    model_config = ConfigDict(extra="allow")
 
     step_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     objective: str
@@ -28,6 +32,7 @@ class PlanStep(BaseModel):
     path: str | None = None
     command: str | None = None
     url: str | None = None
+    input: dict[str, Any] | None = None
     status: Literal["pending", "in_progress", "done", "failed"] = "pending"
     tool_call_ids: list[uuid.UUID] = []
     # PR-4: план — это DAG, а не список. depends_on — id шагов-предшественников,
@@ -89,6 +94,41 @@ def resolve_web_fetch_url(step: dict) -> str | None:
             f"objective содержит несколько разных URL, а step.url/input пусты: {sorted(urls)}"
         )
     return urls.pop() if urls else None
+
+
+# D-24: поля шага, которые никогда не являются аргументами инструмента.
+# status исключён всегда: у log_decision есть одноимённый аргумент, и служебный
+# Literal шага не должен попадать в handler (аргумент — только через input).
+_STRUCTURAL_STEP_KEYS = frozenset({
+    "step_id", "objective", "role", "tool_ref", "skill_ref", "depends_on", "covers",
+    "write_scope", "tool_call_ids", "index", "status", "input", "input_json",
+})
+# Явные ветви executor.py: у них свои источники аргументов, step_tool_input им не нужен.
+_EXPLICIT_BRANCH_TOOLS = frozenset({
+    "llm_task", "file_write", "shell_execute", "file_read", "file_search", "web_search", "web_fetch",
+})
+
+
+def step_tool_input(step: dict, spec=None) -> dict:
+    """Аргументы инструмента из шага плана (D-24).
+
+    Порядок: корневые ключи шага, объявленные в схеме инструмента → ``input_json`` →
+    ``input`` (явный input побеждает). Служебные поля шага не копируются никогда.
+    Без spec читаются только ``input``/``input_json``.
+    """
+    props: dict = {}
+    if spec is not None:
+        props = (getattr(spec, "input_schema", None) or {}).get("properties", {}) or {}
+    merged: dict = {}
+    for key, value in (step or {}).items():
+        if key in _STRUCTURAL_STEP_KEYS or key not in props or value is None:
+            continue
+        merged[key] = value
+    for key in ("input_json", "input"):
+        extra = (step or {}).get(key)
+        if isinstance(extra, dict):
+            merged.update(extra)
+    return merged
 
 
 # Максимум replan-попыток для Oracle до НАЕБАЛ.
@@ -383,6 +423,28 @@ def validate_plan(steps: list[dict], criteria_ids: list[str] | None = None) -> l
             raise ValueError(
                 f"Plan validation failed: step {step.step_id} command is not runnable on Windows "
                 f"({command_rejection_reason(step.command)}): {step.command!r}"
+            )
+
+    # D-24: аргументы else-ветки проверяются до исполнения. Иначе неполный план
+    # доходил до executor, падал кодом вне R6 и уходил в платный ZABYL-replan.
+    # Здесь ошибка сразу уходит в feedback единственного replan (R5).
+    from aria.tools.registry import get_tool
+
+    for idx, step in enumerate(result):
+        tool_ref = str(step.tool_ref or "").strip().lower()
+        if not tool_ref or step.skill_ref or tool_ref in _EXPLICIT_BRANCH_TOOLS:
+            continue
+        try:
+            spec = get_tool(tool_ref)
+        except KeyError:
+            continue  # неизвестный/алиасный tool_ref — решение за executor
+        if spec.handler is None:
+            continue
+        merged = step_tool_input(step.model_dump(mode="json"), spec)
+        arg_errors = validate_tool_input(spec.input_schema, merged)
+        if arg_errors:
+            raise ValueError(
+                f"Plan validation failed: step[{idx}] {tool_ref}: " + "; ".join(arg_errors)
             )
 
     if criteria_ids is not None:

@@ -33,6 +33,7 @@ from aria.core.plan_validator import (
     check_oracle_naebal,
     effective_dependencies,
     resolve_web_fetch_url,
+    step_tool_input,
     topological_waves,
     validate_plan,
     validate_plan_paths,
@@ -940,10 +941,8 @@ async def _execute_step_isolated(
                     )
                 handler_input = {"url": resolved_url, "max_chars": step.get("max_chars", 8000)}
             else:
-                # Остальные registry-инструменты — input прямо из шага
-                handler_input = step.get("input") or step.get("input_json") or {}
-                if not handler_input:
-                    raise ValueError(f"tool_ref={tool_ref} требует step.input/input_json")
+                # D-24: аргументы могут лежать в input/input_json или корнем шага.
+                handler_input = step_tool_input(step, spec)
 
             # Тот же барьер аргументов, что в loop._execute_tool: Plan-режим ходит в handler напрямую,
             # и без этого пустой url/path/glob давал бы «успех» или невнятный KeyError.
