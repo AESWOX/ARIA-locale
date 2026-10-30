@@ -423,6 +423,13 @@ async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_run
         costs = list(
             db.execute(select(m.LlmUsage.cost_usd).where(m.LlmUsage.session_id == session_id)).scalars()
         )
+        cache_rows = db.execute(
+            select(m.LlmUsage.prompt_hit, m.LlmUsage.prompt_miss).where(m.LlmUsage.session_id == session_id)
+        ).all()
+    known = [(h, mi) for h, mi in cache_rows if h is not None and mi is not None]
+    cache_hits = sum(int(h) for h, _mi in known)
+    cache_total = sum(int(h) + int(mi) for h, mi in known)
+    cache_hit_ratio = round(cache_hits / cache_total, 3) if cache_total > 0 else None
     priced_messages = sum(1 for c in costs if c is not None)
     unpriced_messages = len(costs) - priced_messages
     session_cost_complete = bool(costs) and unpriced_messages == 0
@@ -437,6 +444,7 @@ async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_run
         "priced": priced_messages > 0 and session_cost_complete,
         "priced_messages": priced_messages,
         "unpriced_messages": unpriced_messages,
+        "cache_hit_ratio": cache_hit_ratio,
     }
 
 

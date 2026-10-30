@@ -22,6 +22,7 @@ KEYS = {
     "priced",
     "priced_messages",
     "unpriced_messages",
+    "cache_hit_ratio",
 }
 
 
