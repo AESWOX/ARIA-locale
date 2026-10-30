@@ -80,7 +80,7 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
-import { api, readFirstRun } from "@/lib/api";
+import { readFirstRun } from "@/lib/api";
 import type { StatusResponse } from "@/lib/api";
 
 /**
@@ -413,23 +413,6 @@ export default function App() {
   const isChatRoute = normalizedPath === "/chat";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
 
-  // `dashboard.show_token_analytics` gates the Analytics nav item.  The
-  // page itself remains reachable by URL (it renders an explanation when
-  // the flag is off — see AnalyticsPage), but hiding the nav entry avoids
-  // surfacing misleading token/cost numbers in the sidebar.  Default off.
-  const [showTokenAnalytics, setShowTokenAnalytics] = useState(false);
-  useEffect(() => {
-    api
-      .getConfig()
-      .then((cfg) => {
-        const dash = (cfg?.dashboard ?? {}) as {
-          show_token_analytics?: unknown;
-        };
-        setShowTokenAnalytics(dash.show_token_analytics === true);
-      })
-      .catch(() => setShowTokenAnalytics(false));
-  }, []);
-
   // A plugin can replace the built-in /chat page via `tab.override: "/chat"`
   // in its manifest.  When one does, `buildRoutes` already swaps the route
   // element for <PluginPage /> — but we also have to suppress the
@@ -460,12 +443,7 @@ export default function App() {
     [embeddedChat],
   );
 
-  const builtinNav = useMemo(() => {
-    const base = [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST];
-    return showTokenAnalytics
-      ? base
-      : base.filter((n) => n.path !== "/analytics");
-  }, [showTokenAnalytics]);
+  const builtinNav = useMemo(() => [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST], []);
 
   const sidebarNav = useMemo(
     () => partitionSidebarNav(builtinNav, manifests),
@@ -727,37 +705,6 @@ export default function App() {
                 </div>
               )}
 
-              {sidebarNav.pluginItems.length > 0 && (
-                <div
-                  aria-labelledby="aria-sidebar-plugin-nav-heading"
-                  className="flex flex-col border-t border-current/10 pb-2"
-                  role="group"
-                >
-                  <span
-                    className={cn(
-                      "px-5 pt-2.5 pb-1",
-                      "font-brand text-display text-xs tracking-[0.12em] text-text-tertiary",
-                      isDesktopCollapsed && "lg:hidden",
-                    )}
-                    id="aria-sidebar-plugin-nav-heading"
-                  >
-                    {t.app.pluginNavSection}
-                  </span>
-
-                  <ul className="flex flex-col">
-                    {sidebarNav.pluginItems.map((item) => (
-                      <SidebarNavLink
-                        closeMobile={closeMobile}
-                        collapsed={isDesktopCollapsed}
-                        item={item}
-                        key={item.path}
-                        t={t}
-                        tooltipWarmRef={tooltipWarmRef}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              )}
             </nav>
 
             <SidebarSystemActions
