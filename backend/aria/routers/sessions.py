@@ -363,6 +363,22 @@ async def post_message(
         raise HTTPException(status_code=400, detail="mode must be one of ['agent', 'plan']")
     if not content:
         raise HTTPException(status_code=400, detail="content required")
+    # 19.4b B1: приветствие/«ок»/«спасибо» — это ответ чата в любой вкладке:
+    # задача, план и карточки уточнений не создаются. Ответ на открытые вопросы
+    # («да», «ок» при awaiting_clarification) сюда не попадает — он идёт в TaskSpec.
+    with session_scope() as db:
+        early_session = repo.get_session(db, session_id)
+        if early_session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        current = (
+            repo.get_task(db, early_session.current_task_id) if early_session.current_task_id else None
+        )
+        awaiting_reply = current is not None and current.status == TaskStatus.awaiting_clarification
+    if role == "user" and not awaiting_reply and clarifier.is_small_talk(content):
+        from aria.routers.chat import _chat_send
+
+        answer = await _chat_send(session_id, {"content": content}, request)
+        return {"ok": True, "mode": "chat", "assistant": (answer or {}).get("assistant")}
     gate_task_id: uuid.UUID | None = None
     with session_scope() as db:
         session = repo.get_session(db, session_id)
@@ -404,7 +420,7 @@ async def post_message(
     if gate_task_id is not None:
         # Гейт вне DB-scope: внутри — сетевой вызов clarifier и сообщение с вопросами.
         outcome = await clarifier.run_gate(
-            gate_task_id, content, router=getattr(request.app.state, "router", None)
+            gate_task_id, content, router=getattr(request.app.state, "router", None), mode=mode
         )
         with session_scope() as db:
             task = repo.get_task(db, gate_task_id)

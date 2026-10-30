@@ -377,6 +377,12 @@ export default function NativeChatPage() {
         (delta) => setStreamingText((prev) => (prev ?? "") + delta),
       );
       setStreamingText(null);
+      // 19.4b B2: запросу нужен инструмент — бэкенд перевёл сессию в Agent.
+      // Переключаем вкладку и включаем опрос запуска: шаги и ответ придут существующим polling.
+      if (sent.mode === "agent") {
+        setMode("agent");
+        setRun(await api.runState(sid).catch(() => null));
+      }
       // П.3.1 ТЗ: бэкенд вернул пакет уточнений -> показываем карточку, а не просто текст.
       const qs = (sent as unknown as { questions?: ClarifyQuestion[] })?.questions ?? null;
       setTaskQuestions(qs && qs.length > 0 ? qs : null);

@@ -2372,12 +2372,17 @@ export interface ChatModels {
 }
 
 export interface ChatSendResult {
-  user: ChatMsg;
-  assistant: ChatMsg;
-  provider_id: string;
-  degraded: boolean;
+  /** absent when the request was switched to Agent (19.4b B2) */
+  user?: ChatMsg;
+  assistant?: ChatMsg;
+  provider_id?: string;
+  degraded?: boolean;
   /** set when the answer came from a fallback class after the preferred provider failed */
   fallback?: boolean;
+  /** 19.4b B2: the chat request needed a tool and the session moved to Agent */
+  mode?: "chat" | "agent";
+  task_id?: string;
+  queued?: boolean;
 }
 
 /** Encode each path segment but keep the "/" separators. */

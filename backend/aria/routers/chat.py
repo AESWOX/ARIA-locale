@@ -33,7 +33,7 @@ from aria.core import runprofile, timing
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import SourceTrust
+from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
 from aria.llm import compression
 from aria.llm.key_pool import NoAvailableKeys
@@ -67,6 +67,57 @@ class _ChatStream:
 
 
 _ACTIVE_STREAMS: dict[uuid.UUID, _ChatStream] = {}
+
+_TERMINAL_TASK_STATUSES = {
+    TaskStatus.done,
+    TaskStatus.done_unaudited,
+    TaskStatus.failed,
+    TaskStatus.cancelled,
+}
+
+
+async def _switch_to_agent(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
+    """19.4b B2: запрос, которому нужен инструмент, уходит из Chat в Agent.
+
+    Возвращает ответ с ``mode="agent"`` (и ``task_id``), если сессия переключена,
+    иначе None — сообщение идёт обычным чат-путём. Гейт уточнений здесь не запускается:
+    действие уже названо, карточки только мешают (см. 19.4b B1/B2).
+    """
+    from aria.core import clarifier
+
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry"):
+        return None
+    if clarifier.is_small_talk(content) or not clarifier.needs_tools(content):
+        return None
+    runner = getattr(request.app.state, "task_runner", None)
+    if runner is None:
+        return None
+    with session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        task = repo.get_task(db, session.current_task_id) if session.current_task_id else None
+        if task is not None and task.status not in _TERMINAL_TASK_STATUSES:
+            return None  # задача уже идёт: не переключаем повторно
+        task = repo.create_task(
+            db,
+            session,
+            role=runprofile.root_role(runprofile.get_profile(db, session.id)),
+            objective=content,
+            draft_tz_md=f"# {content[:80]}\n",
+        )
+        repo.set_task_status(db, task, TaskStatus.approved)
+        user_msg = repo.append_message(
+            db, session, role="user", content=content, source_trust=SourceTrust.trusted
+        )
+        session.updated_at = datetime.now(timezone.utc)
+        if (session.title or "") in DEFAULT_TITLES:
+            session.title = content.replace("\n", " ")[:60]
+        task_id = task.id
+    emit_message_created(user_msg, session_id, task_id)
+    queued = bool(runner.submit(task_id, mode="agent", source="ui").get("queued"))
+    return {"ok": True, "mode": "agent", "task_id": str(task_id), "queued": queued}
 
 
 def _real_provider_ids(request: Request) -> list[str]:
@@ -389,6 +440,18 @@ async def chat_send(
     # chat_total: весь хендлер, от запроса до сохранённого ответа (4xx/5xx считаются как errors).
     # Не декоратор: при ``from __future__ import annotations`` FastAPI разбирает аннотации в globals обёртки.
     with timing.stage("chat_total"):
+        switched = await _switch_to_agent(session_id, payload, request)
+        if switched is not None:
+            if payload.get("stream"):
+                async def _switched_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": switched})
+
+                return StreamingResponse(
+                    _switched_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return switched
         if payload.get("stream"):
             return await _chat_send_stream(session_id, payload, request)
         return await _chat_send(session_id, payload, request)
