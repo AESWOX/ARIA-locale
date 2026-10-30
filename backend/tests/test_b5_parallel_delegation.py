@@ -47,11 +47,12 @@ class _Sub(StubProvider):
     считает ход «разговорным» и ставит needs_rework), увидев результат — отвечает итогом.
     """
 
-    def __init__(self, *a, delay: float = 0.0, **k):
+    def __init__(self, *a, delay: float = 0.0, gate: int = 0, **k):
         super().__init__(*a, **k)
         self.delay = delay
         self.live = 0
         self.max_live = 0
+        self.gate = gate
 
     async def chat(self, messages, tools, timeout_sec):
         # Дети делят историю сессии родителя, поэтому решение принимается СРАЗУ при входе (до задержки):
@@ -60,6 +61,16 @@ class _Sub(StubProvider):
         self.live += 1
         self.max_live = max(self.max_live, self.live)
         try:
+            if self.gate:
+                # Детерминированная проверка параллельности: ждём, пока в полёте не окажется gate вызовов.
+                # При последовательном исполнении это не наступит и тест упадёт по таймауту.
+                deadline = time.monotonic() + 5.0
+                while self.live < self.gate:
+                    if time.monotonic() > deadline:
+                        raise AssertionError(
+                            f"только {self.live} из {self.gate} саб-агентов работали одновременно"
+                        )
+                    await asyncio.sleep(0.01)
             if self.delay:
                 await asyncio.sleep(self.delay)
             if self._queue:
@@ -174,18 +185,19 @@ def test_run_bounded_default_limit_comes_from_settings(monkeypatch):
 def test_three_delegations_from_one_response_run_concurrently(world):
     router, stubs, sandbox, parent_id = world
     prem, sub = stubs["premium_reasoning"], stubs["subagent_execution"]
-    sub.delay = 0.6  # большой шаг: накладные расходы Windows (БД, event loop) не должны маскировать параллелизм
+    sub.delay = 0.05
+    # Детерминированный барьер: каждый вызов ждёт, пока в полёте не будет 3 вызовов.
+    # При последовательном исполнении барьер не соберётся и тест упадёт по таймауту (не по стене времени).
+    sub.gate = 3
     prem.push(_calls(*[_deleg(i) for i in range(3)]))
     prem.push(final_answer("all three finished"))
 
-    t0 = time.monotonic()
     asyncio.run(execute_agent_loop(parent_id, router, sandbox))
-    elapsed = time.monotonic() - t0
 
     assert sub.max_live == 3, "три саб-агента должны работать одновременно"
-    # Каждый ребёнок делает 2 вызова модели (прочитать файл -> итог) = 2 * 0.6 с.
-    # Параллельно: ~1.2 с + накладные (на Windows до ~0.4 с). Последовательно: >= 3 * 1.2 = 3.6 с. Порог посередине.
-    assert elapsed < 2.4, f"последовательно было бы >= 3.6 с, получилось {elapsed:.2f}"
+    # Порог по времени убран: на Windows CI накладные (SQLite, event loop) доминировали
+    # и давали ложное «последовательно» (3.19 с) при реальном max_live=3. Барьер выше
+    # доказывает одновременность без зависимости от скорости раннера.
     kids = _children(parent_id)
     assert len(kids) == 3 and all(st in (TaskStatus.done, TaskStatus.done_unaudited) for _i, st in kids)
     assert _parent_status(parent_id) in (TaskStatus.done, TaskStatus.done_unaudited)
