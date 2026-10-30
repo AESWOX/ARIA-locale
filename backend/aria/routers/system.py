@@ -112,6 +112,14 @@ async def open_external(body: dict[str, Any], _: str = Depends(require_runtime_t
     return {"ok": True}
 
 
+@router.get("/system/balance")
+async def system_balance(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """E4: баланс DeepSeek; без ключа/ошибки — честное «неизвестно», не 5xx."""
+    from aria.llm.balance import fetch_balance
+
+    return await fetch_balance()
+
+
 @router.get("/system/self-test")
 async def system_self_test(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     """§0: живой эндпоинт целостности — проверяет БД, модели, репо, роутер, скиллы."""
