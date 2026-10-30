@@ -51,7 +51,7 @@ def test_daily_weekly_sums_and_incomplete():
 def test_day_boundary_excludes_yesterday_local():
     from aria.http_utils import utc_now
 
-    day_start = utc_now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = utc_now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     with session_scope() as db:
         db.add(
             m.LlmUsage(

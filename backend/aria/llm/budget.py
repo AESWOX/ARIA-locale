@@ -1,7 +1,7 @@
 """E3: бюджет по факту из llm_usage (не оценка по token_estimate)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
@@ -26,7 +26,8 @@ def _spend_since(since: datetime) -> tuple[float, bool]:
 def compute_budget_status(daily_usd: float, weekly_usd: float) -> dict:
     """Суммы по llm_usage; форма daily_pct/weekly_pct/daily_usd/weekly_usd сохранена."""
     now = utc_now()
-    day_start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    local_midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = local_midnight.astimezone(timezone.utc)  # SQLite stores naive UTC; compare in UTC
     day, day_incomplete = _spend_since(day_start)
     week, week_incomplete = _spend_since(now - timedelta(days=7))
     return {
