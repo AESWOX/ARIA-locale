@@ -1,8 +1,10 @@
-"""S2a: адаптеры без ключей. Регистрация в общий router — S4 (DDG последним)."""
+"""S2a/S7: адаптеры без ключей; регистрация в общий router — S4 (DDG последним)."""
 from __future__ import annotations
 
 from aria.tools.search.providers.arxiv import ArxivProvider
 from aria.tools.search.providers.ddg import DuckDuckGoProvider
+from aria.tools.search.providers.keyed import active_keyed_providers
+from aria.tools.search.providers.searxng import active_searxng_provider
 from aria.tools.search.providers.github import GitHubProvider
 from aria.tools.search.providers.openalex import OpenAlexProvider
 from aria.tools.search.providers.stackexchange import StackExchangeProvider
@@ -11,11 +13,16 @@ from aria.tools.search.providers.wikipedia import WikipediaProvider
 
 
 def build_default_providers():
-    return [
+    providers = list(active_keyed_providers())
+    searxng = active_searxng_provider()
+    if searxng is not None:
+        providers.append(searxng)
+    providers.extend([
         WikipediaProvider(), HackerNewsProvider(), ArxivProvider(),
         StackExchangeProvider(), GitHubProvider(), OpenAlexProvider(),
         DuckDuckGoProvider(),
-    ]
+    ])
+    return providers
 
 
 def install_default_providers() -> None:

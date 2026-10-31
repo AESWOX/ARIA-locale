@@ -22,7 +22,12 @@ atexit.register(shutil.rmtree, _TEST_ROOT, ignore_errors=True)
 # Never inherit the developer's configuration or real provider keys.
 for _name in (
     "ARIA_SKILLS_DIR", "OBSIDIAN_VAULT_PATH", "GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY",
-    "GROQ_API_KEYS", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "GROQ_API_KEYS",
+    "TAVILY_API_KEY",
+    "BRAVE_API_KEY",
+    "EXA_API_KEY",
+    "SERPER_API_KEY",
+    "SEARXNG_URL", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     "GEMINI_FLASH_MODEL", "GEMINI_PRO_MODEL", "GROQ_MODELS", "GROQ_MODEL", "VISION_GEMINI_API_KEYS", "COMPRESSION_GEMINI_API_KEYS",
 ):
     os.environ.pop(_name, None)
