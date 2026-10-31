@@ -27,7 +27,8 @@ for _name in (
     "BRAVE_API_KEY",
     "EXA_API_KEY",
     "SERPER_API_KEY",
-    "SEARXNG_URL", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "SEARXNG_URL",
+    "TELEGRAM_PUBLIC_CHANNELS", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     "GEMINI_FLASH_MODEL", "GEMINI_PRO_MODEL", "GROQ_MODELS", "GROQ_MODEL", "VISION_GEMINI_API_KEYS", "COMPRESSION_GEMINI_API_KEYS",
 ):
     os.environ.pop(_name, None)
@@ -155,7 +156,14 @@ def _fresh_database():
 
 
 def pytest_collection_modifyitems(items):
-    """Auto-apply anyio marker to all async test functions."""
+    """Auto-apply anyio marker to all async test functions; skip live network tests by default."""
+    import os
+
+    if os.environ.get("ARIA_LIVE") != "1":
+        skip_live = pytest.mark.skip(reason="live network test; set ARIA_LIVE=1")
+        for item in items:
+            if "live" in item.keywords:
+                item.add_marker(skip_live)
     for item in items:
         if item.get_closest_marker("anyio") is None:
             # Check if it's an async function
@@ -226,3 +234,4 @@ def _never_launch_file_manager(monkeypatch):
     monkeypatch.setattr(logs_router, "_open_in_file_manager", _no_real_launch)
     yield
     _NO_REAL_LAUNCH_CALLS.clear()
+

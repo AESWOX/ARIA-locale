@@ -13,6 +13,7 @@ SQLite vs Postgres (P1.5):
 """
 from __future__ import annotations
 
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -92,6 +93,8 @@ class Settings(BaseSettings):
     search_provider_cooldown_min: int = 10
     # S7: свой SearXNG (пусто = адаптер не активен).
     searxng_url: str = ""
+    # T1: ????????? ?????? t.me (????? ????? ???????), ?????? ?????? ????????.
+    telegram_public_channels: str = ""
     # S2b: вежливый пул OpenAlex (пусто = без mailto).
     openalex_mailto: str = ""
     # S3: кэш прочитанных страниц (TTL, только при ETag/Last-Modified).
@@ -395,9 +398,20 @@ class Settings(BaseSettings):
 
 
 
+    @property
+    def telegram_public_channels_list(self) -> list[str]:
+        names: list[str] = []
+        for raw in (self.telegram_public_channels or "").split(","):
+            name = raw.strip().lstrip("@")
+            if re.fullmatch(r"[A-Za-z0-9_]{5,32}", name or ""):
+                names.append(name)
+        return names
+
+
 @lru_cache
 def get_settings() -> Settings:
     # Installed app: make sure the persistent user dir (db, vault, skills,
     # logs) exists and bundled skills are copied before anything touches it.
     paths.ensure_user_data()
     return Settings()
+
