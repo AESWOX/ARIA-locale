@@ -493,6 +493,7 @@ class _Prepared:
     chat_fallback: tuple[str, ...]
     chat_prefer: str | None
     dlp_applied: bool
+    sensitive: bool = False
 
 
 async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> _Prepared:
@@ -506,6 +507,9 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
         raise HTTPException(status_code=413, detail=f"message too long (max {MAX_CONTENT_CHARS} characters)")
     if not _real_provider_ids(request):
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_HINT)
+
+    # E9: детект чувствительного — по СЫРОМУ тексту, до DLP-маски.
+    from aria.core.privacy import contains_sensitive
 
     # 1) store the user message, collect history (one short DB scope)
     with session_scope() as db:
@@ -523,6 +527,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
         if (session.title or "") in DEFAULT_TITLES:
             session.title = (content or user_msg.content).replace("\n", " ")[:60]
         user_payload = serialize_message(user_msg)
+        sensitive = contains_sensitive(content if not retry else (user_msg.content or ""))
     if not retry:
         emit_message_created(user_msg, session_id, None)
 
@@ -570,6 +575,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
         chat_class=chat_class,
         chat_fallback=chat_fallback,
         chat_prefer=chat_prefer,
+        sensitive=sensitive,
         dlp_applied=dlp_applied,
     )
 
@@ -588,6 +594,7 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
             reject_empty=True,
             purpose="chat",
             session_id=session_id,
+            sensitive=prepared.sensitive,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a clear HTTP error below
         logger.warning("chat: model call failed: %s", exc)
@@ -680,7 +687,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
     сессии и при Stop отменяет задачу, отдавая ``{"type":"stopped"}`` без сохранения ассистента.
     """
     provider = _pick_stream_provider(request, prepared)
-    if provider is None or prepared.dlp_applied:
+    if provider is None or prepared.dlp_applied or prepared.sensitive:
         result = await _run_nonstream(session_id, request, prepared)
         yield _ndjson_line({"type": "done", "result": result})
         return

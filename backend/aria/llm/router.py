@@ -264,6 +264,7 @@ class ProviderRouter:
         purpose: str = "other",
         session_id: object | None = None,
         task_id: object | None = None,
+        sensitive: bool = False,
     ) -> RoutingResult:
         """П.5.2 ТЗ: запрос держит слот класса провайдера — параллельные волны EXECUTE
         и делегирование не выбивают квоты free-tier одним залпом."""
@@ -283,6 +284,7 @@ class ProviderRouter:
                     retry_backoff_sec=retry_backoff_sec,
                     prefer_provider_id=prefer_provider_id,
                     reject_empty=reject_empty,
+                    sensitive=sensitive,
                 )
         # E1: ровно одна строка на успешный route_chat (не в _timed_chat: preferred-fallthrough
         # и empty-reply дают несколько попыток на один вызов).
@@ -312,6 +314,7 @@ class ProviderRouter:
         retry_backoff_sec: float = RETRY_BACKOFF_SEC,
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
+        sensitive: bool = False,
     ) -> RoutingResult:
         """``reject_empty`` — пустой текст без вызова тулов считается отказом звена (идём к следующему),
         а не успехом. Нужно чату: 200 OK с пустым content раньше обрывал всю цепочку (502).
@@ -321,6 +324,8 @@ class ProviderRouter:
         preferred_failed = False
         if prefer_provider_id:
             preferred = self.find_provider(prefer_provider_id)
+            if sensitive and preferred is not None and not preferred.provider_id.startswith("deepseek"):
+                preferred = None
             if preferred is not None and self.budget_gate(preferred.provider_class)[0]:
                 try:
                     if await self._connectivity_ok(preferred, db):
@@ -335,11 +340,42 @@ class ProviderRouter:
             preferred_failed = True
         result = await self._route_by_class(
             provider_class, messages, tools, timeout_sec, allow_degrade, db, resilient, fallback_classes, retry_backoff_sec,
-            reject_empty,
+            reject_empty, sensitive,
         )
         if preferred_failed:
             result.fallback = True
         return result
+
+    async def _route_sensitive(
+        self,
+        provider_class: str,
+        messages: list[ChatMessage],
+        tools: list[dict],
+        timeout_sec: float,
+        db: OrmSession | None,
+        reject_empty: bool,
+    ) -> RoutingResult:
+        """E9: чувствительное — только DeepSeek; free-tier (Gemini/Groq) не используется."""
+        classes = [provider_class, "standard_reasoning", "premium_reasoning", "plan_flash_reasoning"]
+        seen: set[str] = set()
+        for cls in classes:
+            if cls in seen:
+                continue
+            seen.add(cls)
+            allowed, _warn = self.budget_gate(cls)
+            if not allowed:
+                continue
+            for provider in self._ordered(self.providers_by_class.get(cls, [])):
+                if not provider.provider_id.startswith("deepseek"):
+                    continue
+                if not await self._connectivity_ok(provider, db):
+                    continue
+                response = await _timed_chat(provider, messages, tools, timeout_sec)
+                if reject_empty and _is_empty_reply(response):
+                    continue
+                log_cache_usage(provider.provider_id, response)
+                return RoutingResult(response=response, provider_id=provider.provider_id)
+        raise ProviderUnavailable("sensitive data requires DeepSeek; no DeepSeek provider is available")
 
     async def _route_by_class(
         self,
@@ -353,7 +389,12 @@ class ProviderRouter:
         fallback_classes: tuple[str, ...],
         retry_backoff_sec: float,
         reject_empty: bool = False,
+        sensitive: bool = False,
     ) -> RoutingResult:
+        if sensitive:
+            return await self._route_sensitive(
+                provider_class, messages, tools, timeout_sec, db, reject_empty,
+            )
         if resilient:
             return await self._route_resilient(
                 provider_class, messages, tools, timeout_sec, db, fallback_classes, retry_backoff_sec, reject_empty
