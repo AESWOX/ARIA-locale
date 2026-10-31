@@ -124,9 +124,9 @@ async def test_empty_and_http_error(monkeypatch):
     assert "HTTP 500" in str(exc.value)
 
 
-def test_factory_has_six_no_key_providers():
+def test_factory_has_seven_providers():
     names = [p.name for p in build_default_providers()]
-    assert names == ["wikipedia", "hackernews", "arxiv", "stackexchange", "github", "openalex"]
+    assert names == ["wikipedia", "hackernews", "arxiv", "stackexchange", "github", "openalex", "duckduckgo"]
 
 
 @pytest.mark.anyio

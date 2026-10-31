@@ -352,6 +352,9 @@ async def startup() -> None:
                     )
     # Attach router to app.state so self-test can find it
     app.state.router = router
+    # S4: поисковая цепочка без ключей (Wikipedia/HN/arXiv/SE/GitHub/OpenAlex) + DDG последним.
+    from aria.tools.search.providers import install_default_providers
+    install_default_providers()
 
     # ── TaskRunner (волна 1, A10): единая дверь для всех источников задач ──
     # UI, cron, Telegram и рой кладут задачу сюда; агент больше не исполняется

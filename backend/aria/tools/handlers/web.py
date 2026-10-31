@@ -14,6 +14,7 @@ import asyncio
 import codecs
 import ipaddress
 import logging
+import os
 import re
 import socket
 import time
@@ -175,6 +176,8 @@ _DEBUG_KEEP = 3
 
 def _save_debug_page(name: str, html: str) -> str | None:
     """Кладёт нераспознанную страницу выдачи в <data>/debug/, чтобы её можно было прислать и поправить парсер."""
+    if os.environ.get("ARIA_DEBUG_SEARCH") != "1":
+        return None
     try:
         folder = paths.data_dir() / "debug"
         folder.mkdir(parents=True, exist_ok=True)
@@ -241,6 +244,7 @@ def _search_blocking(query: str, max_results: int) -> dict:
     if blocked:
         return {
             "results": [],
+            "blocked": True,
             "error": "duckduckgo blocked the request (captcha or rate limit); retry later or ask the user",
         }
     if last_error:
