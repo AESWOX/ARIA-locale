@@ -334,6 +334,9 @@ class SchedulerJob(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
     last_run_status: Mapped[str | None] = mapped_column(String, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # E8: срочность и отложенный запуск в окно off-peak.
+    urgent: Mapped[bool] = mapped_column(Boolean, default=False)
+    defer_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Event(Base):

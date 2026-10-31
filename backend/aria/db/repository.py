@@ -574,6 +574,7 @@ def create_scheduler_job(
     allowed_high_risk_patterns: list[str] | None = None,
     timeout_sec: int = 120,
     max_retries: int = 1,
+    urgent: bool = False,
 ) -> m.SchedulerJob:
     row = m.SchedulerJob(
         name=name,
@@ -585,6 +586,7 @@ def create_scheduler_job(
         allowed_high_risk_patterns=allowed_high_risk_patterns or [],
         timeout_sec=timeout_sec,
         max_retries=max_retries,
+        urgent=urgent,
     )
     db.add(row)
     db.flush()

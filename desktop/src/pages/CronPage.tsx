@@ -849,6 +849,9 @@ export default function CronPage() {
                     <span>
                       {t.cron.next}: {formatTime(job.next_run_at)}
                     </span>
+                    {job.deferred_note && (
+                      <span className="text-amber-500">{job.deferred_note}</span>
+                    )}
                   </div>
                   {job.last_error && (
                     <p className="text-xs text-destructive mt-1">

@@ -16,6 +16,9 @@ from aria.routers import cron as cron_router
 JOB_KEYS = {
     "id", "profile", "profile_name", "aria_home", "is_default_profile", "name", "prompt", "script", "skills",
     "schedule", "schedule_display", "enabled", "state", "deliver", "last_run_at", "next_run_at", "last_error",
+    "urgent",
+    "defer_until",
+    "deferred_note",
 }
 
 

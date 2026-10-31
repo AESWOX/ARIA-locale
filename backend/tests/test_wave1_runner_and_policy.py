@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import time
 import uuid
 
@@ -187,7 +188,7 @@ def test_cron_due_job_is_executed_and_last_run_is_recorded():
 
         repo.update_scheduler_job(db, job_id, last_run_at=utc_now() - timedelta(minutes=2), last_run_status="ok")
 
-    result = asyncio.run(run_due_jobs(router=None, runner=recorder))
+    result = asyncio.run(run_due_jobs(router=None, runner=recorder, now=datetime(2026, 11, 7, 2, 0, tzinfo=timezone.utc)))
 
     assert "wave1-every-minute" in result["due"], result
     assert recorder.submitted, "due-job обязан превратиться в задачу"

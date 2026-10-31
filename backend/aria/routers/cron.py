@@ -57,6 +57,12 @@ def _serialize_job(row: m.SchedulerJob) -> dict[str, Any]:
         "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
         "next_run_at": None,
         "last_error": None,
+        "urgent": bool(getattr(row, "urgent", False)),
+        "defer_until": row.defer_until.isoformat() if getattr(row, "defer_until", None) else None,
+        "deferred_note": (
+            f"отложена до {row.defer_until.strftime('%H:%M')} UTC (экономия)"
+            if getattr(row, "defer_until", None) else None
+        ),
     }
 
 
@@ -106,6 +112,7 @@ async def create_cron_job(
             schedule=schedule,
             objective=prompt,
             allowed_tools=skills,
+            urgent=bool(body.get("urgent")),
         )
         jid = str(row.job_id)
     _JOB_META[jid] = {"deliver": body.get("deliver") or "local", "profile": profile}
@@ -128,6 +135,8 @@ async def update_cron_job(
         fields["objective"] = (updates_raw.get("prompt") or "").strip()
     if "skills" in updates_raw:
         fields["allowed_tools"] = list(updates_raw.get("skills") or [])
+    if "urgent" in updates_raw:
+        fields["urgent"] = bool(updates_raw.get("urgent"))
     with session_scope() as db:
         row = repo.update_scheduler_job(db, job_id, **fields)
         if row is None:
