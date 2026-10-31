@@ -12,6 +12,7 @@ Verdict строится в два прохода:
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from sqlalchemy.orm import Session as OrmSession
@@ -26,6 +27,8 @@ from aria.core.criteria_audit import (
     failed_criteria,
     merge_statuses,
 )
+
+logger = logging.getLogger("local_agent.audit")
 from aria.db.enums import AuditVerdict, ToolStatus
 from aria.llm.providers.base import ChatMessage
 from aria.llm.router import ProviderRouter, ProviderUnavailable
@@ -332,4 +335,13 @@ async def run_audit(
         patch_suggestions=patch_suggestions,
         metrics_compared={"criteria": criteria_status},
     )
+    # S5: для research-задач проверить цитаты без LLM; сеть — вне write-lock.
+    try:
+        if str(getattr(task, "role", "")) == "research":
+            release_write_lock(db)
+            from aria.core.verify_citations import maybe_verify_research_answer
+
+            await maybe_verify_research_answer(db, session, task)
+    except Exception:  # noqa: BLE001 — проверка цитат не валит аудит
+        logger.warning("citation verification failed", exc_info=True)
     return report
