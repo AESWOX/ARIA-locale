@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # §2.9 TZ v1.1: optimistic lock TTL (file-lock + DB)
     LOCK_TTL_SECONDS: int = 30
     loop_max_iterations: int = 15
+    # E7: жёсткий потолок вызовов LLM на задачу/субагента (0 = выключено).
+    agent_max_llm_calls: int = 40
+    agent_max_llm_calls_subagent: int = 15
     # Волна 1 (A10): размер пула TaskRunner. На 4 ГБ RAM держим 3 по умолчанию,
     # при нехватке памяти TaskRunner сам опускается до 1 воркера.
     runner_max_workers: int = 3

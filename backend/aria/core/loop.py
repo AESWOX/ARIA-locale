@@ -209,6 +209,50 @@ AGENT_FALLBACK_CLASSES = ("standard_reasoning", "free_tier_reasoning")
 MAX_DELEGATE_RETRIES = 2
 
 
+async def _append_once(task_id, marker: str, message: str) -> None:
+    """E7: предупреждение в чат один раз на задачу (в т.ч. после resume)."""
+    with session_scope() as db:
+        task = repo.get_task(db, task_id)
+        if task is None:
+            return
+        session = repo.get_session(db, task.session_id)
+        if session is None:
+            return
+        recent = list(
+            db.execute(
+                select(m.Message)
+                .where(m.Message.session_id == session.id)
+                .order_by(m.Message.seq_no.desc())
+                .limit(500)
+            ).scalars()
+        )
+        if any(str(msg.content or "").startswith(marker) for msg in recent):
+            return
+        repo.append_message(db, session, role="assistant", content=message)
+
+
+async def _abort_task(task_id, code: str, message: str) -> None:
+    """E7: остановить задачу с понятной причиной (step_limit|loop_detected|budget_exceeded)."""
+    with session_scope() as db:
+        task = repo.get_task(db, task_id)
+        if task is None:
+            return
+        session = repo.get_session(db, task.session_id)
+        if session is not None:
+            repo.append_message(db, session, role="assistant", content=message)
+        if task.status == TaskStatus.approved:
+            repo.set_task_status(db, task, TaskStatus.in_progress)
+        repo.set_task_status(db, task, TaskStatus.failed, error_code=code, error_message=message[:500])
+        event_bus.emit(
+            "task.status_changed",
+            {"status": "failed", "error": code, "message": message[:300]},
+            session_id=task.session_id,
+            task_id=task.id,
+            db=db,
+        )
+    logger.warning("task %s stopped by guard: %s", task_id, code)
+
+
 async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox_root: str) -> None:
     """Run the agent loop for a given task."""
     settings = get_settings()
@@ -257,9 +301,58 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
     guardrails = ToolCallGuardrailController()
     delegate_failures: dict[tuple[str, str], int] = {}
     repeat_suppressed = 0
+    # E7: потолок вызовов модели и жёсткий бюджет задачи.
+    call_limit = int(
+        settings.agent_max_llm_calls_subagent if delegation_depth > 0 else settings.agent_max_llm_calls
+    )
+    if call_limit <= 0:
+        call_limit = 10 ** 9
+    max_iterations = max(int(settings.loop_max_iterations), call_limit) + 1
+    hard_budget = float(getattr(settings, "budget_task_hard_usd", 0) or 0)
+    budget_warned = False
+    step_warned = False
+    step_warn_at = max(1, int(call_limit * 0.8))
 
-    while iterations < settings.loop_max_iterations:
+    while iterations < max_iterations:
         iterations += 1
+        if iterations > call_limit:
+            await _abort_task(
+                task_id,
+                "step_limit",
+                f"Остановлено: исчерпан лимит {call_limit} вызовов модели на задачу. Итог не гарантирован.",
+            )
+            return
+        if iterations >= step_warn_at and not step_warned:
+            step_warned = True
+            await _append_once(
+                task_id,
+                "Внимание: использовано",
+                f"Внимание: использовано {iterations} из {call_limit} вызовов модели "
+                f"(80% лимита шагов).",
+            )
+        if hard_budget > 0:
+            from aria.llm import budget as budget_mod
+
+            spend = budget_mod.task_spend(task_id)
+            if spend >= hard_budget:
+                await _abort_task(
+                    task_id,
+                    "budget_exceeded",
+                    f"Остановлено: задача потратила ${spend:.4f} при жёстком лимите ${hard_budget:.2f}.",
+                )
+                return
+            if spend >= hard_budget * 0.8 and not budget_warned:
+                budget_warned = True
+                with session_scope() as db:
+                    task = repo.get_task(db, task_id)
+                    session = repo.get_session(db, task.session_id)
+                    if session is not None:
+                        repo.append_message(
+                            db,
+                            session,
+                            role="assistant",
+                            content=f"Внимание: задача потратила ${spend:.4f} (80% лимита ${hard_budget:.2f}).",
+                        )
 
         with session_scope() as db:
             task = repo.get_task(db, task_id)
@@ -523,8 +616,12 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             return  # пауза до резолюции attention item (loop продолжит resume_after_approval)
 
         if repeat_suppressed >= MAX_REPEAT_SUPPRESSED:
-            logger.warning("task %s: model keeps repeating an executed call; finishing the task", task_id)
-            break
+            await _abort_task(
+                task_id,
+                "loop_detected",
+                "Остановлено: модель повторяет один и тот же вызов с теми же аргументами. Нужен другой подход.",
+            )
+            return
 
     await finalize_task(task_id, router)
 
