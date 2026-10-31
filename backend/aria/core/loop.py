@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import uuid
+from pathlib import Path
 
 import httpx
 
@@ -88,6 +89,8 @@ def _load_persona() -> str:
 
 # A22: сколько символов результата тула показываем модели (остальное — в БД и UI).
 MAX_TOOL_RESULT_CHARS = 6000
+FOLD_HEAD_CHARS = 1600
+FOLD_TAIL_CHARS = 700
 
 
 # A26: сколько раз подряд цикл подавляет немедленный повтор уже выполненного вызова, прежде чем завершить задачу.
@@ -113,6 +116,28 @@ def _is_immediate_repeat(history: list, tool_name: str, arguments: dict) -> bool
     )
 
 
+def _fold_tool_output(sandbox_root: str, task_id, ref, output) -> dict:
+    """E6: длинный вывод пишем в sandbox/.tool_output/<task>/<ref>.txt и отдаём ref в контекст."""
+    try:
+        threshold = int(get_settings().tool_result_fold_chars)
+    except Exception:  # noqa: BLE001 — сбой диска не должен ронять вызов/транзакцию
+        threshold = 3000
+    try:
+        body = json.dumps(output, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        body = str(output)
+    if len(body) <= threshold:
+        return {}
+    try:
+        directory = Path(sandbox_root) / ".tool_output" / str(task_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{ref}.txt").write_text(body, encoding="utf-8")
+    except Exception:  # noqa: BLE001 — сбой диска не должен ронять вызов/транзакцию
+        logger.warning("folded tool output could not be stored, falling back to truncation", exc_info=True)
+        return {}
+    return {"fold_ref": str(ref), "folded_chars": len(body)}
+
+
 def _render_tool_result(msg: m.Message) -> str | None:
     """Текст результата тула для модели или None, если у сообщения нет результата.
 
@@ -129,7 +154,15 @@ def _render_tool_result(msg: m.Message) -> str | None:
         body = json.dumps(payload.get("output"), ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         body = str(payload.get("output"))
-    if len(body) > MAX_TOOL_RESULT_CHARS:
+    fold_ref = payload.get("fold_ref")
+    if fold_ref and len(body) > FOLD_HEAD_CHARS + FOLD_TAIL_CHARS:
+        omitted = len(body) - FOLD_HEAD_CHARS - FOLD_TAIL_CHARS
+        body = (
+            f"{body[:FOLD_HEAD_CHARS]}\n...[свёрнуто: {omitted} символов пропущено, ref={fold_ref}, "
+            f"прочитать диапазон: tool_output_read(ref={fold_ref}, start={FOLD_HEAD_CHARS}, end={FOLD_HEAD_CHARS + omitted})]...\n"
+            f"{body[-FOLD_TAIL_CHARS:]}"
+        )
+    elif len(body) > MAX_TOOL_RESULT_CHARS:
         body = f"{body[:MAX_TOOL_RESULT_CHARS]}...[truncated {len(body) - MAX_TOOL_RESULT_CHARS} chars]"
     args = payload.get("arguments")
     args_attr = ""
@@ -447,10 +480,13 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             # После tool call — guardrail recording для loop detection
             guardrails.after_call(spec.tool_name, call.arguments, output)
 
+            tool_payload = {"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value}
+            # fold вне транзакции: дисковое I/O вне writer-lock SQLite
+            tool_payload.update(_fold_tool_output(sandbox_root, task.id, str(tool_call_row.id), output))
             with session_scope() as db:
                 repo.finish_tool_call(db, tool_call_row, status, output_json=output, error_code=error_code, error_message=error_message)
                 session = repo.get_session(db, task.session_id)
-                repo.append_message(db, session, role="tool", content_json={"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value}, content=f"{spec.tool_name} -> {status.value}")
+                repo.append_message(db, session, role="tool", content_json=tool_payload, content=f"{spec.tool_name} -> {status.value}")
                 event_bus.emit(
                     "tool_call.updated",
                     {"id": str(tool_call_row.id), "tool_name": spec.tool_name, "status": status.value},
@@ -742,10 +778,13 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
                 session_id=sess_id, task_id=task_id, sandbox_root=sandbox_root,
             )
 
+        approved_payload = {"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value}
+        # fold вне транзакции: дисковое I/O вне writer-lock SQLite
+        approved_payload.update(_fold_tool_output(sandbox_root, task_id, str(tool_call_row.id), output))
         with session_scope() as db:
             repo.finish_tool_call(db, tool_call_row, status, output_json=output, error_code=error_code, error_message=error_message)
             session = repo.get_session(db, sess_id)
-            repo.append_message(db, session, role="tool", content_json={"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value}, content=f"{tool_name} (approved) -> {status.value}")
+            repo.append_message(db, session, role="tool", content_json=approved_payload, content=f"{tool_name} (approved) -> {status.value}")
             event_bus.emit("tool_call.updated", {"id": str(tool_call_row.id), "status": status.value}, session_id=session.id, task_id=task_id, db=db)
 
     await execute_agent_loop(task_id, router, sandbox_root)

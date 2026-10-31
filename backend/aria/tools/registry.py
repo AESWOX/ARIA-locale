@@ -116,6 +116,10 @@ async def _file_read(input_json: dict, sandbox_root: str, **_ctx) -> dict:
     return await files_handler.file_read(input_json, root)
 
 
+async def _tool_output_read(input_json: dict, sandbox_root: str, task_id=None, **_ctx) -> dict:
+    return await files_handler.tool_output_read(input_json, sandbox_root, task_id=task_id)
+
+
 async def _file_write(input_json: dict, sandbox_root: str, **_ctx) -> dict:
     return await files_handler.file_write(input_json, sandbox_root)
 
@@ -447,6 +451,27 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         allowed_roles=("general", "orchestrator", "coder", "devops_infra", "vision", "qa_auditor", "housekeeping"),
         idempotency_class=IdempotencyClass.safe_read,
         handler=_file_read,
+    ),
+    "tool_output_read": ToolSpec(
+        tool_name="tool_output_read",
+        description="Читает свёрнутый вывод инструмента по ref из маркера [свёрнуто]. Только sandbox/.tool_output, до 4000 символов за вызов.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "ref из маркера [свёрнуто: ... ref=<id>]"},
+                "start": {"type": "integer", "minimum": 0},
+                "end": {"type": "integer", "minimum": 0},
+            },
+            "required": ["ref"],
+        },
+        output_schema={"type": "object", "properties": {"content": {"type": "string"}, "total": {"type": "integer"}}},
+        timeout_sec=10,
+        risk_level=RiskLevel.low,
+        null_output_allowed=True,
+        requires_approval=False,
+        allowed_roles=("general", "orchestrator", "coder", "devops_infra", "vision", "qa_auditor", "housekeeping"),
+        idempotency_class=IdempotencyClass.safe_read,
+        handler=_tool_output_read,
     ),
     "file_write": ToolSpec(
         tool_name="file_write",

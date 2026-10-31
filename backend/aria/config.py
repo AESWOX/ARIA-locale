@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     budget_task_warn_usd: float = 0.30
     budget_task_hard_usd: float = 0.40
     budget_estimate_approval_usd: float = 0.15
+    # E6: вывод инструмента длиннее порога сворачивается (голова+хвост+ref), полный — на диск.
+    tool_result_fold_chars: int = 3000
 
     @field_validator("aria_dev_mode", mode="before")
     @classmethod

@@ -216,3 +216,35 @@ async def file_grep(input_json: dict, sandbox_root: str) -> dict:
         if truncated:
             break
     return {"matches": matches, "truncated": truncated, "files_scanned": files_scanned}
+
+
+MAX_TOOL_OUTPUT_READ = 4000
+_REF_RE = re.compile(r"^[0-9a-fA-F-]{8,36}$")
+
+
+async def tool_output_read(input_json: dict, sandbox_root: str | None = None, task_id=None, **_ctx) -> dict:
+    """E6: чтение полного вывода инструмента из sandbox/.tool_output/<task_id>/<ref>.txt (только чтение)."""
+    ref = str(input_json.get("ref") or "")
+    if not _REF_RE.fullmatch(ref):
+        return {"error": "invalid ref"}
+    if task_id is None:
+        return {"error": "no task context"}
+    root = (Path(sandbox_root or ".").resolve() / ".tool_output" / str(task_id))
+    target = (root / f"{ref}.txt").resolve()
+    if not target.is_relative_to(root):
+        return {"error": "ref outside .tool_output"}
+    if not target.exists():
+        return {"error": "output not found"}
+    text = read_text_auto(target)
+    start = max(_as_int(input_json.get("start")) or 0, 0)
+    end = _as_int(input_json.get("end"))
+    limit = MAX_TOOL_OUTPUT_READ if end is None else min(max(end - start, 1), MAX_TOOL_OUTPUT_READ)
+    chunk = text[start:start + limit]
+    return {
+        "ref": ref,
+        "start": start,
+        "end": start + len(chunk),
+        "total": len(text),
+        "content": chunk,
+        "truncated": start + len(chunk) < len(text),
+    }
