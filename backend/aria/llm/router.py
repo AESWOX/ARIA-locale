@@ -10,7 +10,6 @@ premium/standard reasoning, простые подзадачи и sub-agents — 
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import re
 import time
@@ -262,6 +261,10 @@ class ProviderRouter:
         retry_backoff_sec: float = RETRY_BACKOFF_SEC,
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
+        sensitive: bool = False,
     ) -> RoutingResult:
         """П.5.2 ТЗ: запрос держит слот класса провайдера — параллельные волны EXECUTE
         и делегирование не выбивают квоты free-tier одним залпом."""
@@ -269,7 +272,7 @@ class ProviderRouter:
         async with self.provider_slot(provider_class):
             timing.record("provider_slot_wait", (time.monotonic() - t_wait) * 1000.0)
             with timing.stage("route_chat"):
-                return await self._route_chat_impl(
+                result = await self._route_chat_impl(
                     provider_class,
                     messages,
                     tools,
@@ -281,7 +284,22 @@ class ProviderRouter:
                     retry_backoff_sec=retry_backoff_sec,
                     prefer_provider_id=prefer_provider_id,
                     reject_empty=reject_empty,
+                    sensitive=sensitive,
                 )
+        # E1: ровно одна строка на успешный route_chat (не в _timed_chat: preferred-fallthrough
+        # и empty-reply дают несколько попыток на один вызов).
+        from aria.llm.usage import record_usage
+
+        provider = self.find_provider(result.provider_id)
+        record_usage(
+            provider_id=result.provider_id,
+            model=getattr(provider, "model", None) if provider is not None else None,
+            usage=getattr(result.response, "usage", None),
+            purpose=purpose,
+            session_id=session_id,
+            task_id=task_id,
+        )
+        return result
 
     async def _route_chat_impl(
         self,
@@ -296,6 +314,7 @@ class ProviderRouter:
         retry_backoff_sec: float = RETRY_BACKOFF_SEC,
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
+        sensitive: bool = False,
     ) -> RoutingResult:
         """``reject_empty`` — пустой текст без вызова тулов считается отказом звена (идём к следующему),
         а не успехом. Нужно чату: 200 OK с пустым content раньше обрывал всю цепочку (502).
@@ -305,6 +324,8 @@ class ProviderRouter:
         preferred_failed = False
         if prefer_provider_id:
             preferred = self.find_provider(prefer_provider_id)
+            if sensitive and preferred is not None and not preferred.provider_id.startswith("deepseek"):
+                preferred = None
             if preferred is not None and self.budget_gate(preferred.provider_class)[0]:
                 try:
                     if await self._connectivity_ok(preferred, db):
@@ -319,11 +340,42 @@ class ProviderRouter:
             preferred_failed = True
         result = await self._route_by_class(
             provider_class, messages, tools, timeout_sec, allow_degrade, db, resilient, fallback_classes, retry_backoff_sec,
-            reject_empty,
+            reject_empty, sensitive,
         )
         if preferred_failed:
             result.fallback = True
         return result
+
+    async def _route_sensitive(
+        self,
+        provider_class: str,
+        messages: list[ChatMessage],
+        tools: list[dict],
+        timeout_sec: float,
+        db: OrmSession | None,
+        reject_empty: bool,
+    ) -> RoutingResult:
+        """E9: чувствительное — только DeepSeek; free-tier (Gemini/Groq) не используется."""
+        classes = [provider_class, "standard_reasoning", "premium_reasoning", "plan_flash_reasoning"]
+        seen: set[str] = set()
+        for cls in classes:
+            if cls in seen:
+                continue
+            seen.add(cls)
+            allowed, _warn = self.budget_gate(cls)
+            if not allowed:
+                continue
+            for provider in self._ordered(self.providers_by_class.get(cls, [])):
+                if not provider.provider_id.startswith("deepseek"):
+                    continue
+                if not await self._connectivity_ok(provider, db):
+                    continue
+                response = await _timed_chat(provider, messages, tools, timeout_sec)
+                if reject_empty and _is_empty_reply(response):
+                    continue
+                log_cache_usage(provider.provider_id, response)
+                return RoutingResult(response=response, provider_id=provider.provider_id)
+        raise ProviderUnavailable("sensitive data requires DeepSeek; no DeepSeek provider is available")
 
     async def _route_by_class(
         self,
@@ -337,7 +389,12 @@ class ProviderRouter:
         fallback_classes: tuple[str, ...],
         retry_backoff_sec: float,
         reject_empty: bool = False,
+        sensitive: bool = False,
     ) -> RoutingResult:
+        if sensitive:
+            return await self._route_sensitive(
+                provider_class, messages, tools, timeout_sec, db, reject_empty,
+            )
         if resilient:
             return await self._route_resilient(
                 provider_class, messages, tools, timeout_sec, db, fallback_classes, retry_backoff_sec, reject_empty
@@ -503,16 +560,12 @@ def build_default_router() -> ProviderRouter:
     from aria.llm import gemini_pools
     from aria.llm.key_pool import KeyPool
     from aria.llm.providers.openai_compatible import OpenAICompatibleProvider, thinking_payload
-    from aria.llm.providers.stub import StubProvider
 
     settings = get_settings()
     router = ProviderRouter()
     gemini_pools.reset()  # новая сборка роутера (старт или смена .env): cooldown пулов начинается с нуля
 
-    has_any_real_provider = False
-
     if settings.deepseek_api_key_resolved:
-        has_any_real_provider = True
         router.register(
             OpenAICompatibleProvider(
                 provider_id="deepseek-chat",
@@ -533,13 +586,25 @@ def build_default_router() -> ProviderRouter:
                 extra_payload=thinking_payload(settings.deepseek_reasoner_thinking),
             )
         )
+        # B3: отдельный fallback-класс планирования. Тот же физический endpoint,
+        # но класс "plan_flash_reasoning" изолирован от premium-контура: при таймауте
+        # Oracle (deepseek-v4-pro) план перестраивает flash с thinking=high.
+        router.register(
+            OpenAICompatibleProvider(
+                provider_id="deepseek-flash-plan",
+                provider_class="plan_flash_reasoning",
+                base_url=settings.deepseek_base_url,
+                model=settings.deepseek_chat_model,
+                api_key=settings.deepseek_api_key_resolved,
+                extra_payload=thinking_payload(settings.deepseek_plan_fallback_thinking),
+            )
+        )
 
     # Порядок регистрации внутри одного provider_class = порядок fallback
     # в _pick_available(): Gemini первый, Groq — если Gemini недоступен
     # или весь его пул ключей исчерпан (see KeyPool.mark_rate_limited/mark_dead).
     gemini_keys = settings.gemini_api_keys_list
     if gemini_keys:
-        has_any_real_provider = True
         # Квота Gemini считается на проект И МОДЕЛЬ (0020): пул ключей общий для всех, кто ходит в одну
         # модель этими ключами (реестр gemini_pools), и раздельный для разных моделей. С 0021 на класс
         # можно задать ЦЕПОЧКУ моделей (GEMINI_FLASH_MODELS / GEMINI_PRO_MODELS): у каждой модели своя
@@ -580,7 +645,6 @@ def build_default_router() -> ProviderRouter:
     groq_fast: list[str] = []
     groq_pools: dict[str, KeyPool] = {}
     if groq_keys:
-        has_any_real_provider = True
         # Цепочки не заданы в .env -> подобрать по списку моделей пула (кэш на 12 ч; сеть недоступна = GROQ_MODEL).
         if settings.groq_models_auto and not settings.groq_models:
             from aria.llm import groq_discovery
@@ -619,7 +683,6 @@ def build_default_router() -> ProviderRouter:
     # --- Vision (multimodal): отдельный пул, не разделяет состояние с main pool ---
     vision_keys = settings.vision_gemini_api_keys_list
     if vision_keys:
-        has_any_real_provider = True
         # Те же ключи и та же модель, что у чата, = тот же пул (одна квота, один cooldown). Отдельные
         # VISION_GEMINI_API_KEYS дают отдельный набор ключей и потому свой пул.
         vision_model = settings.gemini_flash_chain[0]

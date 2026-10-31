@@ -8,7 +8,6 @@ import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from aria.api.auth import ticket_store, token_store
 from aria.main import app

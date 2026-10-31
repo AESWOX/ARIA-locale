@@ -22,7 +22,6 @@ from aria.db import models as m
 from aria.db.base import release_write_lock
 from aria.db import repository as repo
 from aria.core.criteria_audit import (
-    STATUS_FAIL,
     check_criteria,
     failed_criteria,
     merge_statuses,
@@ -294,6 +293,7 @@ async def run_audit(
                         auditor_class, messages, tools=[], allow_degrade=True, db=db, prefer_provider_id=auditor_prefer,
                         resilient=True, fallback_classes=("standard_reasoning", "free_tier_reasoning"),
                         reject_empty=True,
+                        purpose="audit", session_id=task.session_id, task_id=task.id,
                     )
                 auditor_model = result.provider_id
                 budget_degraded = result.degraded_to_free

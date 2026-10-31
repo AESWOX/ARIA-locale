@@ -56,7 +56,6 @@ def _state(parent_id):
         parent = repo.get_task(db, parent_id)
         kids = repo.list_child_tasks(db, parent_id)
         items = db.execute(select(m.AttentionItem).where(m.AttentionItem.session_id == parent.session_id)).scalars().all()
-        calls = [c for k in kids for c in repo.list_tool_calls(db, k.id)] + list(repo.list_tool_calls(db, parent_id))
         delegates = [c for c in repo.list_tool_calls(db, parent_id) if c.tool_name == "delegate_task"]
         return parent.status, [k.status for k in kids], [(i.id, i.task_id) for i in items], len(delegates)
 

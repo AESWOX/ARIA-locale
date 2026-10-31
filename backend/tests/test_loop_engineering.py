@@ -7,7 +7,6 @@ core/secretscanner, core/locking.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 import uuid
@@ -17,7 +16,6 @@ import pytest
 
 from aria.core.integrity import (
     IntegrityFlag,
-    assert_file_changed,
     detect_naebal,
     detect_zabyl,
     extract_covered_step_ids,
@@ -27,22 +25,17 @@ from aria.core.integrity import (
     run_integrity_audit,
 )
 from aria.core.locking import (
-    DEFAULT_LOCK_TTL_SECONDS,
     OptimisticLockError,
-    file_lock,
     _acquire_file_lock,
     _lock_dir,
     _release_file_lock,
 )
 from aria.core.plan_validator import (
-    MAX_REPLAN_ATTEMPTS,
     PlanStep,
     check_oracle_naebal,
     validate_plan,
 )
 from aria.core.secretscanner import (
-    ALLOWLIST,
-    DENY_PATTERNS,
     SecretMatch,
     SecretScanError,
     ScanResult,
@@ -262,23 +255,30 @@ class TestNaebalBlocksRetry:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# §7.7 Invalid plan replans max 2 test
+# §7.7 Invalid plan replans max 1 test (R5: первый план + один replan)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestInvalidPlanReplansMax2:
-    """Oracle 3× invalid → escalate."""
+    """Oracle 2× invalid → escalate (первая генерация + один replan с feedback)."""
 
-    def test_oracle_naebal_after_3_attempts(self):
-        """3 неудачные попытки → НАЕБАЛ от Oracle."""
+    def test_oracle_naebal_after_2_attempts(self):
+        """2 неудачные попытки → НАЕБАЛ от Oracle."""
         last_error = "freeform step forbidden: no tool_ref"
-        flag = check_oracle_naebal(plan_attempts=3, last_error=last_error)
+        flag = check_oracle_naebal(plan_attempts=2, last_error=last_error)
         assert flag is not None
         assert flag.kind == "naebal"
 
     def test_oracle_ok_before_limit(self):
-        """2 попытки → clean (no naebal)."""
-        flag = check_oracle_naebal(plan_attempts=2)
+        """1 попытка → clean (no naebal)."""
+        flag = check_oracle_naebal(plan_attempts=1)
         assert flag is None
+
+    def test_oracle_naebal_annotation_resolves(self):
+        """Аннотация возврата резолвится без NameError (F821)."""
+        import typing
+
+        hints = typing.get_type_hints(check_oracle_naebal)
+        assert hints["return"] == IntegrityFlag | None
 
     def test_freeform_step_rejected(self):
         """Шаг без tool_ref/skill_ref → ValueError."""
@@ -475,7 +475,6 @@ class TestPureFunctions:
         }
         flags = run_integrity_audit([tc], plan)
         # exit_code=0, но junit отсутствует — potential naebal
-        naebal = [f for f in flags if f.kind == "naebal"]
         zabyl = [f for f in flags if f.kind == "zabyl"]
         # 1 step covered, 0 missing — zabyl clean
         assert len(zabyl) == 0
@@ -578,7 +577,6 @@ class TestSecretScannerSkips:
         assert len(result.matches) >= 1
 
     def test_key_files_takes_precedence(self, tmp_path):
-        from aria.core.secretscanner import SKIP_EXTENSIONS
         f = tmp_path / "credentials.db"
         f.write_text("sk-xxxxxxxxxxxxxxxxxxxx")
         result = scan_changed_files([f])
@@ -594,7 +592,6 @@ class TestDeliveryContract:
 
     def test_delivery_note_required_fields(self):
         from aria.core.executor import _generate_delivery_note
-        from aria.core.integrity import IntegrityFlag
         from aria.db.enums import IntegrityVerdict, TaskStatus
 
         class MockTask:

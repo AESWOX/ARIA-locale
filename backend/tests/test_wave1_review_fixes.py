@@ -20,7 +20,6 @@ from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import ToolStatus
 from aria.http_utils import utc_now
-from aria.llm.providers.base import LlmResponse
 from aria.llm.router import ProviderRouter
 from aria.routers import sessions as sessions_mod
 from aria.scheduler.jobs import run_due_jobs

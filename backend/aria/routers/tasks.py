@@ -166,7 +166,9 @@ async def clarify_task(
     from aria.core.taskspec import MAX_CLARIFY_ROUNDS, MIN_GOAL_CHARS
 
     body = payload or {}
-    mode = _normalize_mode(body)
+    requested_mode = str(body.get("mode") or "").strip().lower()
+    if requested_mode and requested_mode not in RUN_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(RUN_MODES)}")
     answers = body.get("answers") or []
     accept_assumptions = bool(body.get("accept_assumptions"))
     if not isinstance(answers, list):
@@ -183,6 +185,8 @@ async def clarify_task(
                 detail=f"task is not awaiting clarification (current status: {task.status.value})",
             )
         spec = clarifier.load_spec(db, task_id) or taskspec.derive_spec(task.objective or "")
+        # D-21: без явного mode берём режим вкладки, сохранённый при постановке задачи.
+        mode = requested_mode or (spec.mode or "plan")
         # Старые данные (до раунда 2): вопросы без id — восстанавливаем id из текстов.
         if not spec.clarify_questions and spec.open_questions:
             spec.clarify_questions = [

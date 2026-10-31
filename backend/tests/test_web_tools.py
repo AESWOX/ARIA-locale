@@ -110,7 +110,7 @@ def make_urlopen(pages: dict):
     """Подмена urllib.request.urlopen: ключ — подстрока URL, значение — HTML (str) или исключение."""
     calls: list[str] = []
 
-    def fake(req, timeout=None):
+    def fake(req, timeout=None, **kwargs):
         url = req.full_url if hasattr(req, "full_url") else str(req)
         calls.append(url)
         for key, val in pages.items():
@@ -186,7 +186,8 @@ class TestWebSearch:
         out = await web.web_search({"query": "zzzqqq"})
         assert out["results"] == [] and out["note"] == "no results found" and not out.get("error")
 
-    async def test_unrecognized_page_is_saved_for_debugging_and_capped(self, urlopen_pages):
+    async def test_unrecognized_page_is_saved_for_debugging_and_capped(self, urlopen_pages, monkeypatch):
+        monkeypatch.setenv("ARIA_DEBUG_SEARCH", "1")
         from aria import paths
         # Мелкая нестабильность набора (П.2 ТЗ): каталог debug общий на весь прогон и
         # туда пишут соседние тесты класса, поэтому saved[0] мог оказаться чужим файлом

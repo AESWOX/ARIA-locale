@@ -95,7 +95,7 @@ async def test_gate_asks_a_deterministic_question_when_no_criteria(monkeypatch):
 
 @pytest.mark.anyio
 async def test_gate_approves_when_model_returns_the_contract(monkeypatch):
-    async def fake_ask(router, content, spec):
+    async def fake_ask(router, content, spec, **kwargs):
         return {
             "goal": "Собрать отчёт по продажам в файл",
             "acceptance_criteria": [
@@ -126,7 +126,7 @@ async def test_gate_approves_when_model_returns_the_contract(monkeypatch):
 
 @pytest.mark.anyio
 async def test_blocking_question_pauses_the_task(monkeypatch):
-    async def fake_ask(router, content, spec):
+    async def fake_ask(router, content, spec, **kwargs):
         return {
             "questions": [{"text": "Какой квартал нужен?", "blocking": True, "field": "goal"}],
             "acceptance_criteria": [{"id": "ac-1", "statement": "файл отчёта существует"}],
@@ -146,7 +146,7 @@ async def test_blocking_question_pauses_the_task(monkeypatch):
 
 @pytest.mark.anyio
 async def test_round_limit_turns_questions_into_assumptions(monkeypatch):
-    async def fake_ask(router, content, spec):
+    async def fake_ask(router, content, spec, **kwargs):
         return {
             "questions": [{"text": "Какой квартал нужен?", "blocking": True, "field": "goal"}],
             "acceptance_criteria": [{"id": "ac-1", "statement": "файл отчёта существует"}],
@@ -170,7 +170,7 @@ async def test_round_limit_turns_questions_into_assumptions(monkeypatch):
 
 @pytest.mark.anyio
 async def test_autonomous_mode_never_asks(monkeypatch):
-    async def fake_ask(router, content, spec):  # pragma: no cover - не должен вызываться
+    async def fake_ask(router, content, spec, **kwargs):  # pragma: no cover - не должен вызываться
         raise AssertionError("clarifier не вызывается в автономном режиме")
 
     monkeypatch.setattr(clarifier, "_ask_model", fake_ask)
@@ -186,7 +186,7 @@ async def test_autonomous_mode_never_asks(monkeypatch):
 
 @pytest.mark.anyio
 async def test_high_risk_task_goes_to_tz_approval(monkeypatch):
-    async def fake_ask(router, content, spec):
+    async def fake_ask(router, content, spec, **kwargs):
         return {
             "goal": "Задеплоить сервис в prod",
             "acceptance_criteria": [{"id": "ac-1", "statement": "healthcheck возвращает 200 и exit_code=0"}],

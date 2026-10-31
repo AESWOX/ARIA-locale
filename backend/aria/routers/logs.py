@@ -8,16 +8,28 @@ Unknown logical names fall back to backend.log. Lines are filtered by level
 """
 from __future__ import annotations
 
+import asyncio
+import io
+import json
 import logging
 import os
+import platform
 import re
+import shutil
+import subprocess
+import sys
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 
 from aria import paths as _paths
 from aria.api.auth import require_runtime_token
+from aria.logredact import redact
+from aria.version import APP_VERSION
 
 router = APIRouter(tags=["logs"])
 
@@ -184,3 +196,94 @@ async def clear_logs(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
             pass
     logging.getLogger("local_agent.logs").info("log cleared by user")
     return {"ok": True, "cleared": cleared, "removed_backups": removed}
+
+
+def _open_in_file_manager(path: Path) -> None:
+    """Открыть каталог в файловом менеджере системы (Windows: Проводник, macOS: Finder, Linux: xdg-open)."""
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])  # noqa: S603, S607
+    else:
+        subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607
+
+
+@router.post("/logs/open-folder")
+async def open_logs_folder(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Открыть каталог логов. Путь берётся только из log_dir(), из запроса не принимается."""
+    path = _paths.log_dir()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(_open_in_file_manager, path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not open the logs folder: {exc}") from exc
+    return {"ok": True, "path": str(path)}
+
+
+_DIAG_MAX_LOG_BYTES = 2 * 1024 * 1024
+
+
+def _read_log_tail_redacted(path: Path) -> str:
+    """Хвост лог-файла (не больше 2 МБ), каждая строка пропущена через redact()."""
+    size = path.stat().st_size
+    with open(path, "rb") as fh:
+        if size > _DIAG_MAX_LOG_BYTES:
+            fh.seek(size - _DIAG_MAX_LOG_BYTES)
+            fh.readline()  # первая строка после среза может быть обрезана
+        data = fh.read()
+    text = data.decode("utf-8", errors="replace")
+    return "\n".join(redact(line) for line in text.splitlines()) + "\n"
+
+
+def _diag_providers() -> dict[str, bool]:
+    """Только имена переменных ключей провайдеров и флаг «задан»; значения не читаются в вывод."""
+    from aria.routers import env as _env_router
+
+    out: dict[str, bool] = {}
+    for name, meta in _env_router._REGISTRY.items():
+        if meta.get("category") == "provider" and meta.get("is_password"):
+            out[name] = bool(os.environ.get(name))
+    return out
+
+
+def _diag_system() -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "os": platform.system(),
+        "os_release": platform.release(),
+        "arch": platform.machine(),
+        "python": platform.python_version(),
+    }
+    try:
+        info["disk_free_bytes"] = shutil.disk_usage(_paths.log_dir().parent).free
+    except OSError:
+        info["disk_free_bytes"] = None
+    return info
+
+
+def _build_diagnostics_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        log_dir = _paths.log_dir()
+        if log_dir.is_dir():
+            for path in sorted(log_dir.iterdir()):
+                if path.is_file() and ".log" in path.name:
+                    try:
+                        zf.writestr(f"logs/{path.name}", _read_log_tail_redacted(path))
+                    except OSError:
+                        continue
+        zf.writestr("version.txt", f"{APP_VERSION}\n")
+        zf.writestr("system.json", json.dumps(_diag_system(), indent=2))
+        zf.writestr("providers.json", json.dumps(_diag_providers(), indent=2))
+    return buf.getvalue()
+
+
+@router.get("/logs/diagnostics")
+async def logs_diagnostics(_: str = Depends(require_runtime_token)) -> Response:
+    """Zip для отчёта о проблеме: хвосты логов без секретов, версия, система, флаги ключей."""
+    payload = await asyncio.to_thread(_build_diagnostics_zip)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="aria-diagnostics-{stamp}.zip"'},
+    )

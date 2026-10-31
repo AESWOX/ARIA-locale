@@ -14,6 +14,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from aria.http_utils import _ssl_context
+
 logger = logging.getLogger("aria.vision")
 
 # DeepSeek Vision принимает только эти форматы (docs: Vision → Limits) и до 32 MiB на картинку.
@@ -117,7 +119,36 @@ async def vision_analyze(input_json: dict, sandbox_root: str | None = None, **_c
         return {"error": "no vision API keys available (set GEMINI_API_KEYS, VISION_GEMINI_API_KEYS or DEEPSEEK_API_KEY)"}
 
     # 4. Blocking HTTP runs off the event loop (a 30 s key timeout used to freeze every other request)
-    return await asyncio.to_thread(_request_backends, backends, prompt, content_type, b64_str)
+    result = await asyncio.to_thread(_request_backends, backends, prompt, content_type, b64_str)
+    if isinstance(result, dict) and result.get("text"):
+        # record_usage сам предупредит llm_usage_missing, если usage не пришёл.
+        _record_vision_usage(result, _ctx)
+    return result
+
+
+def _record_vision_usage(result: dict, ctx: dict) -> None:
+    """E1: vision ходит в провайдера мимо router — пишем строку ledger'а здесь."""
+    from aria.db import repository as repo
+    from aria.db.base import session_scope
+    from aria.llm.usage import record_usage
+
+    task_id = ctx.get("task_id")
+    session_id = None
+    if task_id is not None:
+        try:
+            with session_scope() as db:
+                task = repo.get_task(db, task_id)
+                session_id = task.session_id if task is not None else None
+        except Exception:  # noqa: BLE001 — учёт не должен ломать vision
+            logger.warning("vision: could not resolve session for task_id", exc_info=True)
+    record_usage(
+        provider_id=str(result.get("provider") or "vision"),
+        model=result.get("model"),
+        usage=result.get("usage"),
+        purpose="vision",
+        session_id=session_id,
+        task_id=task_id,
+    )
 
 
 def _request_backends(backends: list[dict], prompt: str, content_type: str, b64_str: str) -> dict:
@@ -151,7 +182,7 @@ def _request_backends(backends: list[dict], prompt: str, content_type: str, b64_
                         "User-Agent": "ARIA/1.0",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:
                     result = json.loads(resp.read().decode("utf-8"))
                 text = result["choices"][0]["message"]["content"]
                 if not (text or "").strip():

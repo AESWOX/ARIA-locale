@@ -285,6 +285,56 @@ class ProviderModel(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class LlmUsage(Base):
+    """E1: одна строка на успешный вызов модели — токены, назначение, цена (E2), tier."""
+
+    __tablename__ = "llm_usage"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    provider_id: Mapped[str] = mapped_column(String)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    purpose: Mapped[str] = mapped_column(String, default="other")
+    prompt_hit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_miss: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_total: Mapped[int] = mapped_column(Integer, default=0)
+    completion: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tier: Mapped[str] = mapped_column(String, default="n/a")
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class PageCache(Base):
+    """S3: кэш прочитанных страниц (URL -> текст, etag/last-modified, TTL)."""
+
+    __tablename__ = "page_cache"
+
+    url: Mapped[str] = mapped_column(String, primary_key=True)
+    etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String, nullable=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    date: Mapped[str] = mapped_column(String, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[int] = mapped_column(Integer, default=200)
+    content_type: Mapped[str] = mapped_column(String, default="text/html")
+    final_url: Mapped[str] = mapped_column(String, default="")
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class SearchCache(Base):
+    """S1: кэш результатов поиска (key = sha256 запроса и набора провайдеров)."""
+
+    __tablename__ = "search_cache"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class ProviderTierHint(Base):
     """Ручная подсказка по free/paid tier для провайдеров (§5.2 v8.0)."""
 
@@ -312,6 +362,9 @@ class SchedulerJob(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
     last_run_status: Mapped[str | None] = mapped_column(String, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # E8: срочность и отложенный запуск в окно off-peak.
+    urgent: Mapped[bool] = mapped_column(Boolean, default=False)
+    defer_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Event(Base):

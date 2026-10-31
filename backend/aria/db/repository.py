@@ -142,7 +142,6 @@ def list_child_tasks(db: OrmSession, parent_task_id: uuid.UUID) -> list[m.Task]:
 def get_task_tree(db: OrmSession, root_task_id: uuid.UUID, max_depth: int = 3) -> dict:
     """Рекурсивное дерево задач от корня до max_depth уровня.
     Возвращает вложенный dict {id, children: [...]} для UI-панели делегирования."""
-    from collections import defaultdict
 
     def _fetch_level(task_ids: list[uuid.UUID], depth: int) -> list[dict]:
         if depth > max_depth or not task_ids:
@@ -575,6 +574,7 @@ def create_scheduler_job(
     allowed_high_risk_patterns: list[str] | None = None,
     timeout_sec: int = 120,
     max_retries: int = 1,
+    urgent: bool = False,
 ) -> m.SchedulerJob:
     row = m.SchedulerJob(
         name=name,
@@ -586,6 +586,7 @@ def create_scheduler_job(
         allowed_high_risk_patterns=allowed_high_risk_patterns or [],
         timeout_sec=timeout_sec,
         max_retries=max_retries,
+        urgent=urgent,
     )
     db.add(row)
     db.flush()

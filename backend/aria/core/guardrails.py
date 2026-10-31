@@ -21,6 +21,7 @@ IDEMPOTENT_TOOL_NAMES = frozenset({
     "read_note", "search_vault", "list_vault", "search_vault_tags", "list_decisions",
     "file_read", "file_search", "file_grep", "web_search", "web_fetch", "vision_analyze", "notebook_query",
     "skill_lookup", "skill_read", "task_status", "memory_search", "friend_memory_read",
+    "make_plan", "tool_output_read",
 })
 
 # Тулы, меняющие состояние: успешный вызов сбрасывает счётчики no-progress у read-only тулов
@@ -85,7 +86,7 @@ def _detect_tool_failure(tool_name: str, result: dict | str | None) -> tuple[boo
 
     if isinstance(result, dict):
         if result.get("error"):
-            return True, f" [error]"
+            return True, " [error]"
         exit_code = result.get("exit_code")
         if exit_code is not None and exit_code != 0:
             return True, f" [exit {exit_code}]"

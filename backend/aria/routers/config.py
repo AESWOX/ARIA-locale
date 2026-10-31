@@ -72,7 +72,6 @@ _CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("delegate_", "delegation"),
     ("approval_", "security"),
     ("security_", "security"),
-    ("codex_", "agent"),
     ("notebook_", "browser"),
     ("lock_", "general"),
     ("audit_", "tool_loop_guardrails"),
@@ -96,13 +95,11 @@ _CATEGORY_ORDER = [
     "bedrock",
 ]
 
-_SELECT_FIELDS: dict[str, list[str]] = {
-    "codex_sandbox_mode": ["read-only", "workspace-write", "danger-full-access"],
-}
 
 
 def _is_secret(name: str) -> bool:
-    return any(tok in name for tok in ("api_key", "apikey", "application_key", "key_id", "token", "pin"))
+    lowered = name.lower()
+    return any(tok in lowered for tok in ("api_key", "apikey", "application_key", "key_id", "token", "pin"))
 
 
 def _category_for(name: str) -> str:
@@ -223,12 +220,6 @@ def _settings_schema() -> dict[str, dict[str, Any]]:
             "type": _field_type(name, finfo.annotation),
             "category": _category_for(name),
         }
-        if name in _SELECT_FIELDS:
-            spec = {
-                "type": "select",
-                "options": _SELECT_FIELDS[name],
-                "category": spec["category"],
-            }
         if finfo.description:
             spec["description"] = finfo.description
         fields[name] = spec

@@ -195,7 +195,10 @@ class TaskRunner:
         ram = available_ram_mb()
         if ram is not None and ram < _LOW_RAM_MB:
             workers = 1
+            self._workers_reason = f"мало свободной RAM: {ram} MB < {_LOW_RAM_MB} MB — 1 воркер"
             logger.warning("only %s MB RAM free — TaskRunner runs 1 worker", ram)
+        else:
+            self._workers_reason = f"runner_max_workers={self._max_workers}"
         for i in range(workers):
             self._workers.append(asyncio.create_task(self._worker_loop(i), name=f"taskrunner-{i}"))
         logger.info("TaskRunner started: %d worker(s), max_workers=%d", workers, self._max_workers)
@@ -302,6 +305,9 @@ class TaskRunner:
         return len(pending)
 
     def status(self) -> dict[str, Any]:
+        from aria.core import delegate as _delegate
+
+        limit, limit_reason = _delegate.parallel_limit()
         return {
             "started": self._started,
             "max_workers": self._max_workers,
@@ -309,6 +315,11 @@ class TaskRunner:
             "queue": self._queue.qsize(),
             "running": sorted(self._running.keys()),
             "available_ram_mb": available_ram_mb(),
+            # 19.5 Q-6: почему параллелизм снижен (воркеры и рой субагентов).
+            "workers_reason": getattr(self, "_workers_reason", "not started"),
+            "parallel_limit": limit,
+            "parallel_limit_reason": limit_reason,
+            "swarm_enabled": bool(getattr(get_settings(), "swarm_enabled", True)),
         }
 
     @property

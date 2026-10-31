@@ -10,7 +10,7 @@ from pathlib import Path
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from aria.db.enums import IdempotencyClass, RiskLevel
 from aria.storage import obsidian_vault, vault_index
@@ -114,6 +114,10 @@ async def _file_read(input_json: dict, sandbox_root: str, **_ctx) -> dict:
     if err:
         return {"error": err}
     return await files_handler.file_read(input_json, root)
+
+
+async def _tool_output_read(input_json: dict, sandbox_root: str, task_id=None, **_ctx) -> dict:
+    return await files_handler.tool_output_read(input_json, sandbox_root, task_id=task_id)
 
 
 async def _file_write(input_json: dict, sandbox_root: str, **_ctx) -> dict:
@@ -245,6 +249,49 @@ async def _memory_save(input_json: dict, **_ctx) -> dict:
         source="agent",  # недоверенный источник: в подсказку модели попадает с пометкой
     )
     return {"saved": True, "id": item["id"], "duplicate": bool(item.get("duplicate"))}
+
+
+async def _make_plan(input_json: dict, router=None, task_id=None, **_ctx) -> dict:
+    """B3: построить/вернуть план задачи через Oracle (deepseek-v4-pro, потолок 30 с,
+    откат на flash с thinking=high). Идемпотентно: существующий план не пересобирается.
+    Не требует Approve — операция read-only для задачи (пишет только task_plans)."""
+    import uuid as _uuid
+
+    from aria.db import repository as _repo
+    from aria.db.base import session_scope as _session_scope
+
+    if router is None:
+        return {"error": "no LLM provider configured — plan cannot be generated"}
+    if not task_id:
+        return {"error": "make_plan requires task_id in context"}
+
+    try:
+        tid = _uuid.UUID(str(task_id))
+    except (ValueError, TypeError):
+        return {"error": f"invalid task_id: {task_id!r}"}
+
+    from aria.core.executor import _stage2_plan
+
+    with _session_scope() as session:
+        task = _repo.get_task(session, tid)
+        if task is None:
+            return {"error": f"task {task_id} not found"}
+
+        plan, flags = await _stage2_plan(
+            session,
+            task,
+            input_json.get("vault_context") or {},
+            router,
+            force_replan=bool(input_json.get("force_replan", False)),
+            feedback=input_json.get("feedback", ""),
+        )
+        return {
+            "plan": plan.plan_json if isinstance(plan.plan_json, list) else [],
+            "status": plan.status,
+            "version": plan.version,
+            "iteration_count": plan.iteration_count,
+            "flags": [f.value if hasattr(f, "value") else str(f) for f in flags],
+        }
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -405,6 +452,27 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotency_class=IdempotencyClass.safe_read,
         handler=_file_read,
     ),
+    "tool_output_read": ToolSpec(
+        tool_name="tool_output_read",
+        description="Читает свёрнутый вывод инструмента по ref из маркера [свёрнуто]. Только sandbox/.tool_output, до 4000 символов за вызов.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "ref из маркера [свёрнуто: ... ref=<id>]"},
+                "start": {"type": "integer", "minimum": 0},
+                "end": {"type": "integer", "minimum": 0},
+            },
+            "required": ["ref"],
+        },
+        output_schema={"type": "object", "properties": {"content": {"type": "string"}, "total": {"type": "integer"}}},
+        timeout_sec=10,
+        risk_level=RiskLevel.low,
+        null_output_allowed=True,
+        requires_approval=False,
+        allowed_roles=("general", "orchestrator", "coder", "devops_infra", "vision", "qa_auditor", "housekeeping"),
+        idempotency_class=IdempotencyClass.safe_read,
+        handler=_tool_output_read,
+    ),
     "file_write": ToolSpec(
         tool_name="file_write",
         description="Пишет содержимое файла (overwrite|append) в пределах sandbox root.",
@@ -541,6 +609,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "properties": {
                 "url": {"type": "string", "description": "Адрес страницы, http:// или https://"},
                 "max_chars": {"type": "integer", "description": "Сколько символов текста вернуть"},
+                "focus": {"type": "string", "description": "S3: фокус запроса — длинная страница режется по абзацам с лучшим пересечением"},
             },
             "required": ["url"],
         },
@@ -554,6 +623,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "title": {"type": "string"},
                 "content": {"type": "string"},
                 "truncated": {"type": "boolean"},
+                "date": {"type": "string"},
+                "chars": {"type": "integer"},
                 "source_trust": {"type": "string"},
                 "error": {"type": "string"},
             },
@@ -761,6 +832,27 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotency_class=IdempotencyClass.safe_read,
         handler=_friend_memory_read,
     ),
+    "make_plan": ToolSpec(
+        tool_name="make_plan",
+        description="Построить или вернуть план задачи через Oracle (deepseek-v4-pro, таймаут 30 с с откатом на flash). Идемпотентно: существующий план возвращается без повторной генерации, если не задан force_replan.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "vault_context": {"type": "object"},
+                "force_replan": {"type": "boolean"},
+                "feedback": {"type": "string"},
+            },
+            "required": [],
+        },
+        output_schema={"type": "object", "properties": {"plan": {"type": "array"}, "status": {"type": "string"}, "version": {"type": "integer"}}},
+        timeout_sec=90,
+        risk_level=RiskLevel.low,
+        null_output_allowed=False,
+        requires_approval=False,
+        allowed_roles=("orchestrator", "general", "coder", "research"),
+        idempotency_class=IdempotencyClass.safe_read,
+        handler=_make_plan,
+    ),
 }
 
 
@@ -808,7 +900,7 @@ async def _delegate_task(
 
     # Проверка: роль должна существовать
     try:
-        role_def = _get_role(role_name)
+        _get_role(role_name)
     except (KeyError, PermissionError):
         return {"status": "failed", "summary": "", "error": f"unknown or disabled role: {role_name}"}
 

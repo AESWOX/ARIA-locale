@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from aria.api.auth import require_runtime_token
-from aria.core import clarifier, taskspec
+from aria.core import clarifier
 from aria.core.taskspec import TaskSpec
 from aria.db import repository as repo
 from aria.db.enums import TaskStatus

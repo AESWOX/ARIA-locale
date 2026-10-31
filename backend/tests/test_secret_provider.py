@@ -2,7 +2,6 @@
 import os
 from unittest.mock import patch
 
-import pytest
 
 from aria.secrets import EnvSecretProvider, SecretProvider, secret_provider
 from aria.secrets.provider import SecretProvider as SPABC

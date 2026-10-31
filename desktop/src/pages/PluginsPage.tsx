@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { ExternalLink, RefreshCw, Trash2, Eye, EyeOff } from "lucide-react";
+import { ExternalLink, Trash2, Eye, EyeOff } from "lucide-react";
 import type { Translations } from "@/i18n/types";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import type { HubAgentPluginRow, PluginsHubResponse } from "@/lib/api";
 import { Button } from "@vendor/ui/ui/components/button";
 import { Badge } from "@vendor/ui/ui/components/badge";
-import { Select, SelectOption } from "@vendor/ui/ui/components/select";
 import { Switch } from "@vendor/ui/ui/components/switch";
 import { Spinner } from "@vendor/ui/ui/components/spinner";
 import { CommandBlock } from "@vendor/ui/ui/components/command-block";
@@ -19,10 +18,6 @@ import { Toast } from "@vendor/ui/ui/components/toast";
 import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
 import { cn } from "@/lib/utils";
-import { usePageHeader } from "@/contexts/usePageHeader";
-
-/** Select value for built-in memory (`config` uses empty string). Never use `""` — UI Select maps empty value to an empty label. */
-const MEMORY_PROVIDER_BUILTIN = "__aria_memory_builtin__";
 
 export default function PluginsPage() {
   const [hub, setHub] = useState<PluginsHubResponse | null>(null);
@@ -31,24 +26,16 @@ export default function PluginsPage() {
   const [installForce, setInstallForce] = useState(false);
   const [installEnable, setInstallEnable] = useState(true);
   const [installBusy, setInstallBusy] = useState(false);
-  const [rescanBusy, setRescanBusy] = useState(false);
-  const [memorySel, setMemorySel] = useState(MEMORY_PROVIDER_BUILTIN);
-  const [contextSel, setContextSel] = useState("compressor");
-  const [providerBusy, setProviderBusy] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
 
   const { toast, showToast } = useToast();
   const { t } = useI18n();
-  const { setAfterTitle } = usePageHeader();
 
   const loadHub = useCallback(() => {
     return api
       .getPluginsHub()
       .then((h) => {
         setHub(h);
-        const p = h.providers;
-        setMemorySel(p.memory_provider ? p.memory_provider : MEMORY_PROVIDER_BUILTIN);
-        setContextSel(p.context_engine || "compressor");
       })
       .catch(() => showToast(t.common.loading, "error"));
   }, [showToast, t.common.loading]);
@@ -57,22 +44,6 @@ export default function PluginsPage() {
     setLoading(true);
     void loadHub().finally(() => setLoading(false));
   }, [loadHub]);
-
-  useEffect(() => {
-    setAfterTitle(
-      <Button
-        ghost
-        size="icon"
-        className="shrink-0 text-muted-foreground hover:text-foreground"
-        disabled={loading || rescanBusy}
-        onClick={() => void onRescan()}
-        aria-label={t.pluginsPage.refreshDashboard}
-      >
-        {rescanBusy ? <Spinner /> : <RefreshCw />}
-      </Button>,
-    );
-    return () => setAfterTitle(null);
-  }, [loading, rescanBusy, setAfterTitle, t.pluginsPage.refreshDashboard]);
 
   const onInstall = async () => {
     const id = installId.trim();
@@ -100,39 +71,6 @@ export default function PluginsPage() {
     }
   };
 
-  const onRescan = async () => {
-    setRescanBusy(true);
-    try {
-      const rc = await api.rescanPlugins();
-      showToast(
-        `${t.pluginsPage.refreshDashboard} (${rc.count})`,
-        "success",
-      );
-      await loadHub();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Rescan failed", "error");
-    } finally {
-      setRescanBusy(false);
-    }
-  };
-
-  const onSaveProviders = async () => {
-    setProviderBusy(true);
-    try {
-      await api.savePluginProviders({
-        memory_provider:
-          memorySel === MEMORY_PROVIDER_BUILTIN ? "" : memorySel,
-        context_engine: contextSel,
-      });
-      showToast(t.pluginsPage.savedProviders, "success");
-      await loadHub();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Save failed", "error");
-    } finally {
-      setProviderBusy(false);
-    }
-  };
-
   const setRuntimeLoading = async (name: string, fn: () => Promise<unknown>) => {
     setRowBusy(name);
     try {
@@ -146,81 +84,12 @@ export default function PluginsPage() {
   };
 
   const rows = hub?.plugins ?? [];
-  const providers = hub?.providers;
 
   return (
     <div className="flex flex-col gap-4">
       <PluginSlot name="plugins:top" />
 
       <div className={cn("flex w-full flex-col gap-8")}>
-
-        {providers && (
-          <Card>
-            <CardHeader>
-              <CardTitle>{t.pluginsPage.providersHeading}</CardTitle>
-              <p className="text-xs tracking-[0.08em] text-text-tertiary">
-                {t.pluginsPage.providersHint}
-              </p>
-            </CardHeader>
-
-            <CardContent className="flex flex-col gap-6">
-
-              <div className="grid gap-6 sm:grid-cols-2 max-w-full">
-              <div className="grid gap-2 min-w-0">
-                <Label htmlFor="mem-provider">{t.pluginsPage.memoryProviderLabel}</Label>
-
-                <Select
-                  id="mem-provider"
-                  className="w-full"
-                  value={memorySel}
-                  onValueChange={setMemorySel}
-                >
-                  <SelectOption value={MEMORY_PROVIDER_BUILTIN}>
-                    {`(${t.pluginsPage.providerDefaults})`}
-                  </SelectOption>
-
-                  {providers.memory_options.map((o) => (
-                    <SelectOption key={o.name} value={o.name}>
-                      {o.name}
-                    </SelectOption>
-                  ))}
-                </Select>
-              </div>
-
-              <div className="grid gap-2 min-w-0">
-                <Label htmlFor="ctx-engine">{t.pluginsPage.contextEngineLabel}</Label>
-
-                <Select
-                  id="ctx-engine"
-                  className="w-full"
-                  value={contextSel}
-                  onValueChange={setContextSel}
-                >
-                  <SelectOption value="compressor">compressor</SelectOption>
-
-                  {providers.context_options
-                    .filter((o) => o.name !== "compressor")
-                    .map((o) => (
-                      <SelectOption key={o.name} value={o.name}>
-                        {o.name}
-                      </SelectOption>
-                    ))}
-                </Select>
-              </div>
-              </div>
-
-              <Button
-                className="w-fit uppercase"
-                size="sm"
-                disabled={providerBusy}
-                onClick={() => void onSaveProviders()}
-                prefix={providerBusy ? <Spinner /> : undefined}
-              >
-                {t.common.save}
-              </Button>
-            </CardContent>
-          </Card>
-        )}
 
         <Card>
           <CardHeader>
@@ -278,10 +147,6 @@ export default function PluginsPage() {
             >
               {t.pluginsPage.installBtn}
             </Button>
-
-            <p className="text-xs tracking-[0.06em] text-text-tertiary">
-              {t.pluginsPage.rescanHint}
-            </p>
 
             <p className="text-xs tracking-[0.06em] text-text-tertiary">
               {t.pluginsPage.removeHint}

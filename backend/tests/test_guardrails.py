@@ -1,6 +1,5 @@
 """Tests for aria.core.guardrails — tool-call loop guardrails."""
 
-import pytest
 from aria.core.guardrails import (
     ToolCallGuardrailController,
     ToolCallSignature,

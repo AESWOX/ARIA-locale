@@ -5,8 +5,8 @@ import {
   useCallback,
   useRef,
 } from "react";
-import { FileText, RefreshCw, Trash2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { Download, FileText, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+import { api, getRuntimeToken } from "@/lib/api";
 import { Badge } from "@vendor/ui/ui/components/badge";
 import { Button } from "@vendor/ui/ui/components/button";
 import { FilterGroup, Segmented } from "@vendor/ui/ui/components/segmented";
@@ -19,6 +19,11 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 
 const FILES = ["agent", "errors", "gateway"] as const;
+const FILE_LABELS: Record<(typeof FILES)[number], string> = {
+  agent: "backend.log",
+  errors: "backend.log",
+  gateway: "gateway.log",
+};
 const LEVELS = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR"] as const;
 const COMPONENTS = ["all", "gateway", "agent", "tools", "cli", "cron"] as const;
 const LINE_COUNTS = [50, 100, 200, 500] as const;
@@ -71,8 +76,10 @@ export default function LogsPage() {
   const [lineCount, setLineCount] = useState<(typeof LINE_COUNTS)[number]>(100);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
+  const [servedFile, setServedFile] = useState<string>(FILE_LABELS.agent);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
@@ -84,6 +91,7 @@ export default function LogsPage() {
       .getLogs({ file, lines: lineCount, level, component })
       .then((resp) => {
         setLines(resp.lines);
+        setServedFile(resp.file || FILE_LABELS[file]);
         setTimeout(() => {
           if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -108,6 +116,44 @@ export default function LogsPage() {
         setLoading(false);
       });
   }, [fetchLogs]);
+
+  const openLogsFolder = useCallback(() => {
+    setError(null);
+    api.openLogsFolder().catch((err) => setError(String(err)));
+  }, []);
+
+  const exportDiagnostics = useCallback(async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      const headers: Record<string, string> = {
+        "X-ARIA-Session-Token":
+          (window as unknown as { __ARIA_SESSION_TOKEN__?: string })
+            .__ARIA_SESSION_TOKEN__ ?? "",
+      };
+      // Tauri mode: the backend authenticates via X-Local-Agent-Token.
+      const rt = getRuntimeToken();
+      if (rt) headers["X-Local-Agent-Token"] = rt;
+      const res = await fetch(api.diagnosticsUrl(), {
+        credentials: "include",
+        headers,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const match = /filename="?([^";]+)"?/i.exec(disposition);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = match ? match[1] : "aria-diagnostics.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setExporting(false);
+    }
+  }, []);
 
   useLayoutEffect(() => {
     setAfterTitle(
@@ -143,6 +189,25 @@ export default function LogsPage() {
     );
     setEnd(
       <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 sm:justify-end sm:gap-3">
+        <Button
+          type="button"
+          ghost
+          size="sm"
+          onClick={openLogsFolder}
+          prefix={<FolderOpen className="h-4 w-4" />}
+        >
+          Open logs folder
+        </Button>
+        <Button
+          type="button"
+          ghost
+          size="sm"
+          onClick={() => void exportDiagnostics()}
+          disabled={exporting}
+          prefix={exporting ? <Spinner /> : <Download className="h-4 w-4" />}
+        >
+          Export diagnostics
+        </Button>
         <div className="flex items-center gap-2">
           <Label htmlFor="logs-auto-refresh" className="text-xs cursor-pointer">
             {t.logs.autoRefresh}
@@ -179,6 +244,9 @@ export default function LogsPage() {
     t.logs.autoRefresh,
     fetchLogs,
     clearLogs,
+    openLogsFolder,
+    exportDiagnostics,
+    exporting,
   ]);
 
   useEffect(() => {
@@ -203,7 +271,10 @@ export default function LogsPage() {
           <Segmented
             className={segmentedClass}
             value={file}
-            onChange={setFile}
+            onChange={(value) => {
+              setFile(value);
+              setServedFile(FILE_LABELS[value]);
+            }}
             options={toSegmentOptions(FILES)}
           />
         </FilterGroup>
@@ -245,7 +316,7 @@ export default function LogsPage() {
         <CardHeader className="py-3 px-4">
           <CardTitle className="text-sm flex items-center gap-2">
             <FileText className="h-4 w-4" />
-            {file}.log
+            {servedFile}
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">

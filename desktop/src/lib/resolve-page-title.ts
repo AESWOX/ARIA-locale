@@ -15,6 +15,10 @@ const BUILTIN: Record<string, keyof Translations["app"]["nav"]> = {
   "/docs": "documentation",
 };
 
+const LITERAL: Record<string, string> = {
+  "/settings": "Settings",
+};
+
 export function resolvePageTitle(
   pathname: string,
   t: Translations,
@@ -23,6 +27,10 @@ export function resolvePageTitle(
   const normalized = pathname.replace(/\/$/, "") || "/";
   if (normalized === "/") {
     return t.app.nav.sessions;
+  }
+  const literal = LITERAL[normalized];
+  if (literal) {
+    return literal;
   }
   const plugin = pluginTabs.find((p) => p.path === normalized);
   if (plugin) {

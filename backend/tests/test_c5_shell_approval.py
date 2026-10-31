@@ -27,7 +27,7 @@ from aria.db.enums import ApprovalStatus, TaskStatus, ToolStatus
 from aria.llm.providers.stub import StubProvider, final_answer, tool_call
 from aria.llm.router import ProviderRouter
 from aria.tools.registry import TOOL_REGISTRY
-from aria.tools.validators import classify_shell_command, is_high_risk_command
+from aria.tools.validators import classify_shell_command
 
 # --- Варианты SEC-2: любой порядок/написание флагов rm, плюс обёртки и составные команды -------------------
 SEC2_DANGEROUS = [
@@ -75,6 +75,15 @@ def trap(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_shell", _spawn)
     return SPAWNED
+
+
+@pytest.fixture(autouse=True)
+def _windows_runnable(monkeypatch):
+    # R3(c) (19.3 PLAN-1): C5 проверяет SEC-2 approve, а не применимость на Windows.
+    # Считаем команды «выполнимыми», чтобы они дошли до classify_shell_command → Approve.
+    import aria.core.loop as loop
+
+    monkeypatch.setattr(loop, "is_windows_command", lambda command: True)
 
 
 @pytest.fixture()

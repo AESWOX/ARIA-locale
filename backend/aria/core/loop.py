@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import uuid
+from pathlib import Path
 
 import httpx
 
@@ -46,6 +47,8 @@ from aria.tools.validators import (
     ToolValidationError,
     assert_role_allowed,
     classify_shell_command,
+    command_rejection_reason,
+    is_windows_command,
 )
 from aria.core.guardrails import ToolCallGuardrailController
 
@@ -86,6 +89,8 @@ def _load_persona() -> str:
 
 # A22: сколько символов результата тула показываем модели (остальное — в БД и UI).
 MAX_TOOL_RESULT_CHARS = 6000
+FOLD_HEAD_CHARS = 1600
+FOLD_TAIL_CHARS = 700
 
 
 # A26: сколько раз подряд цикл подавляет немедленный повтор уже выполненного вызова, прежде чем завершить задачу.
@@ -111,6 +116,28 @@ def _is_immediate_repeat(history: list, tool_name: str, arguments: dict) -> bool
     )
 
 
+def _fold_tool_output(sandbox_root: str, task_id, ref, output) -> dict:
+    """E6: длинный вывод пишем в sandbox/.tool_output/<task>/<ref>.txt и отдаём ref в контекст."""
+    try:
+        threshold = int(get_settings().tool_result_fold_chars)
+    except Exception:  # noqa: BLE001 — сбой диска не должен ронять вызов/транзакцию
+        threshold = 3000
+    try:
+        body = json.dumps(output, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        body = str(output)
+    if len(body) <= threshold:
+        return {}
+    try:
+        directory = Path(sandbox_root) / ".tool_output" / str(task_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{ref}.txt").write_text(body, encoding="utf-8")
+    except Exception:  # noqa: BLE001 — сбой диска не должен ронять вызов/транзакцию
+        logger.warning("folded tool output could not be stored, falling back to truncation", exc_info=True)
+        return {}
+    return {"fold_ref": str(ref), "folded_chars": len(body)}
+
+
 def _render_tool_result(msg: m.Message) -> str | None:
     """Текст результата тула для модели или None, если у сообщения нет результата.
 
@@ -127,7 +154,15 @@ def _render_tool_result(msg: m.Message) -> str | None:
         body = json.dumps(payload.get("output"), ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         body = str(payload.get("output"))
-    if len(body) > MAX_TOOL_RESULT_CHARS:
+    fold_ref = payload.get("fold_ref")
+    if fold_ref and len(body) > FOLD_HEAD_CHARS + FOLD_TAIL_CHARS:
+        omitted = len(body) - FOLD_HEAD_CHARS - FOLD_TAIL_CHARS
+        body = (
+            f"{body[:FOLD_HEAD_CHARS]}\n...[свёрнуто: {omitted} символов пропущено, ref={fold_ref}, "
+            f"прочитать диапазон: tool_output_read(ref={fold_ref}, start={FOLD_HEAD_CHARS}, end={FOLD_HEAD_CHARS + omitted})]...\n"
+            f"{body[-FOLD_TAIL_CHARS:]}"
+        )
+    elif len(body) > MAX_TOOL_RESULT_CHARS:
         body = f"{body[:MAX_TOOL_RESULT_CHARS]}...[truncated {len(body) - MAX_TOOL_RESULT_CHARS} chars]"
     args = payload.get("arguments")
     args_attr = ""
@@ -172,6 +207,50 @@ AGENT_FALLBACK_CLASSES = ("standard_reasoning", "free_tier_reasoning")
 
 # A23: сколько раз подряд одна и та же делегация может упасть, прежде чем цикл перестанет её исполнять.
 MAX_DELEGATE_RETRIES = 2
+
+
+async def _append_once(task_id, marker: str, message: str) -> None:
+    """E7: предупреждение в чат один раз на задачу (в т.ч. после resume)."""
+    with session_scope() as db:
+        task = repo.get_task(db, task_id)
+        if task is None:
+            return
+        session = repo.get_session(db, task.session_id)
+        if session is None:
+            return
+        recent = list(
+            db.execute(
+                select(m.Message)
+                .where(m.Message.session_id == session.id)
+                .order_by(m.Message.seq_no.desc())
+                .limit(500)
+            ).scalars()
+        )
+        if any(str(msg.content or "").startswith(marker) for msg in recent):
+            return
+        repo.append_message(db, session, role="assistant", content=message)
+
+
+async def _abort_task(task_id, code: str, message: str) -> None:
+    """E7: остановить задачу с понятной причиной (step_limit|loop_detected|budget_exceeded)."""
+    with session_scope() as db:
+        task = repo.get_task(db, task_id)
+        if task is None:
+            return
+        session = repo.get_session(db, task.session_id)
+        if session is not None:
+            repo.append_message(db, session, role="assistant", content=message)
+        if task.status == TaskStatus.approved:
+            repo.set_task_status(db, task, TaskStatus.in_progress)
+        repo.set_task_status(db, task, TaskStatus.failed, error_code=code, error_message=message[:500])
+        event_bus.emit(
+            "task.status_changed",
+            {"status": "failed", "error": code, "message": message[:300]},
+            session_id=task.session_id,
+            task_id=task.id,
+            db=db,
+        )
+    logger.warning("task %s stopped by guard: %s", task_id, code)
 
 
 async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox_root: str) -> None:
@@ -219,13 +298,61 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         role_prompt += "\n\n" + _hint
 
     iterations = 0
-    final_verdict_needed = True
     guardrails = ToolCallGuardrailController()
     delegate_failures: dict[tuple[str, str], int] = {}
     repeat_suppressed = 0
+    # E7: потолок вызовов модели и жёсткий бюджет задачи.
+    call_limit = int(
+        settings.agent_max_llm_calls_subagent if delegation_depth > 0 else settings.agent_max_llm_calls
+    )
+    if call_limit <= 0:
+        call_limit = 10 ** 9
+    max_iterations = max(int(settings.loop_max_iterations), call_limit) + 1
+    hard_budget = float(getattr(settings, "budget_task_hard_usd", 0) or 0)
+    budget_warned = False
+    step_warned = False
+    step_warn_at = max(1, int(call_limit * 0.8))
 
-    while iterations < settings.loop_max_iterations:
+    while iterations < max_iterations:
         iterations += 1
+        if iterations > call_limit:
+            await _abort_task(
+                task_id,
+                "step_limit",
+                f"Остановлено: исчерпан лимит {call_limit} вызовов модели на задачу. Итог не гарантирован.",
+            )
+            return
+        if iterations >= step_warn_at and not step_warned:
+            step_warned = True
+            await _append_once(
+                task_id,
+                "Внимание: использовано",
+                f"Внимание: использовано {iterations} из {call_limit} вызовов модели "
+                f"(80% лимита шагов).",
+            )
+        if hard_budget > 0:
+            from aria.llm import budget as budget_mod
+
+            spend = budget_mod.task_spend(task_id)
+            if spend >= hard_budget:
+                await _abort_task(
+                    task_id,
+                    "budget_exceeded",
+                    f"Остановлено: задача потратила ${spend:.4f} при жёстком лимите ${hard_budget:.2f}.",
+                )
+                return
+            if spend >= hard_budget * 0.8 and not budget_warned:
+                budget_warned = True
+                with session_scope() as db:
+                    task = repo.get_task(db, task_id)
+                    session = repo.get_session(db, task.session_id)
+                    if session is not None:
+                        repo.append_message(
+                            db,
+                            session,
+                            role="assistant",
+                            content=f"Внимание: задача потратила ${spend:.4f} (80% лимита ${hard_budget:.2f}).",
+                        )
 
         with session_scope() as db:
             task = repo.get_task(db, task_id)
@@ -252,6 +379,8 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             routing = await router.route_chat(
                 model_class, messages, tool_schemas, allow_degrade=True, prefer_provider_id=preferred_model,
                 resilient=True, fallback_classes=AGENT_FALLBACK_CLASSES,
+                purpose="subagent" if delegation_depth > 0 else "agent",
+                session_id=session.id, task_id=task.id,
             )
         except (ProviderUnavailable, httpx.HTTPStatusError) as exc:
             if isinstance(exc, httpx.HTTPStatusError):
@@ -325,6 +454,12 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
                 if call.tool_name == "shell_execute":
                     command = call.arguments.get("command", "")
+                    if not is_windows_command(command):
+                        repo.append_message(
+                            db, session, role="tool",
+                            content=f"shell_execute -> rejected: {command_rejection_reason(command)}",
+                        )
+                        continue
                     if classify_shell_command(command) != "allow":
                         item = approvals.check_command_and_maybe_request_approval(db, session, task, command)
                         event_bus.emit(
@@ -433,15 +568,18 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     )
                 continue
 
-            output, status, error_code, error_message = await _execute_tool(spec, call.arguments, sandbox_root)
+            output, status, error_code, error_message = await _execute_tool(spec, call.arguments, sandbox_root, router=router, task_id=task_id)
 
             # После tool call — guardrail recording для loop detection
             guardrails.after_call(spec.tool_name, call.arguments, output)
 
+            tool_payload = {"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value}
+            # fold вне транзакции: дисковое I/O вне writer-lock SQLite
+            tool_payload.update(_fold_tool_output(sandbox_root, task.id, str(tool_call_row.id), output))
             with session_scope() as db:
                 repo.finish_tool_call(db, tool_call_row, status, output_json=output, error_code=error_code, error_message=error_message)
                 session = repo.get_session(db, task.session_id)
-                repo.append_message(db, session, role="tool", content_json={"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value}, content=f"{spec.tool_name} -> {status.value}")
+                repo.append_message(db, session, role="tool", content_json=tool_payload, content=f"{spec.tool_name} -> {status.value}")
                 event_bus.emit(
                     "tool_call.updated",
                     {"id": str(tool_call_row.id), "tool_name": spec.tool_name, "status": status.value},
@@ -478,8 +616,12 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             return  # пауза до резолюции attention item (loop продолжит resume_after_approval)
 
         if repeat_suppressed >= MAX_REPEAT_SUPPRESSED:
-            logger.warning("task %s: model keeps repeating an executed call; finishing the task", task_id)
-            break
+            await _abort_task(
+                task_id,
+                "loop_detected",
+                "Остановлено: модель повторяет один и тот же вызов с теми же аргументами. Нужен другой подход.",
+            )
+            return
 
     await finalize_task(task_id, router)
 
@@ -539,8 +681,7 @@ async def _run_delegate_batch(
     return parent_paused
 
 
-async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: bool = False):
-    settings = get_settings()
+async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: bool = False, router=None, task_id=None):
     # Аргументы приходят от модели: сверяем с input_schema ДО handler'а. Ошибка уходит модели понятным
     # текстом (какой аргумент и что не так), а не «KeyError: 'path'» и не молчаливым «ok» на пустой вызов.
     from aria.tools.validators import validate_tool_input
@@ -553,6 +694,7 @@ async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: b
         output = await asyncio.wait_for(
             spec.handler(
                 input_json=arguments, timeout_sec=spec.timeout_sec, sandbox_root=sandbox_root,
+                router=router, task_id=task_id,
                 **({"approved": True} if approved else {}),
             ),
             timeout=spec.timeout_sec,
@@ -727,16 +869,19 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
                 {"hook_blocked": True, "reason": hook_decision.reason}, ToolStatus.blocked_policy, "hook_blocked", hook_decision.reason,
             )
         else:
-            output, status, error_code, error_message = await _execute_tool(spec, arguments, sandbox_root, approved=True)
+            output, status, error_code, error_message = await _execute_tool(spec, arguments, sandbox_root, approved=True, router=router, task_id=task_id)
             await toolhooks.post_tool(
                 tool_name, arguments, output, status.value,
                 session_id=sess_id, task_id=task_id, sandbox_root=sandbox_root,
             )
 
+        approved_payload = {"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value}
+        # fold вне транзакции: дисковое I/O вне writer-lock SQLite
+        approved_payload.update(_fold_tool_output(sandbox_root, task_id, str(tool_call_row.id), output))
         with session_scope() as db:
             repo.finish_tool_call(db, tool_call_row, status, output_json=output, error_code=error_code, error_message=error_message)
             session = repo.get_session(db, sess_id)
-            repo.append_message(db, session, role="tool", content_json={"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value}, content=f"{tool_name} (approved) -> {status.value}")
+            repo.append_message(db, session, role="tool", content_json=approved_payload, content=f"{tool_name} (approved) -> {status.value}")
             event_bus.emit("tool_call.updated", {"id": str(tool_call_row.id), "status": status.value}, session_id=session.id, task_id=task_id, db=db)
 
     await execute_agent_loop(task_id, router, sandbox_root)

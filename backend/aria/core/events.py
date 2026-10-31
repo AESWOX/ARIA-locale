@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import Any
 
 from aria.db import repository as repo

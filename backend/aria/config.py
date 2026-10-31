@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # §2.9 TZ v1.1: optimistic lock TTL (file-lock + DB)
     LOCK_TTL_SECONDS: int = 30
     loop_max_iterations: int = 15
+    # E7: жёсткий потолок вызовов LLM на задачу/субагента (0 = выключено).
+    agent_max_llm_calls: int = 40
+    agent_max_llm_calls_subagent: int = 15
     # Волна 1 (A10): размер пула TaskRunner. На 4 ГБ RAM держим 3 по умолчанию,
     # при нехватке памяти TaskRunner сам опускается до 1 воркера.
     runner_max_workers: int = 3
@@ -63,7 +66,9 @@ class Settings(BaseSettings):
     # цикл не маскируется — плейсхолдеры сломали бы пути и команды в tool calls.
     dlp_chat_enabled: bool = False
     dlp_names: str = ""  # имена/логины через запятую: то, что не ловится шаблоном
-    delegate_max_parallel: int = 5
+    delegate_max_parallel: int = 3
+    # 19.5: рой субагентов за флагом; False = строго последовательный запуск.
+    swarm_enabled: bool = True
     delegate_timeout_sec: int = 60
     tools_default_timeout_sec: int = 120
     providers_connectivity_timeout_sec: int = 2
@@ -73,10 +78,22 @@ class Settings(BaseSettings):
     budget_warn_threshold_pct: int = 80
     aria_dev_mode: bool = False
     budget_block_threshold_pct: int = 100
-    # Spend limits in USD (0 = limit disabled). Spend is estimated from message token counts
-    # at DeepSeek Flash peak rates, so it is an upper bound for Flash and a lower bound for Pro.
-    budget_daily_usd: float = 0.0
-    budget_weekly_usd: float = 0.0
+    # Spend limits in USD (0 = limit disabled). Spend is the real sum of llm_usage.cost_usd (E1/E2/E3).
+    budget_daily_usd: float = 1.0
+    budget_weekly_usd: float = 2.0
+    # E3: per-task guardrails and pre-start estimate approval (owner-approved 30.10).
+    budget_task_warn_usd: float = 0.30
+    budget_task_hard_usd: float = 0.40
+    budget_estimate_approval_usd: float = 0.15
+    # E6: вывод инструмента длиннее порога сворачивается (голова+хвост+ref), полный — на диск.
+    tool_result_fold_chars: int = 3000
+    # S1: кэш поиска (TTL) и кулдаун провайдеров после 429/блока.
+    search_cache_ttl_hours: int = 24
+    search_provider_cooldown_min: int = 10
+    # S2b: вежливый пул OpenAlex (пусто = без mailto).
+    openalex_mailto: str = ""
+    # S3: кэш прочитанных страниц (TTL, только при ETag/Last-Modified).
+    page_cache_ttl_hours: int = 24
 
     @field_validator("aria_dev_mode", mode="before")
     @classmethod
@@ -162,6 +179,9 @@ class Settings(BaseSettings):
     # off = {"thinking": {"type": "disabled"}}; low|high|max = reasoning_effort.
     deepseek_chat_thinking: str = "off"
     deepseek_reasoner_thinking: str = "high"
+    # B3: fallback-класс планирования (deepseek-flash-plan). Flash берёт thinking=high,
+    # чтобы качество откатного плана не проседало при таймауте premium-модели.
+    deepseek_plan_fallback_thinking: str = "high"
 
     # Legacy single-key fallback (used only if GEMINI_API_KEYS is empty).
     gemini_api_key: str = ""
@@ -349,29 +369,9 @@ class Settings(BaseSettings):
             return key
         return self.deepseek_api_key or None
 
-    # --- Codex exec bridge (cheap-path integration, see app/agents/codex_exec_bridge.py) ---
-    # Off by default: with this false, /tasks/{id}/start keeps using the
-    # existing demo executor. Flip to true only once `codex` is installed and
-    # OPENAI_API_KEY / `codex login` is set up locally.
-    codex_enabled: bool = False
-    codex_binary_path: str = "codex"
-    # read-only | workspace-write | danger-full-access — see docs/sandbox.md
-    # in the Codex repo. workspace-write is the sane default: Codex can edit
-    # files under codex_workspace_dir but nothing outside it.
-    codex_sandbox_mode: str = "workspace-write"
-    codex_workspace_dir: str = "."
-    # Only needed if you're not using `codex login` (ChatGPT account) locally.
-    # Never commit a real value — set it in your local .env only.
+    # Optional OpenAI-compatible key. Never commit a real value — set it in
+    # your local .env only.
     openai_api_key: str = ""
-    # Multi-provider path: name of the [model_providers.<id>] block in
-    # ~/.codex/config.toml that points at your local LiteLLM proxy (see
-    # codex_config.toml.snippet + litellm-config.yaml). Leave empty to use
-    # Codex's built-in OpenAI provider with openai_api_key above instead.
-    codex_model_provider: str = ""
-    # Default model alias (must match a model_name in litellm-config.yaml,
-    # e.g. "qwen" | "deepseek" | "gemini" | "openrouter" | "groq" | "grok").
-    # Can be overridden per-task via the `model` field on POST /tasks/{id}/start.
-    codex_default_model: str = ""
 
     # --- Research notes bridge (unofficial API, cookie-based auth) ---
     # Off by default: requires a Google session cookies file.

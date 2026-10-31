@@ -6,9 +6,14 @@ under ``aria.routers`` can share them without circular imports.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import ssl
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import HTTPException
 
@@ -21,6 +26,26 @@ from aria.db.enums import ProviderStatus, SourceTrust, TaskStatus
 from aria.storage import obsidian_vault
 
 settings = get_settings()
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=4)
+def _ssl_context_for(cafile: str | None) -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=cafile)
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """TLS context with real CA verification: SSL_CERT_FILE, else certifi, else system store."""
+    cafile = os.environ.get("SSL_CERT_FILE") or None
+    if cafile is None:
+        try:
+            import certifi
+        except ImportError:
+            logger.warning("certifi is not installed; falling back to the system CA store")
+        else:
+            cafile = certifi.where()
+    return _ssl_context_for(cafile)
 
 
 def utc_now() -> datetime:
@@ -132,6 +157,12 @@ def _safe_export_filename(title: str, session_id: uuid.UUID) -> str:
     stem = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in (title or 'session')).strip('-')
     stem = stem[:48] or 'session'
     return f"{stem}-{session_id}.md"
+
+
+def content_disposition(filename: str) -> str:
+    """RFC 5987 header value: ASCII fallback plus the UTF-8 name (headers are latin-1)."""
+    fallback = filename.encode("ascii", "replace").decode("ascii").replace('"', "-")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 def render_session_export_markdown(

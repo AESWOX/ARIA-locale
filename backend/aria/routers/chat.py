@@ -12,14 +12,19 @@ behind POST /sessions/{id}/messages for real tasks.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
 from aria.api.auth import require_runtime_token
@@ -28,11 +33,11 @@ from aria.core import runprofile, timing
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import SourceTrust
+from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
 from aria.llm import compression
 from aria.llm.key_pool import NoAvailableKeys
-from aria.llm.providers.base import ChatMessage
+from aria.llm.providers.base import ChatMessage, LlmProvider
 from aria.llm.router import ProviderUnavailable, tried_suffix
 from aria.memory import store as memory_store
 
@@ -53,6 +58,66 @@ NOT_CONFIGURED_HINT = (
     "No language model is configured. Open Keys and add a key for any provider "
     "(DeepSeek, Gemini or Groq), then send the message again."
 )
+
+
+@dataclass
+class _ChatStream:
+    stop_event: asyncio.Event
+    task: asyncio.Task | None = None
+
+
+_ACTIVE_STREAMS: dict[uuid.UUID, _ChatStream] = {}
+
+_TERMINAL_TASK_STATUSES = {
+    TaskStatus.done,
+    TaskStatus.done_unaudited,
+    TaskStatus.failed,
+    TaskStatus.cancelled,
+}
+
+
+async def _switch_to_agent(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
+    """19.4b B2: запрос, которому нужен инструмент, уходит из Chat в Agent.
+
+    Возвращает ответ с ``mode="agent"`` (и ``task_id``), если сессия переключена,
+    иначе None — сообщение идёт обычным чат-путём. Гейт уточнений здесь не запускается:
+    действие уже названо, карточки только мешают (см. 19.4b B1/B2).
+    """
+    from aria.core import clarifier
+
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry"):
+        return None
+    if clarifier.is_small_talk(content) or not clarifier.needs_tools(content):
+        return None
+    runner = getattr(request.app.state, "task_runner", None)
+    if runner is None:
+        return None
+    with session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        task = repo.get_task(db, session.current_task_id) if session.current_task_id else None
+        if task is not None and task.status not in _TERMINAL_TASK_STATUSES:
+            return None  # задача уже идёт: не переключаем повторно
+        task = repo.create_task(
+            db,
+            session,
+            role=runprofile.root_role(runprofile.get_profile(db, session.id)),
+            objective=content,
+            draft_tz_md=f"# {content[:80]}\n",
+        )
+        repo.set_task_status(db, task, TaskStatus.approved)
+        user_msg = repo.append_message(
+            db, session, role="user", content=content, source_trust=SourceTrust.trusted
+        )
+        session.updated_at = datetime.now(timezone.utc)
+        if (session.title or "") in DEFAULT_TITLES:
+            session.title = content.replace("\n", " ")[:60]
+        task_id = task.id
+    emit_message_created(user_msg, session_id, task_id)
+    queued = bool(runner.submit(task_id, mode="agent", source="ui").get("queued"))
+    return {"ok": True, "mode": "agent", "task_id": str(task_id), "queued": queued}
 
 
 def _real_provider_ids(request: Request) -> list[str]:
@@ -332,20 +397,107 @@ async def chat_messages(session_id: uuid.UUID, _: str = Depends(require_runtime_
         return [serialize_message(msg) for msg in repo.list_messages(db, session_id, limit=1000)]
 
 
+@router.get("/sessions/{session_id}/usage")
+async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """???????? ?????? ? ????????? ?? llm_usage (E1/E2/E3).
+
+    ``session_cost`` ? ????? ???????? cost_usd ????? llm_usage ??????; ???? ? ????? ?????
+    ???? ??????????, ``session_cost_complete=False`` ? ``priced=False`` (????????? ????? ?? ??????????).
+    """
+    with session_scope() as db:
+        if repo.get_session(db, session_id) is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        history = repo.list_messages_for_prompt(db, session_id)
+        context_tokens = compression.history_tokens(history)
+        profile = runprofile.get_profile(db, session_id) or runprofile.builtin_profile()
+        main_seat = profile.get("main") if isinstance(profile, dict) else None
+        provider_id = main_seat.get("model") if isinstance(main_seat, dict) else None  # ? ??????? ??? provider_id
+        context_window: int | None = None
+        if provider_id:
+            windows = [
+                int(row.context_window)
+                for row in repo.list_provider_models(db, provider_id)
+                if row.context_window
+            ]
+            context_window = min(windows) if windows else None
+        costs = list(
+            db.execute(select(m.LlmUsage.cost_usd).where(m.LlmUsage.session_id == session_id)).scalars()
+        )
+        cache_rows = db.execute(
+            select(m.LlmUsage.prompt_hit, m.LlmUsage.prompt_miss).where(m.LlmUsage.session_id == session_id)
+        ).all()
+    known = [(h, mi) for h, mi in cache_rows if h is not None and mi is not None]
+    cache_hits = sum(int(h) for h, _mi in known)
+    cache_total = sum(int(h) + int(mi) for h, mi in known)
+    cache_hit_ratio = round(cache_hits / cache_total, 3) if cache_total > 0 else None
+    priced_messages = sum(1 for c in costs if c is not None)
+    unpriced_messages = len(costs) - priced_messages
+    session_cost_complete = bool(costs) and unpriced_messages == 0
+    priced_total = sum(float(c) for c in costs if c is not None)
+    context_pct = round(context_tokens / context_window * 100, 1) if context_window else None
+    return {
+        "context_tokens": context_tokens,
+        "context_window": context_window,
+        "context_pct": context_pct,
+        "session_cost": round(priced_total, 6) if priced_messages else None,
+        "session_cost_complete": session_cost_complete,
+        "priced": priced_messages > 0 and session_cost_complete,
+        "priced_messages": priced_messages,
+        "unpriced_messages": unpriced_messages,
+        "cache_hit_ratio": cache_hit_ratio,
+    }
+
+
 @router.post("/sessions/{session_id}/send")
 async def chat_send(
     session_id: uuid.UUID,
     payload: dict[str, Any],
     request: Request,
     _: str = Depends(require_runtime_token),
-) -> dict[str, Any]:
+) -> Any:
     # chat_total: весь хендлер, от запроса до сохранённого ответа (4xx/5xx считаются как errors).
     # Не декоратор: при ``from __future__ import annotations`` FastAPI разбирает аннотации в globals обёртки.
     with timing.stage("chat_total"):
+        switched = await _switch_to_agent(session_id, payload, request)
+        if switched is not None:
+            if payload.get("stream"):
+                async def _switched_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": switched})
+
+                return StreamingResponse(
+                    _switched_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return switched
+        if payload.get("stream"):
+            return await _chat_send_stream(session_id, payload, request)
         return await _chat_send(session_id, payload, request)
 
 
-async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+@router.post("/sessions/{session_id}/stop")
+async def chat_stop(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Прервать идущую генерацию ответа; сессия остаётся живой и принимает новое сообщение."""
+    entry = _ACTIVE_STREAMS.get(session_id)
+    if entry is None:
+        return {"ok": True, "stopped": False}
+    entry.stop_event.set()
+    return {"ok": True, "stopped": True}
+
+
+@dataclass
+class _Prepared:
+    user_payload: dict[str, Any]
+    prompt: list[ChatMessage]
+    chat_class: str
+    chat_fallback: tuple[str, ...]
+    chat_prefer: str | None
+    dlp_applied: bool
+    sensitive: bool = False
+
+
+async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> _Prepared:
+    """Запись user-сообщения, сжатие истории, память и сборка промпта — общая для стрима и не-стрима."""
     t_start = time.monotonic()
     content = str(payload.get("content") or "").strip()
     retry = bool(payload.get("retry"))  # re-ask using the last stored user message (no duplicate)
@@ -355,6 +507,9 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
         raise HTTPException(status_code=413, detail=f"message too long (max {MAX_CONTENT_CHARS} characters)")
     if not _real_provider_ids(request):
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_HINT)
+
+    # E9: детект чувствительного — по СЫРОМУ тексту, до DLP-маски.
+    from aria.core.privacy import contains_sensitive
 
     # 1) store the user message, collect history (one short DB scope)
     with session_scope() as db:
@@ -372,6 +527,7 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
         if (session.title or "") in DEFAULT_TITLES:
             session.title = (content or user_msg.content).replace("\n", " ")[:60]
         user_payload = serialize_message(user_msg)
+        sensitive = contains_sensitive(content if not retry else (user_msg.content or ""))
     if not retry:
         emit_message_created(user_msg, session_id, None)
 
@@ -413,41 +569,231 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
     prompt, dlp_applied = _dlp_mask(prompt, session_id)
     # всё до вызова модели (запись сообщения, сжатие, память, сборка промпта): то, что пользователь ждёт зря
     timing.record("chat_prepare", (time.monotonic() - t_start) * 1000.0)
+    return _Prepared(
+        user_payload=user_payload,
+        prompt=prompt,
+        chat_class=chat_class,
+        chat_fallback=chat_fallback,
+        chat_prefer=chat_prefer,
+        sensitive=sensitive,
+        dlp_applied=dlp_applied,
+    )
+
+
+async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> dict[str, Any]:
+    """Полный не-стрим ответ: route_chat + DLP-restore + проверки + запись ассистента."""
     try:
         result = await request.app.state.router.route_chat(
-            chat_class,
-            prompt,
+            prepared.chat_class,
+            prepared.prompt,
             [],
             timeout_sec=60,
             resilient=True,
-            fallback_classes=chat_fallback,
-            prefer_provider_id=chat_prefer,
+            fallback_classes=prepared.chat_fallback,
+            prefer_provider_id=prepared.chat_prefer,
             reject_empty=True,
+            purpose="chat",
+            session_id=session_id,
+            sensitive=prepared.sensitive,
         )
     except Exception as exc:  # noqa: BLE001 - mapped to a clear HTTP error below
         logger.warning("chat: model call failed: %s", exc)
         raise _explain_llm_error(exc) from exc
     reply = (result.response.text or "").strip()
-    if dlp_applied and reply:
+    if prepared.dlp_applied and reply:
         reply = _dlp_restore(reply, session_id)
     if not reply:
         raise HTTPException(status_code=502, detail="The model returned an empty answer. Try again.")
     if result.provider_id.startswith("stub"):
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_HINT)
 
+    # 19.6a: usage из ответа провайдера — для /usage и стоимости сессии.
+    provider = request.app.state.router.find_provider(result.provider_id)
+    assistant_meta = {
+        "model": getattr(provider, "model", None),
+        "provider_id": result.provider_id,
+        "usage": dict(result.response.usage or {}),
+    }
+
     # 3) store the assistant message
     with timing.stage("chat_store"), session_scope() as db:
         session = repo.get_session(db, session_id)
         if session is None:  # deleted while the model was thinking
             raise HTTPException(status_code=404, detail="session was deleted")
-        assistant_msg = repo.append_message(db, session, role="assistant", content=reply, source_trust=SourceTrust.trusted)
+        assistant_msg = repo.append_message(
+            db,
+            session,
+            role="assistant",
+            content=reply,
+            source_trust=SourceTrust.trusted,
+            content_json=assistant_meta,
+        )
         session.updated_at = datetime.now(timezone.utc)
         assistant_payload = serialize_message(assistant_msg)
     emit_message_created(assistant_msg, session_id, None)
     return {
-        "user": user_payload,
+        "user": prepared.user_payload,
         "assistant": assistant_payload,
         "provider_id": result.provider_id,
         "degraded": bool(result.degraded_to_free),
         "fallback": bool(result.fallback),
     }
+
+
+async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    prepared = await _prepare_chat(session_id, payload, request)
+    return await _run_nonstream(session_id, request, prepared)
+
+
+def _ndjson_line(obj: dict[str, Any]) -> str:
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+def _pick_stream_provider(request: Request, prepared: _Prepared) -> LlmProvider | None:
+    """Прямая выборка провайдера для стрима (router.py не меняется): prefer -> класс -> fallback.
+
+    Stub-провайдеры пропускаются: стримить заглушку бессмысленно — не-стрим путь вернёт NOT_CONFIGURED.
+    """
+    llm_router = getattr(request.app.state, "router", None)
+    if llm_router is None:
+        return None
+    if prepared.chat_prefer:
+        p = llm_router.find_provider(prepared.chat_prefer)
+        if p is not None and not p.provider_id.startswith("stub"):
+            return p
+    for cls in (prepared.chat_class, *prepared.chat_fallback):
+        for p in llm_router.providers_by_class.get(cls, []):
+            if not p.provider_id.startswith("stub"):
+                return p
+    return None
+
+
+async def _chat_send_stream(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> StreamingResponse:
+    prepared = await _prepare_chat(session_id, payload, request)
+    return StreamingResponse(
+        _stream_events(session_id, request, prepared),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> AsyncIterator[str]:
+    """NDJSON: {"type":"delta","text":"…"} … {"type":"done","result":{…}} / {"type":"error",…}.
+
+    Любой сбой стрима — не-стрим fallback через ``_run_nonstream``; тогда клиент получает только
+    ``done`` с полным ответом (частичные delta до этого отбрасываются фронтендом).
+
+    Stop (19.2): ``provider.stream()`` идёт в отдельной задаче; генератор гоняется с stop-событием
+    сессии и при Stop отменяет задачу, отдавая ``{"type":"stopped"}`` без сохранения ассистента.
+    """
+    provider = _pick_stream_provider(request, prepared)
+    if provider is None or prepared.dlp_applied or prepared.sensitive:
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    stop_event = asyncio.Event()
+    entry = _ChatStream(stop_event=stop_event)
+    _ACTIVE_STREAMS[session_id] = entry
+
+    async def consume() -> None:
+        try:
+            async for chunk in provider.stream(prepared.prompt, [], 60):
+                await queue.put(("chunk", chunk))
+                if chunk.final:
+                    return
+            await queue.put(("end", None))
+        except Exception as exc:  # noqa: BLE001 — fallback на не-стрим
+            await queue.put(("error", exc))
+
+    entry.task = asyncio.create_task(consume())
+    reply_parts: list[str] = []
+    final_usage: dict = {}
+    stopped = False
+    try:
+        while True:
+            getter = asyncio.ensure_future(queue.get())
+            stopper = asyncio.ensure_future(stop_event.wait())
+            await asyncio.wait({getter, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if stopper.done():
+                stopped = True
+                getter.cancel()
+                break
+            stopper.cancel()
+            kind, payload = getter.result()
+            if kind == "error":
+                logger.warning("chat: stream failed (%s), falling back to non-stream", type(payload).__name__)
+                result = await _run_nonstream(session_id, request, prepared)
+                yield _ndjson_line({"type": "done", "result": result})
+                return
+            if kind == "end":
+                break
+            chunk = payload
+            if chunk.text and not chunk.final:
+                reply_parts.append(chunk.text)
+                yield _ndjson_line({"type": "delta", "text": chunk.text})
+            if chunk.final:
+                final_usage = dict(chunk.usage or {})
+                break
+    finally:
+        entry.task.cancel()
+        _ACTIVE_STREAMS.pop(session_id, None)
+
+    if stopped:
+        yield _ndjson_line({"type": "stopped"})
+        return
+
+    reply = "".join(reply_parts).strip()
+    if not reply:
+        logger.warning("chat: stream produced an empty reply, falling back to non-stream")
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+    if provider.provider_id.startswith("stub"):
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+
+    with timing.stage("chat_store"), session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:  # deleted while the model was streaming
+            raise HTTPException(status_code=404, detail="session was deleted")
+        assistant_msg = repo.append_message(
+            db,
+            session,
+            role="assistant",
+            content=reply,
+            source_trust=SourceTrust.trusted,
+            content_json={
+                "model": getattr(provider, "model", None),
+                "provider_id": provider.provider_id,
+                "usage": final_usage,
+            },
+        )
+        session.updated_at = datetime.now(timezone.utc)
+        assistant_payload = serialize_message(assistant_msg)
+    if final_usage:
+        # E1: стрим идёт мимо route_chat — пишем строку ledger'а здесь, один раз.
+        from aria.llm import usage as llm_usage
+
+        llm_usage.record_usage(
+            provider_id=provider.provider_id,
+            model=getattr(provider, "model", None),
+            usage=final_usage,
+            purpose="chat",
+            session_id=session_id,
+        )
+    emit_message_created(assistant_msg, session_id, None)
+    yield _ndjson_line(
+        {
+            "type": "done",
+            "result": {
+                "user": prepared.user_payload,
+                "assistant": assistant_payload,
+                "provider_id": provider.provider_id,
+                "degraded": False,
+                "fallback": False,
+            },
+        }
+    )

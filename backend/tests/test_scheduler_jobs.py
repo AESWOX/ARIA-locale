@@ -2,7 +2,6 @@ import asyncio
 import unittest
 from datetime import timedelta
 
-from sqlalchemy import select
 
 from aria.db.base import init_db, session_scope
 from aria.db import repository as repo

@@ -1,6 +1,7 @@
 """Obsidian vault routes (moved from aria.main)."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -70,7 +71,7 @@ async def vault_status(_: str = Depends(require_runtime_token)) -> dict[str, Any
 @router.get("/vault/discover")
 async def vault_discover(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     """Vaults known to Obsidian itself (obsidian.json) + folders containing .obsidian."""
-    return vault_index.discover()
+    return await asyncio.to_thread(vault_index.discover)
 
 
 @router.post("/vault/connect")
@@ -93,6 +94,7 @@ async def vault_connect(payload: dict[str, Any], request: Request, _: str = Depe
     os.environ["OBSIDIAN_VAULT_PATH"] = str(path)
     _persist_env_var("OBSIDIAN_VAULT_PATH", str(path))
     _refresh_settings(request)
+    vault_index.reset_discover_cache()
     return {"ok": True, "initialized_obsidian": initialized, **vault_index.status()}
 
 

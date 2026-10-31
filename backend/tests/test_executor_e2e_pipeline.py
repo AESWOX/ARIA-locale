@@ -85,16 +85,16 @@ def test_happy_path_reaches_delivery_and_done(env):
 
 def test_shell_step_needing_approval_fails_honestly_not_as_naebal(env):
     plan = [_step("s1", "file_write", "создать character_base.py", path="character_base.py"),
-            _step("s2", "shell_execute", "запустить blender", deps=["s1"])]
-    result, status, code, msg, calls = _run(Script([plan], command="blender --background --python character_base.py"))
+            _step("s2", "shell_execute", "удалить каталог", deps=["s1"])]
+    result, status, code, msg, calls = _run(Script([plan], command="rd /s /q generated"))
     assert status == "failed" and code == "approval_required", (code, msg)
-    assert "blender --background" in msg and "naebal" not in msg.lower()
+    assert "rd /s /q" in msg and "naebal" not in msg.lower()
     assert [c for c in calls if c[0] == "file_write"] == [("file_write", "ok")], "никаких повторных записей"
 
 
 def test_zabyl_retry_does_not_rewrite_completed_steps(env):
     broken = [_step("s1", "file_write", "создать character_base.py", path="character_base.py"),
-              _step("s2", "web_fetch", "прочитать справку", deps=["s1"])]          # нет url -> шаг падает
+              _step("s2", "nonexistent_tool", "прочитать справку", deps=["s1"])]  # unknown tool_ref -> replan оправдан (R6)
     fixed = [_step("s1", "file_write", "создать character_base.py", path="character_base.py"),
              _step("s2", "shell_execute", "проверить синтаксис", deps=["s1"])]
     router = Script([broken, fixed], command="python -m py_compile character_base.py")

@@ -128,6 +128,45 @@ def is_small_talk(content: str) -> bool:
     return bool(clauses) and all(_clause_is_small_talk(c) for c in clauses)
 
 
+_TOOL_URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|org|net|io|dev|ai|ru|co|app)\b", re.IGNORECASE
+)
+_TOOL_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|(?:^|\s)~/|(?:^|\s)/[\w.-]+)")
+_TOOL_SHELL_HEAD_RE = re.compile(
+    r"^\s*(?:git|npm|npx|pip|pytest|docker|powershell|cmd|bash|sh|curl|wget|ls|dir|grep)\b",
+    re.IGNORECASE,
+)
+_TOOL_SHELL_VERBS = frozenset({"запусти", "выполни", "run", "execute"})
+_TOOL_SHELL_WORDS = frozenset({
+    "git", "npm", "npx", "pip", "pytest", "docker", "powershell", "cmd", "bash", "sh", "curl", "wget",
+    "ls", "dir", "grep", "shell", "терминал", "командная",
+})
+_TOOL_FILE_VERBS = frozenset({
+    "открой", "открыть", "прочитай", "прочти", "покажи", "найди", "запиши", "создай", "удали",
+    "перемести", "скопируй", "open", "read", "list", "find", "write", "create", "delete", "move", "copy",
+})
+_TOOL_FILE_WORDS = frozenset({
+    "файл", "файлы", "файла", "папка", "папку", "папки", "каталог", "директория",
+    "file", "files", "folder", "folders", "directory",
+})
+_WORD_RE = re.compile(r"[a-zа-яё]+", re.IGNORECASE)
+
+
+def needs_tools(content: str) -> bool:
+    """Нужен ли для запроса инструмент (веб/файлы/shell), а не ответ из памяти модели.
+
+    19.4b B2: единственное место эвристики Chat -> Agent. Намеренно узко: URL/домен,
+    путь к файлу, команда shell или глагол работы с файлом рядом со словом «файл».
+    """
+    text = content or ""
+    if _TOOL_URL_RE.search(text) or _TOOL_PATH_RE.search(text) or _TOOL_SHELL_HEAD_RE.search(text):
+        return True
+    words = {w.lower().replace("ё", "е") for w in _WORD_RE.findall(text)}
+    if words & _TOOL_SHELL_VERBS and words & _TOOL_SHELL_WORDS:
+        return True
+    return bool(words & _TOOL_FILE_VERBS and words & _TOOL_FILE_WORDS)
+
+
 def detect_language(content: str) -> str:
     """'uk' | 'ru' | 'en' по буквам запроса; без букв остаётся русский (прежнее поведение)."""
     text = content or ""
@@ -190,7 +229,14 @@ def _strip_fence(raw: str) -> str:
     return text.strip()
 
 
-async def _ask_model(router: ProviderRouter, content: str, spec: TaskSpec) -> dict:
+async def _ask_model(
+    router: ProviderRouter,
+    content: str,
+    spec: TaskSpec,
+    *,
+    session_id: object | None = None,
+    task_id: object | None = None,
+) -> dict:
     """Один запрос к clarifier-роли. Любой сбой = пустой payload, а не падение задачи."""
     messages = [
         ChatMessage(role="system", content=_prompt_text()),
@@ -208,6 +254,7 @@ async def _ask_model(router: ProviderRouter, content: str, spec: TaskSpec) -> di
     result = await router.route_chat(
         "standard_reasoning", messages, tools=[], allow_degrade=True,
         resilient=True, fallback_classes=("free_tier_reasoning", "premium_reasoning"),
+        purpose="clarifier", session_id=session_id, task_id=task_id,
     )
     import json
 
@@ -430,6 +477,7 @@ async def run_gate(
     *,
     router: ProviderRouter | None = None,
     autonomous: bool = False,
+    mode: str = "",
 ) -> ClarifyOutcome:
     """Прогоняет гейт уточнения и приводит задачу к одному из трёх состояний.
 
@@ -440,6 +488,9 @@ async def run_gate(
     """
     lang = detect_language(content)
     spec = _load_or_derive(task_id, content)
+    if mode:
+        # D-21: вкладка, из которой пришла задача, переживает раунд уточнения.
+        spec.mode = mode
     # PR-3: риск считаем и по запросу владельца, и по уточнённой clarifier цели:
     # модель могла переписать формулировку, и маркер риска остался бы только в исходном тексте.
     spec.high_risk = (
@@ -456,7 +507,7 @@ async def run_gate(
         new_assumptions.append(AUTONOMOUS_NOTE)
     elif router is not None and rounds < MAX_CLARIFY_ROUNDS:
         try:
-            payload = await _ask_model(router, content, spec)
+            payload = await _ask_model(router, content, spec, task_id=task_id)
         except Exception as exc:  # noqa: BLE001 — clarifier недоступен, работаем детерминированно
             logger.warning("clarifier недоступен (%s), гейт работает детерминированно", type(exc).__name__)
             payload = {}

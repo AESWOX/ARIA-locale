@@ -13,7 +13,7 @@ import re
 _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bbot(\d{5,}):[A-Za-z0-9_-]{20,}"), r"bot\1:***"),
     (re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
-    (re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password|key)=([^&\s\"']{6,})"), r"\1=***"),
+    (re.compile(r"(?i)\b([a-z0-9_]*(?:key[_-]?id|key|token|secret|password|pin))\s*=\s*([^&\s\"',;]{4,})"), r"\1=***"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "sk-***"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh*_***"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"), "AIza***"),

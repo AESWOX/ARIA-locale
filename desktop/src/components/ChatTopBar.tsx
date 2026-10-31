@@ -1,5 +1,5 @@
 import { Maximize2, Minimize2, Loader2 } from "lucide-react";
-import type { ChatModels, RunProfile, ProfileSeat } from "@/lib/api";
+import type { ChatModels, ChatUsage, RunProfile, ProfileSeat } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /* Top bar of the chat: what you are talking to and how, at a glance, plus the
@@ -36,7 +36,7 @@ function Chip({ children, title, tone }: { children: React.ReactNode; title?: st
 }
 
 export function ChatTopBar({
-  title, mode, profile, models, busy, waiting, costToday, focus, onToggleFocus,
+  title, mode, profile, models, busy, waiting, costToday, usage, focus, onToggleFocus,
 }: {
   title: string;
   mode: string;
@@ -45,6 +45,7 @@ export function ChatTopBar({
   busy: boolean;
   waiting: boolean;
   costToday: number | null;
+  usage: ChatUsage | null;
   focus: boolean;
   onToggleFocus: () => void;
 }) {
@@ -67,6 +68,16 @@ export function ChatTopBar({
             {THINK_SHORT[profile.thinking]} · {AUDIT_SHORT[profile.audit]}
           </Chip>
         </>
+      )}
+      {usage?.context_pct != null && (
+        <Chip title="Session context used (prompt tokens / model window)">
+          ctx {usage.context_pct}%
+        </Chip>
+      )}
+      {usage?.priced && usage.session_cost != null && (
+        <Chip title="Cost of this chat (from provider usage and model prices)">
+          ${usage.session_cost.toFixed(4)} this chat
+        </Chip>
       )}
       {costToday !== null && (
         <Chip title="Estimated spend today across all chats (upper bound, cache not counted)">

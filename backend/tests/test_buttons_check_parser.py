@@ -35,4 +35,4 @@ def test_real_api_ts_is_parsed_and_matches_most_routes():
 
     matchers = mod.openapi_matchers(app.openapi())
     missing = [n for n, calls in parsed.items() for m, p in calls if mod.match_route(matchers, m, p)[0] == "missing"]
-    assert len(missing) <= 3, f"разбор или маршруты разъехались: {missing}"
+    assert missing == [], f"вызовы api.ts без маршрута на бэкенде: {missing}"

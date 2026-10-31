@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE feed [<!ENTITY xxe SYSTEM "file:///C:/Windows/win.ini">]>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/xxe</id>
+    <title>&xxe;</title>
+    <summary>leak attempt</summary>
+  </entry>
+</feed>

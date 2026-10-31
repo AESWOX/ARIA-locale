@@ -1,26 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import {
   Activity,
   Brain,
-  Check,
-  Clock,
-  Copy,
   Cpu,
   Database,
   Download,
   Globe,
   HardDrive,
-  KeyRound,
-  Link2,
   Play,
   Plus,
   Power,
   RotateCw,
   Server,
-  Share2,
   ShieldCheck,
-  Sparkles,
   Stethoscope,
   Terminal,
   Trash2,
@@ -45,15 +37,12 @@ import { api } from "@/lib/api";
 import type {
   StatusResponse,
   MemoryStatus,
-  CredentialPoolProvider,
   CheckpointsResponse,
   HooksResponse,
   HookEntry,
   SystemStats,
   UpdateCheckResponse,
-  CuratorStatus,
   PortalStatus,
-  DebugShareResponse,
 } from "@/lib/api";
 
 function formatBytes(n: number): string {
@@ -152,22 +141,14 @@ export default function SystemPage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [memory, setMemory] = useState<MemoryStatus | null>(null);
-  const [pool, setPool] = useState<CredentialPoolProvider[]>([]);
   const [checkpoints, setCheckpoints] = useState<CheckpointsResponse | null>(
     null,
   );
   const [hooks, setHooks] = useState<HooksResponse | null>(null);
-  const [curator, setCurator] = useState<CuratorStatus | null>(null);
   const [portal, setPortal] = useState<PortalStatus | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [activeAction, setActiveAction] = useState<string | null>(null);
-
-  // Add-credential form.
-  const [credProvider, setCredProvider] = useState("openrouter");
-  const [credKey, setCredKey] = useState("");
-  const [credLabel, setCredLabel] = useState("");
-  const [addingCred, setAddingCred] = useState(false);
 
   const [importPath, setImportPath] = useState("");
   // Restore-from-backup is destructive (overwrites the live config) and the
@@ -202,23 +183,19 @@ export default function SystemPage() {
       api.getStatus(),
       api.getSystemStats(),
       api.getMemory(),
-      api.getCredentialPool(),
       api.getCheckpoints(),
       api.getHooks(),
-      api.getCurator(),
       api.getPortal(),
       // Cached (non-forced) check so the version row shows update status on
       // load without a separate effect / a forced network round-trip.
       api.checkARIAUpdate(false),
     ])
-      .then(([s, st, m, p, c, h, cur, prt, upd]) => {
+      .then(([s, st, m, c, h, prt, upd]) => {
         if (s.status === "fulfilled") setStatus(s.value);
         if (st.status === "fulfilled") setStats(st.value);
         if (m.status === "fulfilled") setMemory(m.value);
-        if (p.status === "fulfilled") setPool(p.value.providers);
         if (c.status === "fulfilled") setCheckpoints(c.value);
         if (h.status === "fulfilled") setHooks(h.value);
-        if (cur.status === "fulfilled") setCurator(cur.value);
         if (prt.status === "fulfilled") setPortal(prt.value);
         if (upd.status === "fulfilled") setUpdateInfo(upd.value);
       })
@@ -249,18 +226,6 @@ export default function SystemPage() {
     }
   };
 
-  // ── Curator ────────────────────────────────────────────────────────
-  const toggleCuratorPaused = async () => {
-    if (!curator) return;
-    try {
-      await api.setCuratorPaused(!curator.paused);
-      showToast(curator.paused ? "Curator resumed" : "Curator paused", "success");
-      loadAll();
-    } catch (e) {
-      showToast(`Curator toggle failed: ${e}`, "error");
-    }
-  };
-
   // ── Memory ─────────────────────────────────────────────────────────
   // Memory provider selection lives on the /plugins page now (see the
   // read-only display + link below); the dropdown was intentionally
@@ -276,47 +241,6 @@ export default function SystemPage() {
           loadAll();
         } catch (e) {
           showToast(`Reset failed: ${e}`, "error");
-          throw e;
-        }
-      },
-      [loadAll, showToast],
-    ),
-  });
-
-  // ── Credential pool ────────────────────────────────────────────────
-  const addCredential = async () => {
-    if (!credProvider.trim() || !credKey.trim()) {
-      showToast("Provider and API key required", "error");
-      return;
-    }
-    setAddingCred(true);
-    try {
-      await api.addCredentialPoolEntry(
-        credProvider.trim(),
-        credKey.trim(),
-        credLabel.trim() || undefined,
-      );
-      showToast("Credential added", "success");
-      setCredKey("");
-      setCredLabel("");
-      loadAll();
-    } catch (e) {
-      showToast(`Failed to add credential: ${e}`, "error");
-    } finally {
-      setAddingCred(false);
-    }
-  };
-
-  const credDelete = useConfirmDelete({
-    onDelete: useCallback(
-      async (key: string) => {
-        const [provider, idxStr] = key.split("|");
-        try {
-          await api.removeCredentialPoolEntry(provider, Number(idxStr));
-          showToast("Credential removed", "success");
-          loadAll();
-        } catch (e) {
-          showToast(`Failed to remove: ${e}`, "error");
           throw e;
         }
       },
@@ -363,54 +287,6 @@ export default function SystemPage() {
       setCleaningTestData(false);
     }
   }, [showToast]);
-
-  // ── Debug share ────────────────────────────────────────────────────
-  // Unlike the fire-and-forget ops above, `debug share` produces shareable
-  // paste URLs that are the whole point — so we surface them as real,
-  // copyable links rather than a log tail.
-  const [shareRedact, setShareRedact] = useState(true);
-  const [sharing, setSharing] = useState(false);
-  const [shareResult, setShareResult] = useState<DebugShareResponse | null>(
-    null,
-  );
-  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
-
-  const copyToClipboard = useCallback(
-    async (text: string, label: string) => {
-      try {
-        await navigator.clipboard.writeText(text);
-        setCopiedLabel(label);
-        setTimeout(
-          () => setCopiedLabel((cur) => (cur === label ? null : cur)),
-          1500,
-        );
-      } catch {
-        showToast("Couldn't copy to clipboard", "error");
-      }
-    },
-    [showToast],
-  );
-
-  const runDebugShare = useCallback(async () => {
-    setSharing(true);
-    setShareResult(null);
-    try {
-      const res = await api.runDebugShare({ redact: shareRedact });
-      setShareResult(res);
-      const n = Object.keys(res.urls).length;
-      showToast(
-        `Uploaded ${n} paste${n === 1 ? "" : "s"}${
-          res.redacted ? " (redacted)" : ""
-        }`,
-        "success",
-      );
-    } catch (e) {
-      showToast(`Debug share failed: ${e}`, "error");
-    } finally {
-      setSharing(false);
-    }
-  }, [shareRedact, showToast]);
-
 
   // ── Update check / apply ───────────────────────────────────────────
   const checkForUpdate = useCallback(
@@ -586,14 +462,6 @@ export default function SystemPage() {
         title="Reset memory"
         description="This permanently erases the selected built-in memory files. This cannot be undone."
         loading={memoryReset.isDeleting}
-      />
-      <DeleteConfirmDialog
-        open={credDelete.isOpen}
-        onCancel={credDelete.cancel}
-        onConfirm={credDelete.confirm}
-        title="Remove credential"
-        description="Remove this pooled API key? The agent will no longer rotate through it."
-        loading={credDelete.isDeleting}
       />
       <DeleteConfirmDialog
         open={checkpointsPrune.isOpen}
@@ -899,39 +767,6 @@ export default function SystemPage() {
         </Card>
       </section>
 
-      {/* ── Curator ───────────────────────────────────────────────── */}
-      <section className="flex flex-col gap-3">
-        <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
-          <Sparkles className="h-4 w-4" /> Skill curator
-        </H2>
-        <Card>
-          <CardContent className="flex items-center justify-between py-4">
-            <div className="flex items-center gap-3">
-              <Badge tone={curator?.paused ? "warning" : curator?.enabled ? "success" : "secondary"}>
-                {curator?.paused ? "paused" : curator?.enabled ? "active" : "disabled"}
-              </Badge>
-              <span className="text-sm text-muted-foreground">
-                {curator?.interval_hours ? `every ${curator.interval_hours}h` : ""}
-                {curator?.last_run_at ? ` · last run ${new Date(curator.last_run_at).toLocaleString()}` : " · never run"}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button size="sm" ghost onClick={toggleCuratorPaused}>
-                {curator?.paused ? "Resume" : "Pause"}
-              </Button>
-              <Button
-                size="sm"
-                ghost
-                prefix={<Play className="h-3.5 w-3.5" />}
-                onClick={() => runOp(api.runCurator, "Curator review")}
-              >
-                Run now
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-
       {/* ── Gateway ───────────────────────────────────────────────── */}
       <section className="flex flex-col gap-3">
         <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
@@ -995,9 +830,6 @@ export default function SystemPage() {
                   {memory?.active || "built-in only"}
                 </span>
               </span>
-              <Link to="/plugins" className="underline">
-                Change in Plugins →
-              </Link>
               <span className="ml-auto">
                 New credentials:{" "}
                 <span className="font-mono">aria memory setup</span>
@@ -1022,59 +854,6 @@ export default function SystemPage() {
                 </Button>
               </div>
             </div>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* ── Credential pool ───────────────────────────────────────── */}
-      <section className="flex flex-col gap-3">
-        <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
-          <KeyRound className="h-4 w-4" /> Credential pool
-        </H2>
-        <Card>
-          <CardContent className="flex flex-col gap-4 py-4">
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-              <div className="grid gap-2">
-                <Label htmlFor="cred-provider">Provider</Label>
-                <Input id="cred-provider" value={credProvider} onChange={(e) => setCredProvider(e.target.value)} placeholder="openrouter" />
-              </div>
-              <div className="grid gap-2 sm:col-span-2">
-                <Label htmlFor="cred-key">API key</Label>
-                <Input id="cred-key" type="password" value={credKey} onChange={(e) => setCredKey(e.target.value)} placeholder="sk-…" />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="cred-label">Label</Label>
-                <Input id="cred-label" value={credLabel} onChange={(e) => setCredLabel(e.target.value)} placeholder="optional" />
-              </div>
-            </div>
-            <div className="flex justify-end">
-              <Button size="sm" className="uppercase" onClick={addCredential} disabled={addingCred} prefix={addingCred ? <Spinner /> : undefined}>
-                Add key
-              </Button>
-            </div>
-            {pool.length === 0 && (
-              <p className="text-sm text-muted-foreground">
-                No pooled credentials. Add one above to enable key rotation.
-              </p>
-            )}
-            {pool.map((prov) => (
-              <div key={prov.provider} className="flex flex-col gap-2">
-                <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                  {prov.provider}
-                </span>
-                {prov.entries.map((entry) => (
-                  <div key={`${prov.provider}-${entry.index}`} className="flex items-center gap-3 border border-border bg-background/40 px-3 py-2">
-                    <span className="text-sm font-medium">{entry.label}</span>
-                    <span className="font-mono text-xs text-muted-foreground">{entry.token_preview}</span>
-                    <Badge tone="outline">{entry.auth_type}</Badge>
-                    {entry.last_status && <Badge tone="secondary">{entry.last_status}</Badge>}
-                    <Button ghost size="icon" className="ml-auto text-destructive" aria-label="Remove credential" onClick={() => credDelete.requestDelete(`${prov.provider}|${entry.index}`)}>
-                      <Trash2 />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            ))}
           </CardContent>
         </Card>
       </section>
@@ -1104,9 +883,6 @@ export default function SystemPage() {
             <Button size="sm" ghost prefix={<Database className="h-3.5 w-3.5" />} onClick={() => runOp(api.runDump, "Support dump")}>
               Support dump
             </Button>
-            <Button size="sm" ghost prefix={<RotateCw className="h-3.5 w-3.5" />} onClick={() => runOp(api.runConfigMigrate, "Config migrate")}>
-              Migrate config
-            </Button>
           </CardContent>
         </Card>
 
@@ -1134,128 +910,6 @@ export default function SystemPage() {
           </CardContent>
         </Card>
 
-        {/* Debug share — uploads a redacted report + logs, returns shareable
-            links. Separated from the buttons above because its output is
-            persistent, copyable URLs, not a fire-and-forget log tail. */}
-        <Card>
-          <CardContent className="flex flex-col gap-3 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-start gap-2">
-                <Share2 className="h-4 w-4 mt-0.5 text-muted-foreground" />
-                <div className="flex flex-col">
-                  <span className="text-sm font-medium">Share debug report</span>
-                  <span className="text-xs text-muted-foreground max-w-prose">
-                    Uploads system info + logs to a public paste service and
-                    returns links to send the ARIA team. Pastes auto-delete
-                    after 6 hours.
-                  </span>
-                </div>
-              </div>
-              <Button
-                size="sm"
-                disabled={sharing}
-                prefix={
-                  sharing ? (
-                    <Spinner className="h-3.5 w-3.5" />
-                  ) : (
-                    <Share2 className="h-3.5 w-3.5" />
-                  )
-                }
-                onClick={() => void runDebugShare()}
-              >
-                {sharing ? "Uploading…" : "Generate share link"}
-              </Button>
-            </div>
-
-            <label className="flex items-center gap-2 text-xs text-muted-foreground select-none">
-              <input
-                type="checkbox"
-                className="accent-current"
-                checked={shareRedact}
-                disabled={sharing}
-                onChange={(e) => setShareRedact(e.target.checked)}
-              />
-              Redact credential-shaped tokens before upload (recommended)
-            </label>
-
-            {shareResult && (
-              <div className="flex flex-col gap-2 border-t border-border pt-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Badge tone="success">uploaded</Badge>
-                    {shareResult.redacted ? (
-                      <Badge tone="outline">redacted</Badge>
-                    ) : (
-                      <Badge tone="warning">not redacted</Badge>
-                    )}
-                    <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Clock className="h-3 w-3" />
-                      auto-deletes in{" "}
-                      {Math.round(shareResult.auto_delete_seconds / 3600)}h
-                    </span>
-                  </div>
-                  {Object.keys(shareResult.urls).length > 1 && (
-                    <Button
-                      size="sm"
-                      ghost
-                      prefix={
-                        copiedLabel === "__all__" ? (
-                          <Check className="h-3.5 w-3.5" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )
-                      }
-                      onClick={() =>
-                        void copyToClipboard(
-                          Object.entries(shareResult.urls)
-                            .map(([label, url]) => `${label}: ${url}`)
-                            .join("\n"),
-                          "__all__",
-                        )
-                      }
-                    >
-                      Copy all
-                    </Button>
-                  )}
-                </div>
-
-                {Object.entries(shareResult.urls).map(([label, url]) => (
-                  <div
-                    key={label}
-                    className="flex items-center gap-2 bg-background/50 border border-border px-3 py-2"
-                  >
-                    <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="font-mono text-xs shrink-0 w-24 truncate text-muted-foreground">
-                      {label}
-                    </span>
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="font-mono text-xs truncate flex-1 text-primary hover:underline"
-                    >
-                      {url}
-                    </a>
-                    <Button
-                      ghost
-                      size="icon"
-                      aria-label={`Copy ${label} link`}
-                      onClick={() => void copyToClipboard(url, label)}
-                    >
-                      {copiedLabel === label ? <Check /> : <Copy />}
-                    </Button>
-                  </div>
-                ))}
-
-                {shareResult.failures.length > 0 && (
-                  <span className="text-xs text-destructive">
-                    Some logs failed to upload: {shareResult.failures.join("; ")}
-                  </span>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
         <Card>
           <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-end">
             <div className="grid gap-2 flex-1">

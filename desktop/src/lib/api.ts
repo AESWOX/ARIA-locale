@@ -457,10 +457,6 @@ export const api = {
     fetchJSON<SessionInfo>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
     ),
-  getSessionLatestDescendant: (id: string) =>
-    fetchJSON<SessionLatestDescendantResponse>(
-      `/api/sessions/${encodeURIComponent(id)}/latest-descendant`,
-    ),
   deleteSession: (id: string, profile = getManagementProfile()) =>
     fetchJSON<{ ok: boolean }>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
@@ -497,7 +493,7 @@ export const api = {
   getSessionStats: (profile = getManagementProfile()) =>
     fetchJSON<SessionStoreStats>(appendProfileParam("/api/sessions/stats", profile)),
   exportSessionUrl: (id: string, profile = getManagementProfile()) =>
-    appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/export`, profile),
+    appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/export.md`, profile),
   pruneSessions: (
     older_than_days: number,
     source?: string,
@@ -568,6 +564,9 @@ export const api = {
     }),
   clearLogs: () =>
     fetchJSON<{ ok: boolean; cleared: boolean; removed_backups: number }>("/api/logs/clear", { method: "POST" }),
+  openLogsFolder: () =>
+    fetchJSON<{ ok: boolean; path: string }>("/api/logs/open-folder", { method: "POST" }),
+  diagnosticsUrl: () => "/api/logs/diagnostics",
   getAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),
@@ -631,7 +630,7 @@ export const api = {
     fetchJSON<CronJob[]>(`/api/cron/jobs?profile=${encodeURIComponent(profile)}`),
   getCronDeliveryTargets: () =>
     fetchJSON<{ targets: CronDeliveryTarget[] }>("/api/cron/delivery-targets"),
-  createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string; skills?: string[] }, profile = "default") =>
+  createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string; skills?: string[]; urgent?: boolean }, profile = "default") =>
     fetchJSON<CronJob>(`/api/cron/jobs?profile=${encodeURIComponent(profile)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -641,7 +640,7 @@ export const api = {
     fetchJSON<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}/pause?profile=${encodeURIComponent(profile)}`, { method: "POST" }),
   updateCronJob: (
     id: string,
-    updates: { prompt?: string; schedule?: string; name?: string; deliver?: string; skills?: string[] },
+    updates: { prompt?: string; schedule?: string; name?: string; deliver?: string; skills?: string[]; urgent?: boolean },
     profile = "default",
   ) =>
     fetchJSON<CronJob>(
@@ -814,6 +813,76 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  /**
+   * Streaming variant of ``chatSend`` (backend: routers/chat.py NDJSON stream).
+   *
+   * Sends ``{..., stream: true}`` and reads the ``application/x-ndjson`` body
+   * line by line: each ``{"type":"delta","text":...}`` is forwarded to
+   * ``onDelta``, and the final ``{"type":"done","result":...}`` resolves with
+   * the same shape as ``chatSend``. Auth mirrors ``fetchJSON`` (runtime token +
+   * legacy session token); a non-2xx throws the same ``"<status>: <body>"``
+   * error so ``errMessage()`` can still extract the backend ``detail``.
+   */
+  chatSendStream: async (
+    sessionId: string,
+    body: { content?: string; retry?: boolean },
+    onDelta?: (text: string) => void,
+  ): Promise<ChatSendResult> => {
+    const base = await resolveBase();
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (_runtimeToken && !headers.has("X-Local-Agent-Token")) {
+      headers.set("X-Local-Agent-Token", _runtimeToken);
+    }
+    const token = window.__ARIA_SESSION_TOKEN__;
+    if (token) setSessionHeader(headers, token);
+    const res = await fetch(`${base}/api/chat/sessions/${encodeURIComponent(sessionId)}/send`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify({ ...body, stream: true }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    if (!res.body) throw new Error("streaming response has no body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let result: ChatSendResult | null = null;
+    let stopped = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        let evt: { type?: string; text?: string; result?: ChatSendResult };
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (evt.type === "delta" && evt.text) onDelta?.(evt.text);
+        else if (evt.type === "done" && evt.result) result = evt.result;
+        else if (evt.type === "stopped") stopped = true;
+      }
+      if (stopped) break;
+    }
+    if (stopped) return { stopped: true };
+    if (!result) throw new Error("stream ended without a done event");
+    return result;
+  },
+  chatUsage: (sessionId: string) =>
+    fetchJSON<ChatUsage>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/usage`),
+  chatStop: (sessionId: string) =>
+    fetchJSON<{ ok: boolean; stopped: boolean }>(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/stop`,
+      { method: "POST" },
+    ),
   chatModels: () => fetchJSON<ChatModels>("/api/chat/models"),
   chatDefaultProfile: () => fetchJSON<{ profile: RunProfile; saved: boolean }>("/api/chat/profile"),
   chatSaveProfile: (sessionId: string, profile: RunProfile) =>
@@ -982,20 +1051,6 @@ export const api = {
       },
     );
   },
-  startOAuthLogin: async (providerId: string) => {
-    const token = await getSessionToken();
-    return fetchJSON<OAuthStartResponse>(
-      `/api/providers/oauth/${encodeURIComponent(providerId)}/start`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [SESSION_HEADER]: token,
-        },
-        body: "{}",
-      },
-    );
-  },
   submitOAuthCode: async (providerId: string, sessionId: string, code: string) => {
     const token = await getSessionToken();
     return fetchJSON<OAuthSubmitResponse>(
@@ -1090,9 +1145,6 @@ export const api = {
   // Dashboard plugins
   getPlugins: () =>
     fetchJSON<PluginManifestResponse[]>("/api/dashboard/plugins"),
-  rescanPlugins: () =>
-    fetchJSON<{ ok: boolean; count: number }>("/api/dashboard/plugins/rescan"),
-
   getPluginsHub: () => fetchJSON<PluginsHubResponse>("/api/dashboard/plugins/hub"),
 
   installAgentPlugin: (body: AgentPluginInstallRequest) =>
@@ -1125,13 +1177,6 @@ export const api = {
       `/api/dashboard/agent-plugins/${pluginPath(name)}`,
       { method: "DELETE" },
     ),
-
-  savePluginProviders: (body: PluginProvidersPutRequest) =>
-    fetchJSON<{ ok: boolean }>("/api/dashboard/plugin-providers", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
 
   setPluginVisibility: (name: string, hidden: boolean) =>
     fetchJSON<{ ok: boolean; name: string; hidden: boolean }>(
@@ -2187,6 +2232,9 @@ export interface CronJob {
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_error?: string | null;
+  urgent?: boolean;
+  defer_until?: string | null;
+  deferred_note?: string | null;
 }
 
 export interface CronDeliveryTarget {
@@ -2265,6 +2313,9 @@ export interface RunPostResult {
   queued?: boolean;
   task_id?: string;
   mode?: RunMode;
+  /** E3: дорогая задача ждёт Approve, задача ещё не стартовала */
+  attention_required?: boolean;
+  estimate?: { p50: number; p90: number; n: number; source: string };
 }
 
 export interface RunAttentionItem {
@@ -2338,10 +2389,30 @@ export interface ChatModels {
 }
 
 export interface ChatSendResult {
-  user: ChatMsg;
-  assistant: ChatMsg;
-  provider_id: string;
-  degraded: boolean;
+  /** absent when the request was switched to Agent (19.4b B2) */
+  user?: ChatMsg;
+  assistant?: ChatMsg;
+  provider_id?: string;
+  degraded?: boolean;
+  /** set when the answer came from a fallback class after the preferred provider failed */
+  fallback?: boolean;
+  /** 19.4b B2: the chat request needed a tool and the session moved to Agent */
+  mode?: "chat" | "agent";
+  task_id?: string;
+  queued?: boolean;
+  /** 19.6: the user pressed Stop; no assistant message was stored */
+  stopped?: boolean;
+}
+
+/** 19.6a/19.6: context and cost of the open chat (GET /chat/sessions/{id}/usage). */
+export interface ChatUsage {
+  context_tokens: number;
+  context_window: number | null;
+  context_pct: number | null;
+  session_cost: number | null;
+  priced: boolean;
+  priced_messages: number;
+  unpriced_messages: number;
 }
 
 /** Encode each path segment but keep the "/" separators. */
@@ -2404,6 +2475,7 @@ export interface VaultCandidate {
   sources: string[];
   is_obsidian_vault: boolean;
   note_count: number;
+  note_count_capped?: boolean;
   last_modified: string | null;
   open_in_obsidian: boolean;
   current: boolean;
@@ -2621,23 +2693,6 @@ export interface OAuthProvider {
 export interface OAuthProvidersResponse {
   providers: OAuthProvider[];
 }
-
-/** Discriminated union — the shape of /start depends on the flow. */
-export type OAuthStartResponse =
-  | {
-      session_id: string;
-      flow: "pkce";
-      auth_url: string;
-      expires_in: number;
-    }
-  | {
-      session_id: string;
-      flow: "device_code";
-      user_code: string;
-      verification_url: string;
-      expires_in: number;
-      poll_interval: number;
-    };
 
 export interface OAuthSubmitResponse {
   ok: boolean;

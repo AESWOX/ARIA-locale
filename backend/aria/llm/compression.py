@@ -145,7 +145,7 @@ def _summary_prompt(text_block: str) -> str:
     )
 
 
-async def _summarize_via_router(router, text_block: str) -> str:
+async def _summarize_via_router(router, text_block: str, session_id=None) -> str:
     """Сжатие через общий роутер (любой настроенный провайдер): без Gemini-ключа сжатие раньше просто
     не работало, и у пользователя с одним ключом DeepSeek/Groq контекст рос до лимита модели."""
     from aria.llm.providers.base import ChatMessage
@@ -157,6 +157,8 @@ async def _summarize_via_router(router, text_block: str) -> str:
         timeout_sec=120,
         resilient=True,
         fallback_classes=("standard_reasoning", "premium_reasoning"),
+        purpose="compress",
+        session_id=session_id,
     )
     text = (result.response.text or "").strip()
     if not text:
@@ -238,7 +240,7 @@ async def _maybe_compress_impl(session_id, router=None) -> bool:
 
     try:
         if router is not None and _get_compression_pool() is None:
-            summary_text = await _summarize_via_router(router, text_block)
+            summary_text = await _summarize_via_router(router, text_block, session_id)
         else:
             summary_text = await _summarize(text_block)
     except Exception as exc:  # noqa: BLE001

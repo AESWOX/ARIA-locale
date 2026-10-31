@@ -5,7 +5,7 @@ has default_model_policy="subagent_execution" so delegated tasks use Groq.
 """
 from __future__ import annotations
 
-from aria.core.roles import ROLE_REGISTRY, mvp_active_roles
+from aria.core.roles import ROLE_REGISTRY
 
 
 SUBAGENT_ROLES = {

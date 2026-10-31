@@ -9,7 +9,7 @@ from aria.config import get_settings
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import SourceTrust, TaskStatus
+from aria.db.enums import TaskStatus
 from aria.llm import compression
 from aria.routers.chat import SYSTEM_PROMPT, _build_prompt
 from tests.test_chat_api import FakeLlm, _cleanup, _client, _new_session

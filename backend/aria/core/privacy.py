@@ -28,6 +28,11 @@ _PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
 )
 
 
+def contains_sensitive(text: str) -> bool:
+    """E9: в тексте есть секрет или email (по тем же паттернам, что и DLP-анонимизатор)."""
+    return any(pattern.search(text or "") for _kind, pattern in _PATTERNS)
+
+
 class EntityAnonymizer:
     """Обратимая маскировка сущностей в тексте.
 

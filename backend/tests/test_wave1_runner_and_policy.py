@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import time
 import uuid
 
@@ -152,7 +153,7 @@ def test_runner_cancel_stops_a_running_task_and_marks_it_cancelled():
 
 
 def test_runner_resume_pending_requeues_unfinished_tasks():
-    task_id = _make_task(objective="wave1 resume test")
+    _make_task(objective="wave1 resume test")
     runner = TaskRunner(_router_with_stub(), "/tmp/aria_wave1_sandbox", max_workers=1)
     resumed = asyncio.run(runner.resume_pending())
     assert resumed >= 1
@@ -187,7 +188,7 @@ def test_cron_due_job_is_executed_and_last_run_is_recorded():
 
         repo.update_scheduler_job(db, job_id, last_run_at=utc_now() - timedelta(minutes=2), last_run_status="ok")
 
-    result = asyncio.run(run_due_jobs(router=None, runner=recorder))
+    result = asyncio.run(run_due_jobs(router=None, runner=recorder, now=datetime(2026, 11, 7, 2, 0, tzinfo=timezone.utc)))
 
     assert "wave1-every-minute" in result["due"], result
     assert recorder.submitted, "due-job обязан превратиться в задачу"

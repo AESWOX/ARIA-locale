@@ -11,7 +11,6 @@ from aria import paths
 
 import json
 import threading
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
