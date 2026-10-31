@@ -307,6 +307,16 @@ class LlmUsage(Base):
     estimated: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class SearchCache(Base):
+    """S1: кэш результатов поиска (key = sha256 запроса и набора провайдеров)."""
+
+    __tablename__ = "search_cache"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class ProviderTierHint(Base):
     """Ручная подсказка по free/paid tier для провайдеров (§5.2 v8.0)."""
 

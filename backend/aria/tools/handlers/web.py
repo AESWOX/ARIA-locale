@@ -262,6 +262,15 @@ async def web_search(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:
         return {"results": [], "error": "empty query"}
     max_results = _clamp_int(input_json.get("max_results"), DEFAULT_MAX_RESULTS, 1, HARD_MAX_RESULTS)
 
+    # S1: пробуем роутер провайдеров; None = провайдеров нет -> прежний DDG-путь.
+    from aria.tools.search import router as search_router
+
+    routed = await search_router.search(query, max_results)
+    if routed is not None:
+        routed["source_trust"] = "untrusted"
+        routed.setdefault("notice", UNTRUSTED_NOTICE)
+        return routed
+
     out = await asyncio.to_thread(_search_blocking, query, max_results)
     out["source_trust"] = "untrusted"
     out["notice"] = UNTRUSTED_NOTICE

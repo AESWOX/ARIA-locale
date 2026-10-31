@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     budget_estimate_approval_usd: float = 0.15
     # E6: вывод инструмента длиннее порога сворачивается (голова+хвост+ref), полный — на диск.
     tool_result_fold_chars: int = 3000
+    # S1: кэш поиска (TTL) и кулдаун провайдеров после 429/блока.
+    search_cache_ttl_hours: int = 24
+    search_provider_cooldown_min: int = 10
 
     @field_validator("aria_dev_mode", mode="before")
     @classmethod
