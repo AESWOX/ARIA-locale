@@ -609,6 +609,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "properties": {
                 "url": {"type": "string", "description": "Адрес страницы, http:// или https://"},
                 "max_chars": {"type": "integer", "description": "Сколько символов текста вернуть"},
+                "focus": {"type": "string", "description": "S3: фокус запроса — длинная страница режется по абзацам с лучшим пересечением"},
             },
             "required": ["url"],
         },
@@ -622,6 +623,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "title": {"type": "string"},
                 "content": {"type": "string"},
                 "truncated": {"type": "boolean"},
+                "date": {"type": "string"},
+                "chars": {"type": "integer"},
                 "source_trust": {"type": "string"},
                 "error": {"type": "string"},
             },

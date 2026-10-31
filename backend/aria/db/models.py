@@ -307,6 +307,24 @@ class LlmUsage(Base):
     estimated: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class PageCache(Base):
+    """S3: кэш прочитанных страниц (URL -> текст, etag/last-modified, TTL)."""
+
+    __tablename__ = "page_cache"
+
+    url: Mapped[str] = mapped_column(String, primary_key=True)
+    etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String, nullable=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    date: Mapped[str] = mapped_column(String, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[int] = mapped_column(Integer, default=200)
+    content_type: Mapped[str] = mapped_column(String, default="text/html")
+    final_url: Mapped[str] = mapped_column(String, default="")
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class SearchCache(Base):
     """S1: кэш результатов поиска (key = sha256 запроса и набора провайдеров)."""
 

@@ -90,8 +90,10 @@ class Settings(BaseSettings):
     # S1: кэш поиска (TTL) и кулдаун провайдеров после 429/блока.
     search_cache_ttl_hours: int = 24
     search_provider_cooldown_min: int = 10
-    # S2b: ???????? ??? OpenAlex (????? = ??? mailto).
+    # S2b: вежливый пул OpenAlex (пусто = без mailto).
     openalex_mailto: str = ""
+    # S3: кэш прочитанных страниц (TTL, только при ETag/Last-Modified).
+    page_cache_ttl_hours: int = 24
 
     @field_validator("aria_dev_mode", mode="before")
     @classmethod
