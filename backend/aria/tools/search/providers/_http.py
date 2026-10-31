@@ -15,17 +15,18 @@ _TAGS = re.compile(r"<[^>]+>")
 
 
 def strip_html(text: str) -> str:
-    return html.unescape(_TAGS.sub("", text or "")).strip()
+    return html.unescape(_TAGS.sub("", html.unescape(text or ""))).strip()
 
 
-async def get_bytes(url: str, params: dict | None = None, *, max_bytes: int = MAX_BYTES) -> bytes:
+async def get_bytes(url: str, params: dict | None = None, *, max_bytes: int = MAX_BYTES, headers: dict | None = None) -> bytes:
+    merged = {**(headers or {}), "User-Agent": USER_AGENT}
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_SEC, headers={"User-Agent": USER_AGENT}) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SEC, headers=merged) as client:
             async with client.stream("GET", url, params=params) as response:
-                if response.status_code == 429:
+                if response.status_code in (403, 429):
                     from aria.tools.search.base import SearchRateLimited
 
-                    raise SearchRateLimited("HTTP 429")
+                    raise SearchRateLimited(f"HTTP {response.status_code}")
                 if response.status_code != 200:
                     raise RuntimeError(f"HTTP {response.status_code}")
                 buf = bytearray()
@@ -40,11 +41,11 @@ async def get_bytes(url: str, params: dict | None = None, *, max_bytes: int = MA
         raise RuntimeError(f"{type(exc).__name__}") from exc
 
 
-async def get_json(url: str, params: dict | None = None, *, max_bytes: int = MAX_BYTES) -> dict:
+async def get_json(url: str, params: dict | None = None, *, max_bytes: int = MAX_BYTES, headers: dict | None = None) -> dict:
     import json
 
     try:
-        data = json.loads((await get_bytes(url, params, max_bytes=max_bytes)).decode("utf-8", "replace"))
+        data = json.loads((await get_bytes(url, params, max_bytes=max_bytes, headers=headers)).decode("utf-8", "replace"))
     except ValueError as exc:
         raise RuntimeError("invalid JSON") from exc
     if not isinstance(data, dict):

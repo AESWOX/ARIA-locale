@@ -146,5 +146,5 @@ async def test_empty_and_garbage_json(monkeypatch):
 
 def test_default_factory():
     providers = build_default_providers()
-    assert [p.name for p in providers] == ["wikipedia", "hackernews", "arxiv"]
+    assert [p.name for p in providers] == ["wikipedia", "hackernews", "arxiv", "stackexchange", "github", "openalex"]
     assert providers[0].kinds and providers[2].kinds == frozenset({"science"})
