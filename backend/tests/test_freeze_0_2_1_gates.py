@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from pathlib import Path
 
@@ -258,6 +259,7 @@ async def test_file_search_bare_glob_is_recursive(tmp_path):
     assert "tests/test_x.py" in result["matches"] or "tests\\test_x.py" in result["matches"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only PATH augmentation")
 def test_shell_env_adds_git_to_path(tmp_path, monkeypatch):
     git_cmd = tmp_path / "Git" / "cmd"
     git_cmd.mkdir(parents=True)
