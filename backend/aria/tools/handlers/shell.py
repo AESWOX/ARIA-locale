@@ -56,21 +56,35 @@ def shell_executable() -> str | None:
 
 
 _CMD_ONLY = re.compile(r"&&|\|\||%\w+%|(?:^|\s)&(?:\s|$)")
+_PS_ONLY = re.compile(
+    r"(?i)^\s*(?:Get|Set|New|Remove|Start|Stop|Test|Write|Invoke|Select|Where|ForEach|Copy|Move|"
+    r"Rename|Out|Import|Export|ConvertTo|ConvertFrom|Resolve|Join|Split|Measure|Sort|Group)-[A-Za-z]"
+)
+_PS_VAR = re.compile(r"\$env:|\$PSVersionTable|\$\w+\s*=")
+
+
+def _needs_powershell(script: str) -> bool:
+    """PowerShell нужен для кавычек, PS-командлетов и PS-переменных; простые
+    allowlist-команды (`echo`, `git status`, `whoami`) идут через cmd без задержки
+    холодного старта PowerShell."""
+    return bool('"' in script or "'" in script or _PS_ONLY.search(script) or _PS_VAR.search(script))
 
 
 def shell_program(command: str) -> tuple[str, str | None]:
     """Возвращает (команда для запуска, интерпретатор).
 
-    PowerShell по умолчанию; cmd остаётся только для унаследованных cmd-операторов
-    (``&&``, ``||``, ``%VAR%``), которые PowerShell 5.1 не понимает. Команды с
-    кавычками уходят в PowerShell как ``-EncodedCommand``: иначе вложенные кавычки
-    ломаются при shell=True.
+    PowerShell исполняет команды с кавычками, PS-командлетами и PS-переменными
+    (``-EncodedCommand``: иначе вложенные кавычки ломаются при shell=True).
+    Унаследованные cmd-операторы (``&&``, ``||``, ``%VAR%``) и простые allowlist-
+    команды остаются на cmd — PowerShell 5.1 их не понимает или стартует медленно.
     """
     ps = shell_executable()
     if ps is None:
         return command, None
     script = command or ""
     if _CMD_ONLY.search(script):
+        return script, None
+    if not _needs_powershell(script):
         return script, None
     if script.lstrip().startswith(('"', "'")):
         script = "& " + script
