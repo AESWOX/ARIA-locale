@@ -149,4 +149,4 @@ def test_loop_rejects_dangerous_unix_before_approve(cmd, world, trap, monkeypatc
     assert status != TaskStatus.awaiting_attention
     assert not any(c[0] == "shell_execute" for c in calls), "инструмент не вызван"
     assert trap == [], "процесс не порождается"
-    assert any("rejected: unix_only_command" in msg for msg in msgs), msgs
+    assert any("rejected: unix_only_command" in msg or "denied:" in msg for msg in msgs), msgs

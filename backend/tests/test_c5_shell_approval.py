@@ -191,8 +191,9 @@ def _snapshot(task_id):
         return task.status, [(i.id, i.status, (i.payload_json or {}).get("command")) for i in items], calls
 
 
-LOOP_VARIANTS = ["rm -rf /", "rm -fr /tmp/x", "rm -Rf x", "rm -rfv x", "rm --recursive x", "rm -r -f x", "sudo rm -rf /",
-                 "rm -r ~/docs", "ls; rm -rf x", "bash -c 'rm -rf x'", "RM -RF x", "rmdir /s /q x"]
+LOOP_VARIANTS = ["rm -Rf x", "rm -rfv x", "rm --recursive x", "rm -r -f x",
+                 "ls; rm -rf x", "bash -c 'rm -rf x'", "RM -RF x", "rmdir /s /q x"]
+DENY_VARIANTS = ["rm -rf /", "rm -fr /tmp/x", "sudo rm -rf /", "rm -r ~/docs"]
 
 
 @pytest.mark.parametrize("cmd", LOOP_VARIANTS)
@@ -206,6 +207,33 @@ def test_loop_pauses_and_creates_attention_item_without_running(cmd, world, trap
     assert len(items) == 1 and items[0][1] == ApprovalStatus.pending and items[0][2] == cmd
     assert trap == [], "до Approve процесс не запускается"
     assert calls == [], "до решения владельца нет и записи tool_call (действие не считается выполненным)"
+
+
+def test_loop_reads_and_writes_inside_project_without_approval(world, trap):
+    """Этап 3: чтение и запись внутри проекта — автоматически, без карточки."""
+    router, stubs, sandbox, task_id = world
+    sub = stubs["subagent_execution"]
+    sub.push(tool_call("file_write", {"path": "auto.txt", "content": "rails"}))
+    sub.push(tool_call("file_read", {"path": "auto.txt"}))
+    sub.push(final_answer("done"))
+    asyncio.run(execute_agent_loop(task_id, router, sandbox))
+
+    _status, items, calls = _snapshot(task_id)
+    assert items == [] and trap == []
+    assert [c[1] for c in calls if c[0] in ("file_write", "file_read")] == ["ok", "ok"]
+    from pathlib import Path
+
+    assert (Path(sandbox) / "auto.txt").read_text(encoding="utf-8") == "rails"
+
+
+@pytest.mark.parametrize("cmd", DENY_VARIANTS)
+def test_loop_hard_denies_commands_outside_project(cmd, world, trap):
+    router, stubs, sandbox, task_id = world
+    stubs["subagent_execution"].push(tool_call("shell_execute", {"command": cmd}))
+    asyncio.run(execute_agent_loop(task_id, router, sandbox))
+
+    _status, items, calls = _snapshot(task_id)
+    assert items == [] and calls == [] and trap == []
 
 
 def test_loop_ignores_forged_approved_flag_from_the_model(world, trap):
