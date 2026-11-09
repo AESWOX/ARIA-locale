@@ -1,12 +1,9 @@
 import { useEffect, useRef } from "react";
 import { ChevronUp, Loader2, Plus, Send, Settings2, Square, X } from "lucide-react";
 import type { ChatModels, ProfileSeat, RunProfile } from "@/lib/api";
-import type { ChatMode } from "@/lib/chat-modes";
-import { CHAT_MODES } from "@/lib/chat-modes";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
 import { Button } from "@vendor/ui/ui/components/button";
-import { TeamPanel } from "@/components/TeamPanel";
 
 export interface ComposerAttachment {
   name: string;
@@ -37,10 +34,7 @@ export function ChatComposer({
   onRemoveAttachment,
   sending,
   busy,
-  mode,
-  onModeChange,
   profile,
-  profileNotes,
   models,
   onChangeProfile,
   onSaveDefault,
@@ -59,10 +53,7 @@ export function ChatComposer({
   onRemoveAttachment: (index: number) => void;
   sending: boolean;
   busy: boolean;
-  mode: ChatMode;
-  onModeChange: (mode: ChatMode) => void;
   profile: RunProfile | null;
-  profileNotes: string[];
   models: ChatModels | null;
   onChangeProfile: (profile: RunProfile) => void;
   onSaveDefault: () => void;
@@ -94,22 +85,12 @@ export function ChatComposer({
   }, [advancedOpen, onToggleAdvanced]);
 
   const disabled = sending || busy;
-  const active = CHAT_MODES.find((item) => item.id === mode) ?? CHAT_MODES[0];
 
   return (
     <div className="relative border-t border-border bg-background/80 p-2">
       {advancedOpen && <div className="fixed inset-0 z-20" onClick={onToggleAdvanced} />}
       {advancedOpen && profile && models && (
         <div className="absolute bottom-full left-2 right-2 z-30 mb-1 max-h-[60vh] overflow-y-auto border border-border bg-background p-2 shadow-lg">
-          <TeamPanel
-            profile={profile}
-            models={models}
-            disabled={busy}
-            notes={profileNotes}
-            onChange={onChangeProfile}
-            allowBoss={mode === "plan"}
-            onRequestPlan={() => onModeChange("plan")}
-          />
           <div className="flex items-center justify-between gap-2 px-2 py-1">
             <Button ghost size="sm" disabled={savingDefault || busy} onClick={onSaveDefault}>
               {savingDefault ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
@@ -163,7 +144,7 @@ export function ChatComposer({
           ref={textareaRef}
           rows={1}
           className="min-h-[36px] w-full resize-none bg-transparent px-2 py-1 text-sm leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none"
-          placeholder={mode === "plan" ? t.chatComposer.placeholderPlan : t.chatComposer.placeholderChat}
+          placeholder={t.chatComposer.placeholderChat}
           value={input}
           disabled={disabled}
           onChange={(event) => onInputChange(event.target.value)}
@@ -229,26 +210,6 @@ export function ChatComposer({
             </select>
           )}
 
-          <div className="flex border border-border" role="radiogroup" aria-label={t.chatComposer.mode}>
-            {CHAT_MODES.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="radio"
-                aria-checked={mode === item.id}
-                title={item.hint}
-                disabled={disabled}
-                onClick={() => onModeChange(item.id)}
-                className={cn(
-                  "px-2 py-0.5 text-xs",
-                  mode === item.id ? "bg-foreground/10 font-medium" : "text-muted-foreground hover:bg-foreground/5",
-                )}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-
           <Button ghost size="sm" disabled={!profile || !models} onClick={onToggleAdvanced} aria-expanded={advancedOpen}>
             <Settings2 className="mr-1 h-3 w-3" /> {t.chatComposer.advanced}
             <ChevronUp className={cn("ml-1 h-3 w-3 transition-transform", advancedOpen && "rotate-180")} />
@@ -256,7 +217,7 @@ export function ChatComposer({
 
           <span className="flex-1" />
 
-          {sending && mode === "chat" ? (
+          {sending ? (
             <Button ghost aria-label={t.chatComposer.stop} title={t.chatComposer.stop} onClick={onStop}>
               <Square className="h-4 w-4" />
             </Button>
@@ -271,8 +232,6 @@ export function ChatComposer({
             </Button>
           )}
         </div>
-
-        <div className="text-[10px] text-muted-foreground">{active.hint}</div>
       </div>
 
       {error && <div className="mx-auto mt-1 max-w-[920px] text-xs text-destructive">{error}</div>}

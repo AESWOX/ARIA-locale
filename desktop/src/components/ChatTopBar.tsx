@@ -28,10 +28,9 @@ function Chip({ children, title, tone }: { children: React.ReactNode; title?: st
 }
 
 export function ChatTopBar({
-  title, mode, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
+  title, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
 }: {
   title: string;
-  mode: string;
   busy: boolean;
   waiting: boolean;
   costToday: number | null;
@@ -62,7 +61,6 @@ export function ChatTopBar({
           <Loader2 className="h-3 w-3 animate-spin" /> working
         </Chip>
       )}
-      <Chip title="Mode">{mode}</Chip>
       {usage?.context_pct != null && (
         <Chip title="Session context used (prompt tokens / model window)">
           ctx {usage.context_pct}%

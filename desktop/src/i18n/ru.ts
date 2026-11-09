@@ -796,7 +796,6 @@ export const ru: Translations = {
     thinkingFast: "Быстро",
     thinkingBalanced: "Баланс",
     thinkingDeep: "Глубоко",
-    mode: "Режим",
     send: "Отправить",
     stop: "Стоп",
     useForNew: "Использовать для новых чатов",
@@ -805,18 +804,14 @@ export const ru: Translations = {
     close: "Закрыть",
     reset: "Сбросить",
     placeholderChat: "Сообщение ARIA… (Enter — отправить, Shift+Enter — новая строка)",
-    placeholderPlan: "Опиши задачу… (Enter — запустить, Shift+Enter — новая строка)",
   },
   chatPanel: {
-    plan: "План",
     files: "Файлы",
     info: "Инфо",
-    noPlan: "Плана пока нет. Отправь задачу в режиме Plan.",
     openFiles: "Открыть Files",
     openLogs: "Открыть папку логов",
     touchedFiles: "Затронутые файлы",
     attachments: "Вложения",
-    switchToPlan: "Переключить в Plan",
   },
   // UI-2: session inspector in chat.
   chatInspector: {

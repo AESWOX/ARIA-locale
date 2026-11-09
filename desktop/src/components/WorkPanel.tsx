@@ -1,16 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { FolderOpen, ListTree, Paperclip, X } from "lucide-react";
+import { FolderOpen, Paperclip, X } from "lucide-react";
 import type { ChatMsg, ChatUsage } from "@/lib/api";
 import { api } from "@/lib/api";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { Button } from "@vendor/ui/ui/components/button";
 import { SessionInspector } from "@/components/SessionInspector";
-import { TaskSpecPanel, type ClarifyQuestion } from "@/components/TaskSpecPanel";
 import type { ComposerAttachment } from "@/components/ChatComposer";
 
-type Tab = "plan" | "files" | "info";
+type Tab = "files" | "info";
 
 function collectPaths(messages: ChatMsg[]): string[] {
   const found = new Set<string>();
@@ -31,45 +30,22 @@ function collectPaths(messages: ChatMsg[]): string[] {
 
 export function WorkPanel({
   title,
-  taskId,
-  taskStatus,
-  sessionId,
-  questions,
   messages,
   attachments,
   usage,
-  busy,
-  mode,
   onClose,
-  onAnswered,
-  onError,
-  onSwitchToPlan,
 }: {
   title: string;
-  taskId: string | null;
-  taskStatus: string | null;
-  sessionId: string | null;
-  questions: ClarifyQuestion[] | null;
   messages: ChatMsg[];
   attachments: ComposerAttachment[];
   usage: ChatUsage | null;
-  busy: boolean;
-  mode: "chat" | "plan";
   onClose: () => void;
-  onAnswered: () => void;
-  onError: (message: string) => void;
-  onSwitchToPlan: () => void;
 }) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<Tab>(taskId ? "plan" : "files");
+  const [tab, setTab] = useState<Tab>("files");
   const paths = useMemo(() => collectPaths(messages), [messages]);
 
-  useEffect(() => {
-    if (taskId) setTab("plan");
-  }, [taskId]);
-
-  const tabs: { id: Tab; label: string; icon: typeof ListTree }[] = [
-    { id: "plan", label: t.chatPanel.plan, icon: ListTree },
+  const tabs: { id: Tab; label: string; icon: typeof FolderOpen }[] = [
     { id: "files", label: t.chatPanel.files, icon: FolderOpen },
     { id: "info", label: t.chatPanel.info, icon: Paperclip },
   ];
@@ -111,32 +87,6 @@ export function WorkPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "plan" && (
-          <div className="p-2">
-            {taskId ? (
-              <TaskSpecPanel
-                taskId={taskId}
-                taskStatus={taskStatus}
-                sessionId={sessionId}
-                questions={questions}
-                busy={busy}
-                defaultOpen
-                onAnswered={onAnswered}
-                onError={onError}
-              />
-            ) : (
-              <div className="space-y-2 p-2 text-muted-foreground">
-                <p>{t.chatPanel.noPlan}</p>
-                {mode === "chat" && (
-                  <Button size="sm" onClick={onSwitchToPlan}>
-                    {t.chatPanel.switchToPlan}
-                  </Button>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
         {tab === "files" && (
           <div className="space-y-3 p-3">
             <div>

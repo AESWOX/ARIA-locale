@@ -765,7 +765,6 @@ export const it: Translations = {
     thinkingFast: "Fast",
     thinkingBalanced: "Balanced",
     thinkingDeep: "Deep",
-    mode: "Mode",
     send: "Send",
     stop: "Stop",
     useForNew: "Use for new chats",
@@ -774,18 +773,14 @@ export const it: Translations = {
     close: "Close",
     reset: "Reset",
     placeholderChat: "Message ARIA... (Enter to send, Shift+Enter for a new line)",
-    placeholderPlan: "Describe the task... (Enter to start, Shift+Enter for a new line)",
   },
   chatPanel: {
-    plan: "Plan",
     files: "Files",
     info: "Info",
-    noPlan: "No plan yet. Send a task in Plan mode.",
     openFiles: "Open Files",
     openLogs: "Open logs folder",
     touchedFiles: "Files touched",
     attachments: "Attachments",
-    switchToPlan: "Switch to Plan",
   },
   // UI-2: session inspector in chat.
   chatInspector: {

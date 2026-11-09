@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Check, Loader2, RotateCcw, Square, X } from "lucide-react";
 import { api } from "@/lib/api";
-import { CHAT_MODES, normalizeChatMode, type ChatMode } from "@/lib/chat-modes";
 import { formatLocalTime, processingSeconds } from "@/lib/message-timing";
 import { useI18n } from "@/i18n";
 import type { ChatModels, ChatMsg, ChatSessionRow, ChatStatus, ChatUsage, RunProfile, RunState } from "@/lib/api";
@@ -94,7 +93,7 @@ export default function NativeChatPage() {
   const [taskQuestions, setTaskQuestions] = useState<ClarifyQuestion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<ChatMode>("chat");
+  const [models, setModels] = useState<ChatModels | null>(null);
   const [run, setRun] = useState<RunState | null>(null);
   const [usage, setUsage] = useState<ChatUsage | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -102,8 +101,6 @@ export default function NativeChatPage() {
   const usageTick = useRef(0);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [profile, setProfile] = useState<RunProfile | null>(null);
-  const [models, setModels] = useState<ChatModels | null>(null);
-  const [profileNotes, setProfileNotes] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [savingDefault, setSavingDefault] = useState(false);
   const [openIds, setOpenIds] = useState<string[]>([]);
@@ -196,7 +193,6 @@ export default function NativeChatPage() {
     if (!profile || !profileDirty.current) return;
     const saved = await api.chatSaveProfile(sid, profile);
     setProfile(saved.profile);
-    setProfileNotes(saved.notes);
     profileDirty.current = false;
   };
 
@@ -401,8 +397,7 @@ export default function NativeChatPage() {
     try {
       const saved = await api.chatSaveDefaultProfile(profile);
       setProfile(saved.profile);
-      setProfileNotes(saved.notes);
-      profileDirty.current = false;
+        profileDirty.current = false;
     } catch (e) {
       setError(errMessage(e));
     } finally {
@@ -429,10 +424,9 @@ export default function NativeChatPage() {
     setTaskQuestions(null);
     setStreamingText(null);
     setUsage(null);
-    setMode("chat");
   };
 
-  const sendRun = async (text: string, runMode: "agent") => {
+  const sendRun = async (text: string) => {
     let sid = activeId;
     if (!sid) {
       sid = (await api.chatCreate(text.slice(0, 60))).session_id;
@@ -446,7 +440,7 @@ export default function NativeChatPage() {
     ]);
     setInput("");
     setDrafts({});
-    const res = await api.runPost(sid, { content: text, mode: runMode });
+    const res = await api.runPost(sid, { content: text, mode: "agent" });
     // Гейт уточнений (Agent): бэкенд отвечает queued:false + questions — показываем карточку,
     // а не ошибку «already queued».
     const qs = (res as unknown as { questions?: ClarifyQuestion[] })?.questions ?? null;
@@ -550,10 +544,10 @@ export default function NativeChatPage() {
     setError(null);
     const outgoingText = outgoing(text);
     try {
-      if ((mode !== "chat" || awaitingClarification) && !retry) {
-        await sendRun(outgoingText, "agent");
+      if (awaitingClarification && !retry) {
+        await sendRun(outgoingText);
         setInput("");
-    setDrafts({});
+        setDrafts({});
         setAttachments([]);
         return;
       }
@@ -588,11 +582,10 @@ export default function NativeChatPage() {
         void loadUsage(sid);
         return;
       }
-      // 19.4b B2: запросу нужен инструмент — бэкенд перевёл сессию в Agent.
-      // Переключаем вкладку и включаем опрос запуска: шаги и ответ придут существующим polling.
+      // UX-2: бэкенд сам решает, когда запускать инструменты; при переходе в agent
+      // подхватываем состояние запуска, чтобы шаги и ответ пришли существующим polling.
       const returnedMode = (sent as { mode?: unknown }).mode;
-      if (returnedMode && normalizeChatMode(returnedMode) === "plan") {
-        setMode("plan");
+      if (returnedMode === "agent") {
         setRun(await api.runState(sid).catch(() => null));
       }
       // П.3.1 ТЗ: бэкенд вернул пакет уточнений -> показываем карточку, а не просто текст.
@@ -653,7 +646,6 @@ export default function NativeChatPage() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col border border-border bg-background/40">
         <ChatTopBar
           title={sessions.find((x) => x.id === activeId)?.title ?? ""}
-          mode={CHAT_MODES.find((md) => md.id === mode)?.label ?? mode}
           busy={runBusy(run) || sending}
           waiting={(run?.attention.length ?? 0) > 0}
           costToday={costToday}
@@ -859,7 +851,7 @@ export default function NativeChatPage() {
         {error && (
           <div className="flex items-center justify-between gap-2 border-t border-border bg-destructive/10 px-3 py-2 text-xs">
             <span className="text-destructive">{error}</span>
-            {mode === "chat" && lastIsUser && !sending && (
+            {lastIsUser && !sending && (
               <Button ghost size="sm" onClick={() => void send(true)}>
                 <RotateCcw className="mr-1 h-3 w-3" /> Retry
               </Button>
@@ -876,10 +868,7 @@ export default function NativeChatPage() {
           onRemoveAttachment={(index) => setAttachments((prev) => prev.filter((_, j) => j !== index))}
           sending={sending}
           busy={runBusy(run) && !awaitingClarification}
-          mode={mode}
-          onModeChange={setMode}
           profile={profile}
-          profileNotes={profileNotes}
           models={models}
           onChangeProfile={changeProfile}
           onSaveDefault={() => void saveDefaultProfile()}
@@ -897,25 +886,10 @@ export default function NativeChatPage() {
             <aside className="flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-border bg-background/40">
               <WorkPanel
                 title={sessions.find((x) => x.id === activeId)?.title ?? ""}
-                taskId={run?.task_id ?? null}
-                taskStatus={run?.status ?? null}
-                sessionId={activeId}
-                questions={taskQuestions}
                 messages={messages}
                 attachments={attachments}
                 usage={usage}
-                busy={mode !== "chat" && (runBusy(run) || sending)}
-                mode={mode}
                 onClose={() => setInspectorOpen(false)}
-                onAnswered={async () => {
-                  setTaskQuestions(null);
-                  if (activeId) {
-                    await loadMessages(activeId);
-                    setRun(await api.runState(activeId).catch(() => null));
-                  }
-                }}
-                onError={(m) => setError(m)}
-                onSwitchToPlan={() => setMode("plan")}
               />
             </aside>
           )}

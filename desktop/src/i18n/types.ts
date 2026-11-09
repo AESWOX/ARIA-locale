@@ -870,7 +870,6 @@ export interface Translations {
     thinkingFast: string;
     thinkingBalanced: string;
     thinkingDeep: string;
-    mode: string;
     send: string;
     stop: string;
     useForNew: string;
@@ -879,18 +878,14 @@ export interface Translations {
     close: string;
     reset: string;
     placeholderChat: string;
-    placeholderPlan: string;
   };
   chatPanel: {
-    plan: string;
     files: string;
     info: string;
-    noPlan: string;
     openFiles: string;
     openLogs: string;
     touchedFiles: string;
     attachments: string;
-    switchToPlan: string;
   };
 
   // UI-2: session inspector in chat.
