@@ -131,8 +131,11 @@ def test_chat_secret_auto_sensitive():
         f"/chat/sessions/{sid}/send", json={"content": "мой ключ sk-abcdefgh12345678"}
     ).json()
 
-    assert body["assistant"]["content"] == "deepseek"
-    assert gemini.calls == 0 and deepseek.calls == 1
+    # SEC-6: секрет маскируется на входе и не уходит ни одному провайдеру.
+    assert body["mode"] == "secret_redacted"
+    assert "sk-abcdefgh12345678" not in str(body)
+    assert "Settings" in body["assistant"]["content"]
+    assert gemini.calls == 0 and deepseek.calls == 0
 
 
 def test_chat_stream_sensitive_falls_back_to_non_stream():
