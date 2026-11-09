@@ -40,10 +40,31 @@ _ENV_ALLOWLIST = frozenset(
 )
 
 
+def _extra_windows_paths() -> list[str]:
+    """Каталоги Git/Node/Python, которые установщик не всегда добавляет в PATH sidecar'а."""
+    if os.name != "nt":
+        return []
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git" / "cmd",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git" / "bin",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "cmd",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "nodejs",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python311",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python312",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python313",
+    ]
+    return [str(p) for p in candidates if p.is_dir()]
+
+
 def build_shell_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Собирает окружение для дочернего процесса: только allowlist (+ ``LC_*``), без секретов."""
     source = os.environ if base is None else base
-    return {k: v for k, v in source.items() if k.upper() in _ENV_ALLOWLIST or k.upper().startswith("LC_")}
+    env = {k: v for k, v in source.items() if k.upper() in _ENV_ALLOWLIST or k.upper().startswith("LC_")}
+    extra = _extra_windows_paths() if base is None else []
+    if extra:
+        current = env.get("PATH") or source.get("PATH") or ""
+        env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
+    return env
 
 
 def shell_executable() -> str | None:

@@ -378,13 +378,52 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         # P0 A2: тумблер включён — добавляем shell РОЛИ general только на время этой задачи.
         tool_whitelist = tuple(tool_whitelist) + ("shell_execute",)
     tool_schemas = _tool_schemas_for_role(tool_whitelist)
+    allowed_provider_ids: frozenset[str] | None = None
     with session_scope() as db:
         _t = repo.get_task(db, task_id)
         profile = runprofile.get_profile(db, _t.session_id)
         delegation_depth = _t.delegation_depth or 0
-        from aria.core import adult_mode
+        from aria.core import adult_mode, content_limits
 
         adult_enabled = adult_mode.is_enabled(db, _t.session_id)
+        objective = _t.objective or ""
+        _history = repo.list_messages(db, _t.session_id, limit=10)
+        _previous_user = [msg.content for msg in _history if msg.role == "user" and msg.content != objective]
+        violation = content_limits.check_contextual(objective, _previous_user)
+        adult_request = adult_mode.is_adult_request(objective)
+        gate_text: str | None = None
+        gate_notice: str | None = None
+        if violation is not None:
+            gate_notice = "blocked_limits"
+            gate_text = f"Этот запрос нарушает жёсткие лимиты: {violation.reason}."
+        elif adult_request and not adult_enabled:
+            gate_notice = "adult_prompt"
+            gate_text = "Включить 18+? Да / Нет"
+        elif adult_request and adult_enabled:
+            allowed_provider_ids = frozenset(
+                p.provider_id for p in adult_mode.available_providers(router)
+            )
+            if not allowed_provider_ids:
+                gate_notice = "adult_no_provider"
+                gate_text = "Нет провайдера с флагом adult_ok: взрослый запрос не отправлен."
+        if gate_text is not None:
+            _session = repo.get_session(db, _t.session_id)
+            if _session is not None:
+                repo.append_message(
+                    db, _session, role="assistant", content=gate_text, source_trust=SourceTrust.trusted,
+                    content_json={"notice": gate_notice, "action": "adult_mode"},
+                )
+            repo.set_task_status(db, _t, TaskStatus.under_audit)
+            repo.set_task_status(db, _t, TaskStatus.done_unaudited)
+            event_bus.emit(
+                "task.status_changed",
+                {"status": TaskStatus.done_unaudited.value, "notice": gate_notice},
+                session_id=_t.session_id,
+                task_id=_t.id,
+                db=db,
+            )
+            logger.info("task %s gated: %s", task_id, gate_notice)
+            return
     role_prompt = (
         f"Ты в роли {role.role_id} в режиме Agent. {role.description}\n"
         f"Доступные инструменты: {', '.join(tool_whitelist) or 'нет'}."
@@ -537,6 +576,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                 resilient=True, fallback_classes=AGENT_FALLBACK_CLASSES,
                 purpose="subagent" if delegation_depth > 0 else "agent",
                 session_id=session.id, task_id=task.id,
+                allowed_provider_ids=allowed_provider_ids,
             )
         except (ProviderUnavailable, httpx.HTTPStatusError) as exc:
             if isinstance(exc, httpx.HTTPStatusError):
@@ -715,9 +755,18 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                 if call.tool_name == "shell_execute":
                     command = call.arguments.get("command", "")
                     if not is_windows_command(command):
+                        reason = command_rejection_reason(command)
+                        logger.warning(
+                            "tool shell_execute rejected task=%s reason=%s command=%s",
+                            task.id, reason, command[:200],
+                        )
                         repo.append_message(
                             db, session, role="tool",
-                            content=f"shell_execute -> rejected: {command_rejection_reason(command)}",
+                            content=(
+                                f"shell_execute -> rejected: {reason}. "
+                                "Windows: используй cmd/PowerShell-команды (dir, type, git status, python), "
+                                "не POSIX (ls, cat, find, grep)."
+                            ),
                         )
                         continue
                     # Рельсы: allowlisted-команда внутри проекта идёт сама; остальное — Approve.

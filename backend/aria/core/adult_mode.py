@@ -5,12 +5,15 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 
 from aria.config import get_settings
 from aria.db import repository as repo
 from sqlalchemy.orm import Session as OrmSession
+
+logger = logging.getLogger("local_agent.chat")
 
 MODE_KEY = "modes:default"
 
@@ -24,13 +27,11 @@ def _default_state() -> dict:
 
 
 def get_state(db: OrmSession, session_id=None) -> dict:
+    # 18+ — режим приложения, а не вкладки: новая сессия не должна начинать с
+    # выключенного режима, а бейдж и чат обязаны читать один и тот же ключ.
+    # session_id оставлен в сигнатуре для совместимости вызовов.
     base = repo.get_agent_state(db, MODE_KEY) or {}
-    state = {**_default_state(), **base}
-    if session_id is not None:
-        override = repo.get_agent_state(db, _session_key(session_id))
-        if override:
-            state = {**state, **override}
-    return state
+    return {**_default_state(), **base}
 
 
 def is_enabled(db: OrmSession, session_id=None) -> bool:
@@ -53,8 +54,9 @@ def set_adult(
     session_id=None,
     scope: str = "session",
     mark_confirmed: bool = False,
+    via: str = "api",
 ) -> dict:
-    key = _session_key(session_id) if (scope == "session" and session_id is not None) else MODE_KEY
+    key = MODE_KEY
     current = repo.get_agent_state(db, key) or _default_state()
     current["adult"] = bool(enabled)
     current["adult_scope"] = scope
@@ -63,6 +65,18 @@ def set_adult(
     if not enabled:
         current["adult_confirmed_at"] = None
     repo.set_agent_state(db, key, current, source="user")
+    logger.info("mode_changed adult=%s scope=%s via=%s", bool(enabled), scope, via)
+    try:
+        from aria.core.events import event_bus
+
+        event_bus.emit(
+            "modes.changed",
+            {"adult": bool(enabled), "scope": scope, "via": via},
+            session_id=session_id,
+            db=db,
+        )
+    except Exception:  # noqa: BLE001 — событие бейджа не должно ронять смену режима
+        logger.warning("mode_changed event failed", exc_info=True)
     return current
 
 
@@ -70,9 +84,20 @@ _ON = re.compile(r"(?i)(?:включи|вруби|enable)\s*(?:режим\s*)?18
 _OFF = re.compile(r"(?i)(?:выключи|отключи|disable)\s*(?:режим\s*)?18\+?|/adult\s+off|выключи\s+взросл")
 
 _ADULT_WORDS = re.compile(
-    r"(?i)18\+|взросл(?:ый|ая|ое)\s+режим|эрот|порно|секс|обнаж|интим|nsfw|"
-    r"откровенн(?:ая|ый|ое)\s+(?:сцена|содержание|рассказ)|explicit\s+sex"
+    r"(?i)18\+|взросл(?:ый|ая|ое)\s+режим|эрот|порн|секс|обнаж|интим|nsfw|"
+    r"откровенн|explicit\s+sex|"
+    r"сиськ|жопк|попк|груд[ьи]|возбужд|оргазм|мастурб|минет|куннилин|"
+    r"трах|дроч|\bчлен\b|\bхуй\b|пизд|вагин|клитор|пошл|"
+    r"sexual\s+(?:scene|story|content)|erotic\s+(?:scene|story)"
 )
+
+
+def is_adult_request(text: str) -> bool:
+    """Взрослый ли запрос. Лимиты (несовершеннолетние и т.п.) тоже считаются adult-
+    запросом, чтобы такой текст никогда не ушёл на незамаркированного провайдера."""
+    from aria.core import content_limits
+
+    return bool(looks_adult(text) or content_limits.check(text) is not None)
 
 
 def detect_command(text: str) -> str | None:

@@ -356,6 +356,15 @@ code {
   background: transparent;
 }
 
+code,
+pre,
+kbd,
+samp {
+  /* Vendor globals paint code with the page background colour (text-background),
+     which is black on the Black theme. Code must always use readable foreground. */
+  color: var(--foreground);
+}
+
 *::selection {
   background: color-mix(in srgb, var(--midground-base) 42%, transparent);
   color: var(--background-base);

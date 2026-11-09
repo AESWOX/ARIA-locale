@@ -70,6 +70,8 @@ ACCOUNT_COOLDOWN_SEC = 600.0
 # Любой другой отказ провайдера (400/401/413/422..., битый ответ): идём дальше по цепочке, а провайдера на
 # две минуты уводим в конец очереди: если он не тянет эту модель/схему тулов, не тратим на него первый запрос.
 OTHER_ERROR_COOLDOWN_SEC = 120.0
+OVERSIZE_COOLDOWN_SEC = 300.0
+GROQ_OVERSIZE_TPM = 7000
 # Предохранитель: после 429 / исчерпанных 5xx / нет ключей / таймаута провайдер уходит в КОНЕЦ очереди на короткое
 # время (порядок, а не отказ: единственного провайдера всё равно пробуем). Без этого каждый запрос заново платил
 # за заведомо провальную попытку: 2 повтора после 503 с паузой или до 60 с на таймаут.
@@ -202,9 +204,28 @@ class ProviderRouter:
 
     # ---------- connectivity / selection (§12.3, §12.5) ----------
 
-    async def _pick_available(self, provider_class: str, db: OrmSession | None = None) -> LlmProvider | None:
+    @staticmethod
+    def _estimate_prompt_tokens(messages: list[ChatMessage], tools: list[dict]) -> int:
+        chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+        return chars // 4 + 8 * len(tools) + 16
+
+    def _oversize_for_provider(self, provider: LlmProvider, messages: list[ChatMessage], tools: list[dict]) -> bool:
+        """Free-tier Groq режет запросы по TPM 7–8k; не тратим HTTP-ход и не шлём контент зря."""
+        if not provider.provider_id.startswith("groq"):
+            return False
+        limit = int(getattr(provider, "max_tpm", GROQ_OVERSIZE_TPM) or GROQ_OVERSIZE_TPM)
+        return self._estimate_prompt_tokens(messages, tools) > limit
+
+    async def _pick_available(
+        self,
+        provider_class: str,
+        db: OrmSession | None = None,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
+    ) -> LlmProvider | None:
         settings = get_settings()
         candidates = self.providers_by_class.get(provider_class, [])
+        if allowed_provider_ids is not None:
+            candidates = [p for p in candidates if p.provider_id in allowed_provider_ids]
         for provider in candidates:
             ok = await provider.check_connectivity(settings.providers_connectivity_timeout_sec)
             self._record_provider_status(provider, ProviderStatus.active if ok else ProviderStatus.offline, db=db)
@@ -285,6 +306,7 @@ class ProviderRouter:
         session_id: object | None = None,
         task_id: object | None = None,
         sensitive: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
     ) -> RoutingResult:
         """П.5.2 ТЗ: запрос держит слот класса провайдера — параллельные волны EXECUTE
         и делегирование не выбивают квоты free-tier одним залпом."""
@@ -305,6 +327,7 @@ class ProviderRouter:
                     prefer_provider_id=prefer_provider_id,
                     reject_empty=reject_empty,
                     sensitive=sensitive,
+                    allowed_provider_ids=allowed_provider_ids,
                 )
         # E1: ровно одна строка на успешный route_chat (не в _timed_chat: preferred-fallthrough
         # и empty-reply дают несколько попыток на один вызов).
@@ -335,6 +358,7 @@ class ProviderRouter:
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
         sensitive: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
     ) -> RoutingResult:
         """``reject_empty`` — пустой текст без вызова тулов считается отказом звена (идём к следующему),
         а не успехом. Нужно чату: 200 OK с пустым content раньше обрывал всю цепочку (502).
@@ -342,9 +366,13 @@ class ProviderRouter:
         в бюджет (§12.4) или ответила ошибкой, запрос идёт обычной цепочкой класса, а результат помечен
         ``fallback=True`` (UI может сказать, что ответила другая модель)."""
         preferred_failed = False
+        if allowed_provider_ids is not None and not allowed_provider_ids:
+            raise ProviderUnavailable("no adult-approved provider is configured")
         if prefer_provider_id:
             preferred = self.find_provider(prefer_provider_id)
             if sensitive and preferred is not None and not preferred.provider_id.startswith("deepseek"):
+                preferred = None
+            if preferred is not None and allowed_provider_ids is not None and preferred.provider_id not in allowed_provider_ids:
                 preferred = None
             if preferred is not None and self.budget_gate(preferred.provider_class)[0]:
                 try:
@@ -360,7 +388,7 @@ class ProviderRouter:
             preferred_failed = True
         result = await self._route_by_class(
             provider_class, messages, tools, timeout_sec, allow_degrade, db, resilient, fallback_classes, retry_backoff_sec,
-            reject_empty, sensitive,
+            reject_empty, sensitive, allowed_provider_ids,
         )
         if preferred_failed:
             result.fallback = True
@@ -374,6 +402,7 @@ class ProviderRouter:
         timeout_sec: float,
         db: OrmSession | None,
         reject_empty: bool,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
     ) -> RoutingResult:
         """E9: чувствительное — только DeepSeek; free-tier (Gemini/Groq) не используется."""
         classes = [provider_class, "standard_reasoning", "premium_reasoning", "plan_flash_reasoning"]
@@ -386,6 +415,8 @@ class ProviderRouter:
             if not allowed:
                 continue
             for provider in self._ordered(self.providers_by_class.get(cls, [])):
+                if allowed_provider_ids is not None and provider.provider_id not in allowed_provider_ids:
+                    continue
                 if not provider.provider_id.startswith("deepseek"):
                     continue
                 if not await self._connectivity_ok(provider, db):
@@ -410,14 +441,18 @@ class ProviderRouter:
         retry_backoff_sec: float,
         reject_empty: bool = False,
         sensitive: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
     ) -> RoutingResult:
+        if allowed_provider_ids is not None and not allowed_provider_ids:
+            raise ProviderUnavailable("no adult-approved provider is configured")
         if sensitive:
             return await self._route_sensitive(
-                provider_class, messages, tools, timeout_sec, db, reject_empty,
+                provider_class, messages, tools, timeout_sec, db, reject_empty, allowed_provider_ids,
             )
         if resilient:
             return await self._route_resilient(
-                provider_class, messages, tools, timeout_sec, db, fallback_classes, retry_backoff_sec, reject_empty
+                provider_class, messages, tools, timeout_sec, db, fallback_classes, retry_backoff_sec,
+                reject_empty, allowed_provider_ids,
             )
         allowed, warn = self.budget_gate(provider_class)
         target_class = provider_class
@@ -426,17 +461,25 @@ class ProviderRouter:
         if not allowed:
             if not allow_degrade:
                 raise ProviderUnavailable(f"budget_block_threshold_pct reached, {provider_class} blocked (§12.4)")
-            target_class = "free_tier_reasoning"
-            degraded = True
-            logger.warning("budget block: degrading %s -> free_tier_reasoning", provider_class)
+            if allowed_provider_ids is None:
+                target_class = "free_tier_reasoning"
+                degraded = True
+                logger.warning("budget block: degrading %s -> free_tier_reasoning", provider_class)
 
-        provider = await self._pick_available(target_class, db=db)
-        if provider is None and target_class != "free_tier_reasoning" and allow_degrade:
+        provider = await self._pick_available(target_class, db=db, allowed_provider_ids=allowed_provider_ids)
+        if (
+            provider is None
+            and target_class != "free_tier_reasoning"
+            and allow_degrade
+            and allowed_provider_ids is None
+        ):
             logger.warning("%s unavailable, falling back to free_tier_reasoning", target_class)
             provider = await self._pick_available("free_tier_reasoning", db=db)
             degraded = True
 
         if provider is None:
+            if allowed_provider_ids is not None:
+                raise ProviderUnavailable("no adult-approved provider is available for this request")
             raise ProviderUnavailable(f"no available provider for class={target_class} (§12.3)")
 
         response = await _timed_chat(provider, messages, tools, timeout_sec)
@@ -474,6 +517,7 @@ class ProviderRouter:
         fallback_classes: tuple[str, ...],
         backoff_sec: float,
         reject_empty: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
     ) -> RoutingResult:
         """Walk every provider of the class, then each fallback class.
 
@@ -499,6 +543,14 @@ class ProviderRouter:
                 else:
                     continue
             for provider in self._ordered(self.providers_by_class.get(cls, [])):
+                if allowed_provider_ids is not None and provider.provider_id not in allowed_provider_ids:
+                    continue
+                if self._oversize_for_provider(provider, messages, tools):
+                    logger.info(
+                        "provider %s skipped oversize (estimated tokens above TPM)", provider.provider_id
+                    )
+                    attempts.append(f"{provider.provider_id} skipped oversize")
+                    continue
                 if not await self._connectivity_ok(provider, db):
                     attempts.append(f"{provider.provider_id} {self._unavailable_reason(provider)}")
                     continue
@@ -529,7 +581,8 @@ class ProviderRouter:
                             break
                         # 400/401/413/422...: этот провайдер не обслужил запрос (схема тулов, параметры, все ключи
                         # мертвы). Не останавливаемся на первой же ошибке: идём к следующему, пока цепочка не кончится.
-                        self._cool(provider, OTHER_ERROR_COOLDOWN_SEC)
+                        # 413 — размер запроса выше TPM: 5 минут не дёргаем этого провайдера.
+                        self._cool(provider, OVERSIZE_COOLDOWN_SEC if status == 413 else OTHER_ERROR_COOLDOWN_SEC)
                         logger.warning("%s: HTTP %s, trying the next provider", provider.provider_id, status)
                         break
                     except (NoAvailableKeys, httpx.TimeoutException, httpx.TransportError) as exc:

@@ -170,19 +170,11 @@ async def run_audit(
     settings = get_settings()
 
     if level == "off":
-        return repo.create_audit_report(
-            db, session, task,
-            attempt_no=task.audit_attempt_no,
-            auditor_role="qa_auditor",
-            auditor_model="off",
-            budget_degraded=False,
-            verdict=AuditVerdict.unaudited,
-            plan_vs_fact={"objective": task.objective, "note": "audit disabled in the run profile"},
-            tool_success_summary={},
-            missing_requirements=[],
-            patch_suggestions=[],
-            metrics_compared={},
-        )
+        # AC-4: аудит tool-задач не может быть выключен полностью. Профиль ``off``
+        # деградирует до структурной проверки (model=structural-only) и честного
+        # статуса unverified, а не маскируется строкой model=off.
+        logger.warning("audit profile=off is degraded to structural-only for task %s", task.id)
+        level = "light"
 
     tool_calls = repo.list_tool_calls(db, task.id)
 

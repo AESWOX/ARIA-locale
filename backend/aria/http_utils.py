@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import HTTPException
+from sqlalchemy import func
 
 from aria import secretguard
 from aria.config import get_settings
@@ -23,7 +24,7 @@ from aria.core.events import event_bus
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import ProviderStatus, SourceTrust, TaskStatus
+from aria.db.enums import ProviderStatus, SessionStatus, SourceTrust, TaskStatus
 from aria.storage import obsidian_vault
 
 settings = get_settings()
@@ -293,11 +294,15 @@ def _redact_dsn(dsn: str | None) -> str:
 def health_payload(ws_connected: bool = False, reconnect_mode: str = "live") -> dict[str, Any]:
     with session_scope() as db:
         providers = repo.list_provider_health(db)
+        active_sessions = db.query(func.count(m.Session.id)).filter(
+            m.Session.status == SessionStatus.active
+        ).scalar() or 0
     return {
         "overall": "online",
         "ws_connected": ws_connected,
         "reconnect_mode": reconnect_mode,
         "checked_at": iso(utc_now()),
+        "active_sessions": int(active_sessions),
         "components": [
             {"key": "backend", "label": "Backend API", "status": "online", "detail": "FastAPI running"},
             {"key": "postgres", "label": "Database", "status": "online", "detail": _redact_dsn(settings.POSTGRES_DSN)},

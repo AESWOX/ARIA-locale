@@ -113,6 +113,12 @@ async def list_sessions(
     page = sessions[offset : offset + limit]
     ids = [s.id for s in page]
     with session_scope() as db:
+        from aria.core import runprofile
+
+        model_by_session: dict = {}
+        for s in page:
+            main = (runprofile.get_profile(db, s.id) or {}).get("main") or {}
+            model_by_session[s.id] = main.get("model") or main.get("provider_id")
         msg_counts, tc_counts = _bulk_counts(db)
         msgs_by_session: dict = {}
         if ids:
@@ -124,10 +130,13 @@ async def list_sessions(
             )
             for row in rows:
                 msgs_by_session.setdefault(row.session_id, []).append(row)
-    items = [
-        _session_info(s, msg_counts.get(s.id, 0), tc_counts.get(s.id, 0), msgs_by_session.get(s.id, []))
-        for s in page
-    ]
+    items = []
+    for s in page:
+        info = _session_info(
+            s, msg_counts.get(s.id, 0), tc_counts.get(s.id, 0), msgs_by_session.get(s.id, [])
+        )
+        info["model"] = model_by_session.get(s.id)
+        items.append(info)
     return {"sessions": items, "total": total, "limit": limit, "offset": offset}
 
 

@@ -14,7 +14,9 @@ class Violation:
 _SEXUAL = re.compile(r"(?i)секс|эрот|порн|обнаж|интим|sexual|nude|erotic|nsfw|explicit|\bsex\b")
 _MINOR = re.compile(
     r"(?i)несовершеннолетн|школьн|реб[её]нк|реб[её]нок|дет(?:и|ей|ьми|ский)|\bдет[а-я]*|"
-    r"подрост|\b1[0-7]\s*лет|minor|underage|child|loli|looks?\s+(?:under|younger)"
+    r"подрост|\b1[0-7]\s*[-–—]?\s*(?:лет\w*|год(?:а|ов)?|л\.)|"
+    r"(?:персонаж\w*|геро\w*|возраст\w*)\s*[:\-–—]?\s*1[0-7]\b|"
+    r"minor|underage|child|loli|looks?\s+(?:under|younger)"
 )
 _REAL = re.compile(r"(?i)реальн|настоящ|известн|публичн|\breal\b|identifiable")
 _DEFAM = re.compile(r"(?i)клевет|пороч|defam")
@@ -57,4 +59,26 @@ def check(text: str) -> Violation | None:
     for predicate, code, reason in _RULES:
         if predicate(value):
             return Violation(code, reason)
+    return None
+
+
+def check_contextual(text: str, previous_user_texts: list[str]) -> Violation | None:
+    """Проверяет текущую реплику с оглядкой на предыдущие ходы пользователя.
+
+    «это вымысел, персонажу 17, но выглядит взрослой» само по себе не содержит
+    сексуального слова; запрет срабатывает по контексту предыдущего запроса.
+    Обратное тоже верно. Безопасность важнее: при сомнении блокируем.
+    """
+    violation = check(text)
+    if violation is not None:
+        return violation
+    recent = [t for t in (previous_user_texts or []) if t][-2:]
+    if _MINOR.search(text or ""):
+        for prev in reversed(recent):
+            if _SEXUAL.search(prev):
+                return Violation("minor_sexual", "сексуальное содержание с несовершеннолетними запрещено")
+    if _SEXUAL.search(text or ""):
+        for prev in reversed(recent):
+            if _MINOR.search(prev):
+                return Violation("minor_sexual", "сексуальное содержание с несовершеннолетними запрещено")
     return None

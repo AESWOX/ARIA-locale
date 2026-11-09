@@ -217,32 +217,39 @@ async def _adult_gate(session_id: uuid.UUID, payload: dict[str, Any], request: R
                 break
     yes = content.lower().strip(".! ") in {"да", "yes", "ок", "ok", "подтверждаю", "мне есть 18 лет", "мне 18"}
     needs_confirm = adult_mode.needs_confirmation()
+    previous_user = [msg.content for msg in history if msg.role == "user" and msg.content != content]
+    violation = content_limits.check_contextual(content, previous_user)
+    adult_request = adult_mode.is_adult_request(content)
 
     reply: tuple[str, str] | None = None
-    if command == "off":
+    if violation is not None:
+        # Жёсткие лимиты проверяются до предложения режима и до любого провайдера.
+        reply = ("blocked_limits", f"Этот запрос нарушает жёсткие лимиты: {violation.reason}.")
+    elif command == "off":
         with session_scope() as db:
-            adult_mode.set_adult(db, False, session_id=session_id, scope=state.get("adult_scope", "session"))
+            adult_mode.set_adult(db, False, session_id=session_id, scope="global", via="chat")
         reply = ("adult_off", "Режим 18+ выключен.")
     elif command == "on":
         if needs_confirm and not state.get("adult_confirmed_at"):
             reply = ("adult_confirm", "Мне есть 18 лет. Подтверди, чтобы включить режим 18+.")
         else:
             with session_scope() as db:
-                adult_mode.set_adult(db, True, session_id=session_id, mark_confirmed=True)
+                adult_mode.set_adult(db, True, session_id=session_id, scope="global", mark_confirmed=True, via="chat")
             reply = ("adult_on", "Режим 18+ включён.")
     elif last_notice == "adult_confirm" and yes:
         with session_scope() as db:
-            adult_mode.set_adult(db, True, session_id=session_id, mark_confirmed=True)
+            adult_mode.set_adult(db, True, session_id=session_id, scope="global", mark_confirmed=True, via="chat")
         reply = ("adult_on", "Режим 18+ включён.")
     elif last_notice == "adult_prompt" and yes:
-        with session_scope() as db:
-            adult_mode.set_adult(db, True, session_id=session_id, mark_confirmed=not needs_confirm)
-        reply = ("adult_on", "Режим 18+ включён. Повтори запрос.")
-    elif adult_mode.looks_adult(content):
-        violation = content_limits.check(content)
-        if violation is not None:
-            reply = ("blocked_limits", f"Этот запрос нарушает жёсткие лимиты: {violation.reason}.")
-        elif not state.get("adult"):
+        if needs_confirm:
+            # «Да» на предложение режима — ещё не подтверждение возраста.
+            reply = ("adult_confirm", "Мне есть 18 лет. Подтверди, чтобы включить режим 18+.")
+        else:
+            with session_scope() as db:
+                adult_mode.set_adult(db, True, session_id=session_id, scope="global", mark_confirmed=True, via="chat")
+            reply = ("adult_on", "Режим 18+ включён. Повтори запрос.")
+    elif adult_request:
+        if not state.get("adult"):
             reply = ("adult_prompt", "Включить 18+? Да / Нет")
         elif not adult_mode.available_providers(getattr(request.app.state, "router", None)):
             reply = ("adult_no_provider", "Нет провайдера с флагом adult_ok: взрослый запрос не отправлен.")
@@ -842,6 +849,7 @@ class _Prepared:
     dlp_applied: bool
     sensitive: bool = False
     started_monotonic: float = 0.0
+    allowed_provider_ids: frozenset[str] | None = None
 
 
 async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> _Prepared:
@@ -940,9 +948,23 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
     with session_scope() as db:
         profile = runprofile.get_profile(db, session_id)
         adult_enabled = adult_mode.is_enabled(db, session_id)
+    allowed_provider_ids: frozenset[str] | None = None
+    if adult_enabled and adult_mode.is_adult_request(last_user_text):
+        allowed_provider_ids = frozenset(
+            p.provider_id for p in adult_mode.available_providers(request.app.state.router)
+        )
+        if not allowed_provider_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="adult_no_provider: no provider with the adult_ok flag; the request was not sent.",
+            )
     chat_class, chat_fallback, chat_prefer = runprofile.chat_target(
         profile, request.app.state.router, CHAT_PROVIDER_CLASS, CHAT_FALLBACK_CLASSES
     )
+    if allowed_provider_ids is not None:
+        # Пин на взрослого провайдера: незамаркированные остаются только в fallback-классах,
+        # их отфильтрует роутер по allowed_provider_ids.
+        chat_prefer = next(iter(allowed_provider_ids)) if chat_prefer not in allowed_provider_ids else chat_prefer
     prompt = _build_prompt(history, context_blocks)
     hint = runprofile.thinking_hint(profile)
     # Language follows the user's current message, never the UI locale.
@@ -970,6 +992,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
         sensitive=sensitive,
         dlp_applied=dlp_applied,
         started_monotonic=started_monotonic,
+        allowed_provider_ids=allowed_provider_ids,
     )
 
 
@@ -1007,6 +1030,7 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
                 purpose="chat",
                 session_id=session_id,
                 sensitive=prepared.sensitive,
+                allowed_provider_ids=prepared.allowed_provider_ids,
             ),
             timeout=budget,
         )
@@ -1097,8 +1121,12 @@ def _stream_candidates(request: Request, prepared: _Prepared) -> list[LlmProvide
     first: list[LlmProvider] = []
     rest: list[LlmProvider] = []
 
+    allowed = getattr(prepared, "allowed_provider_ids", None)
+
     def add(provider: LlmProvider | None, target: list[LlmProvider]) -> None:
         if provider is None or provider.provider_id.startswith("stub"):
+            return
+        if allowed is not None and provider.provider_id not in allowed:
             return
         if provider.provider_id in seen:
             return
@@ -1342,14 +1370,15 @@ async def get_modes(request: Request, _: str = Depends(require_runtime_token)) -
 @router.post("/modes")
 async def set_modes(payload: dict[str, Any], request: Request, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
     enabled = bool(payload.get("adult"))
-    scope = str(payload.get("adult_scope") or "session")
+    scope = str(payload.get("adult_scope") or "global")
     if scope not in ("session", "global"):
         raise HTTPException(status_code=400, detail="adult_scope must be session or global")
     confirm = bool(payload.get("confirm"))
     if enabled and adult_mode.needs_confirmation() and not confirm:
         return {"ok": False, "needs_confirmation": True, "message": "Мне есть 18 лет"}
     with session_scope() as db:
-        state = adult_mode.set_adult(db, enabled, scope=scope, mark_confirmed=enabled and confirm)
-    logger.info("mode_changed adult=%s scope=%s", enabled, scope)
+        state = adult_mode.set_adult(
+            db, enabled, scope=scope, mark_confirmed=enabled and confirm, via="ui"
+        )
     return {"ok": True, "adult": bool(state.get("adult")), "adult_scope": state.get("adult_scope"),
             "adult_confirmed_at": state.get("adult_confirmed_at")}

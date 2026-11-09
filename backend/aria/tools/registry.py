@@ -299,12 +299,26 @@ async def _set_mode(input_json: dict, **_ctx) -> dict:
     from aria.core import adult_mode
     from aria.db.base import session_scope
 
+    from aria.db import repository as _repo
+
     with session_scope() as db:
-        confirmed = bool(adult_mode.get_state(db).get("adult_confirmed_at"))
+        task_id = _ctx.get("task_id")
+        task = _repo.get_task(db, task_id) if task_id else None
+        session_id = task.session_id if task is not None else _ctx.get("session_id")
+        state = adult_mode.get_state(db, session_id)
+        confirmed = adult_mode.confirmed(state)
         if value == "on" and adult_mode.needs_confirmation() and not confirmed:
             return {"error": "confirmation_required", "message": "Мне есть 18 лет"}
-        adult_mode.set_adult(db, value == "on", scope="global", mark_confirmed=(value == "on"))
-    return {"ok": True, "adult": value == "on"}
+        # Модель не подтверждает возраст и не повышает область режима до global.
+        if value == "on":
+            state = adult_mode.set_adult(
+                db, True, session_id=session_id, scope="global", mark_confirmed=False, via="tool"
+            )
+        else:
+            state = adult_mode.set_adult(
+                db, False, session_id=session_id, scope="global", via="tool"
+            )
+    return {"ok": True, "adult": bool(state.get("adult")), "adult_confirmed_at": state.get("adult_confirmed_at")}
 
 
 async def _make_plan(input_json: dict, router=None, task_id=None, **_ctx) -> dict:

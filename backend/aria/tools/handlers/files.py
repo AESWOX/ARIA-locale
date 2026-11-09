@@ -146,6 +146,9 @@ async def file_write(input_json: dict, sandbox_root: str) -> dict:
 async def file_search(input_json: dict, sandbox_root: str) -> dict:
     root = Path(sandbox_root).resolve()
     norm = _check_glob(input_json.get("glob", "**/*"), root)
+    # Голый шаблон без пути (`*`, `*test*`) ищет по всему проекту, а не только в корне.
+    if "/" not in norm and not norm.startswith("**"):
+        norm = "**/" + norm
     include_all = bool(input_json.get("include_ignored"))
     matches: list[str] = []
     for p in root.glob(norm):
