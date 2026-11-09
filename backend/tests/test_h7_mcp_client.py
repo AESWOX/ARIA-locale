@@ -411,5 +411,5 @@ def test_agent_pauses_for_owner_approval_on_mcp_write_tool(data_dir, tmp_path, m
 
 
 def test_mcp_roles_include_the_coder_used_by_plan():
-    assert set(mcp_manager.MCP_ROLES) == {"general", "orchestrator", "coder"}
+    assert set(mcp_manager.MCP_ROLES) == {"general", "orchestrator", "coder", "worker"}
     assert "qa_auditor" not in mcp_manager.MCP_ROLES

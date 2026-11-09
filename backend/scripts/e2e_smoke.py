@@ -234,6 +234,19 @@ def send_chat(ctx: Ctx, sid: str, text: str) -> str:
             raise AssertionError(f"{exc}{_hint('provider_http_402')}") from None
         raise
     # ответ ассистента: берём из ответа, при другой форме — из истории
+    if isinstance(data, dict) and data.get("mode") == "agent":
+        run = wait_for(
+            lambda: (lambda r: r if (r.get("terminal") or r.get("attention")) else None)(_pending(ctx, sid)),
+            LLM_TIMEOUT,
+            "the agent task",
+        )
+        if run.get("attention"):
+            item = run["attention"][0]
+            raise AssertionError(f"agent asked for approval during chat smoke: {item.get('type')} {item.get('title')}")
+        msgs = [m for m in messages(ctx, sid) if m.get("role") == "assistant"]
+        if not msgs:
+            raise AssertionError(f"agent task finished without an assistant message: {_snapshot(ctx, sid)}")
+        return str(msgs[-1].get("content") or "")
     for key in ("assistant", "message", "reply"):
         v = data.get(key) if isinstance(data, dict) else None
         if isinstance(v, dict) and v.get("content"):
