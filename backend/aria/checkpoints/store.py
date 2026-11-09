@@ -27,6 +27,7 @@ from aria import paths
 logger = logging.getLogger("local_agent.checkpoints")
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_PER_SESSION = 20
 DEFAULT_PRUNE_DAYS = 14
 _SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
@@ -99,11 +100,28 @@ def snapshot(
             "files": entries,
         }
         (cp_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        _trim_session(str(session_key))
         return cp_id
     except Exception:  # noqa: BLE001
         logger.exception("checkpoint snapshot failed for %s", rel_paths)
         shutil.rmtree(cp_dir, ignore_errors=True)
         return None
+
+
+def _trim_session(session_key: str) -> None:
+    """Рельсы: держим последние MAX_PER_SESSION копий на сессию."""
+    base = _base() / _safe(session_key)
+    if not base.is_dir():
+        return
+    rows: list[tuple[Path, dict[str, Any]]] = []
+    for mf_path in base.glob("*/manifest.json"):
+        try:
+            rows.append((mf_path.parent, json.loads(mf_path.read_text(encoding="utf-8"))))
+        except Exception:  # noqa: BLE001
+            continue
+    rows.sort(key=lambda item: item[1].get("created_at", ""))
+    for cp_dir, _mf in rows[:-MAX_PER_SESSION]:
+        shutil.rmtree(cp_dir, ignore_errors=True)
 
 
 def _manifests() -> list[tuple[Path, dict[str, Any]]]:

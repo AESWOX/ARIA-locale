@@ -119,6 +119,7 @@ def _tool_output_preview(msg: m.Message) -> dict[str, Any] | None:
         "arguments": arguments,
         "output": output,
         "fold_ref": payload.get("fold_ref"),
+        "checkpoint_id": payload.get("checkpoint_id"),
     }
 
 
