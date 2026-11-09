@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { ChatMsg } from "@/lib/api";
+import { api } from "@/lib/api";
 
 /* Tool calls are one collapsible "processes" block, not one chat bubble per
    call. Consecutive tool messages are grouped by the caller; expanding a row
@@ -15,6 +17,20 @@ function preview(value: unknown): string {
 
 export function ToolCallGroup({ messages }: { messages: ChatMsg[] }) {
   const names = messages.map((msg) => msg.tool_output?.tool_name || msg.content || "tool");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<Record<string, string>>({});
+  const undo = async (messageId: string, checkpointId: string) => {
+    if (!window.confirm("Restore the file from before this change?")) return;
+    setBusy(messageId);
+    try {
+      await api.restoreCheckpoint(checkpointId);
+      setNote((prev) => ({ ...prev, [messageId]: "Restored" }));
+    } catch {
+      setNote((prev) => ({ ...prev, [messageId]: "Undo failed" }));
+    } finally {
+      setBusy(null);
+    }
+  };
   return (
     <details className="group border border-border bg-background/40 text-xs">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1 text-muted-foreground hover:text-foreground">
@@ -32,6 +48,16 @@ export function ToolCallGroup({ messages }: { messages: ChatMsg[] }) {
               <div className="flex items-baseline gap-2">
                 <span className="font-medium">{meta?.tool_name || msg.content || "tool"}</span>
                 {meta?.status && <span className="text-muted-foreground">{meta.status}</span>}
+                {meta?.checkpoint_id && (
+                  <button
+                    type="button"
+                    className="ml-auto border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-foreground/5 disabled:opacity-50"
+                    disabled={busy === msg.id}
+                    onClick={() => void undo(msg.id, meta.checkpoint_id as string)}
+                  >
+                    {note[msg.id] ?? "Undo"}
+                  </button>
+                )}
               </div>
               {meta?.arguments && Object.keys(meta.arguments).length > 0 && (
                 <div>

@@ -2337,6 +2337,7 @@ export interface ChatMsgToolOutput {
   arguments?: Record<string, unknown> | null;
   output?: Record<string, unknown> | null;
   fold_ref?: string | null;
+  checkpoint_id?: string | null;
 }
 
 export interface ChatMsg {
