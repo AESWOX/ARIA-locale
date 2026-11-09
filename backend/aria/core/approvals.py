@@ -33,6 +33,38 @@ def request_high_risk_shell_approval(db: OrmSession, session: m.Session, task: m
     return item
 
 
+def request_tool_approval(
+    db: OrmSession,
+    session: m.Session,
+    task: m.Task,
+    tool_name: str,
+    arguments: dict,
+    *,
+    summary: str,
+    reason: str = "",
+    type_: AttentionType = AttentionType.untrusted_context_override,
+) -> m.AttentionItem:
+    """Этап 3: одна короткая карточка «что запускается и зачем» для отправки,
+    внешнего POST и действий по недоверенному контенту."""
+    item = repo.create_attention_item(
+        db,
+        type_=type_,
+        title=f"Approve: {summary[:80]}",
+        body_md=summary,
+        session=session,
+        task=task,
+        payload_json={
+            "kind": "tool",
+            "tool_name": tool_name,
+            "arguments": dict(arguments or {}),
+            "summary": summary,
+            "reason": reason,
+        },
+    )
+    repo.set_task_status(db, task, TaskStatus.awaiting_attention)
+    return item
+
+
 def request_mcp_tool_approval(
     db: OrmSession, session: m.Session, task: m.Task, tool_name: str, arguments: dict, server: str = "", tool: str = ""
 ) -> m.AttentionItem:

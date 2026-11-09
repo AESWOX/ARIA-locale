@@ -38,7 +38,7 @@ from aria.core.roles import get_role
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import AuditVerdict, SourceTrust, TaskStatus, ToolStatus
+from aria.db.enums import AttentionType, AuditVerdict, SourceTrust, TaskStatus, ToolStatus
 from aria.llm.providers.base import ChatMessage
 from aria.llm.router import ProviderRouter, ProviderUnavailable, tried_suffix
 from aria.tools.registry import get_tool
@@ -665,6 +665,46 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     )
                     break  # пауза до Approve; остальные tool calls ответа отбрасываются
 
+                # Этап 3: политика auto/approve/deny до исполнения.
+                from aria.core import action_policy
+
+                trust = getattr(session.source_trust_aggregate, "value", session.source_trust_aggregate)
+                policy = action_policy.decide(
+                    call.tool_name,
+                    call.arguments,
+                    sandbox_root=sandbox_root,
+                    untrusted=str(trust) == SourceTrust.untrusted.value,
+                )
+                if policy.action == "deny":
+                    logger.info("task %s: %s denied by policy (%s)", task_id, call.tool_name, policy.code)
+                    repo.append_message(
+                        db, session, role="tool",
+                        content=f"{call.tool_name} -> denied: {policy.reason}",
+                        content_json={
+                            "tool_name": call.tool_name, "arguments": dict(call.arguments or {}),
+                            "status": "denied", "output": {"error": policy.reason, "code": policy.code},
+                        },
+                    )
+                    continue
+                if policy.action == "approve":
+                    item = approvals.request_tool_approval(
+                        db, session, task, call.tool_name, dict(call.arguments or {}),
+                        summary=policy.summary or call.tool_name,
+                        reason=policy.reason,
+                        type_=(AttentionType.untrusted_context_override
+                               if policy.code == "untrusted_context" else AttentionType.mcp_tool_approval),
+                    )
+                    event_bus.emit(
+                        "attention_item.created",
+                        {"id": str(item.id), "type": item.type.value, "title": item.title},
+                        session_id=session.id,
+                        task_id=task.id,
+                        db=db,
+                    )
+                    event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                    approval_ctx = (session.id, task.id, str(item.id), policy.summary or call.tool_name)
+                    break
+
                 if call.tool_name == "shell_execute":
                     command = call.arguments.get("command", "")
                     if not is_windows_command(command):
@@ -673,8 +713,8 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                             content=f"shell_execute -> rejected: {command_rejection_reason(command)}",
                         )
                         continue
-                    # P0 A2: shell в Agent ВСЕГДА через Approve, даже для «безопасных» dir/echo.
-                    if agent_shell or classify_shell_command(command) != "allow":
+                    # Рельсы: allowlisted-команда внутри проекта идёт сама; остальное — Approve.
+                    if classify_shell_command(command) != "allow":
                         item = approvals.check_command_and_maybe_request_approval(db, session, task, command)
                         event_bus.emit(
                             "attention_item.created",
@@ -790,7 +830,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             # После tool call — guardrail recording для loop detection
             guardrails.after_call(spec.tool_name, call.arguments, output)
 
-            tool_payload = {"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value}
+            tool_payload = {"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value, "checkpoint_id": checkpoint_id}
             # fold вне транзакции: дисковое I/O вне writer-lock SQLite
             tool_payload.update(_fold_tool_output(sandbox_root, task.id, str(tool_call_row.id), output))
             with session_scope() as db:
@@ -1095,6 +1135,7 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
     settings = get_settings()
     agent_shell, agent_shell_root = _agent_shell_target(task_role, settings)
 
+    _cp: str | None = None
     if already_run:
         logger.info("approval %s was already executed; continuing without re-running it", attention_item.id)
     elif tool_call_row is not None:
@@ -1115,7 +1156,7 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
                 session_id=sess_id, task_id=task_id, sandbox_root=sandbox_root,
             )
 
-        approved_payload = {"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value}
+        approved_payload = {"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value, "checkpoint_id": _cp}
         # fold вне транзакции: дисковое I/O вне writer-lock SQLite
         approved_payload.update(_fold_tool_output(sandbox_root, task_id, str(tool_call_row.id), output))
         with session_scope() as db:

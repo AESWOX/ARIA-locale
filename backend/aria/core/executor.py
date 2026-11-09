@@ -958,6 +958,7 @@ async def _execute_step_isolated(
 
     spec = None
     handler_input: dict = {}
+    checkpoint_id: str | None = None
     try:
         if tool_ref == "llm_task":
             # Шаг, который сам по себе является LLM-задачей (не registry tool)
@@ -1037,6 +1038,11 @@ async def _execute_step_isolated(
             from aria import secretguard
 
             handler_input = secretguard.mask_obj(handler_input)
+            from aria.core.action_policy import decide as _decide_action
+
+            policy = _decide_action(tool_ref, handler_input, sandbox_root=str(sandbox_root or "."))
+            if policy.action == "deny":
+                raise ValueError(f"denied: {policy.reason}")
             # Тот же барьер аргументов, что в loop._execute_tool: Plan-режим ходит в handler напрямую,
             # и без этого пустой url/path/glob давал бы «успех» или невнятный KeyError.
             arg_errors = validate_tool_input(spec.input_schema, handler_input)
@@ -1108,6 +1114,7 @@ async def _execute_step_isolated(
         "input_json": handler_input,
         "output_json": output_json,
         "status": "ok" if status_ok else "error",
+        "checkpoint_id": checkpoint_id,
     }
 
 
