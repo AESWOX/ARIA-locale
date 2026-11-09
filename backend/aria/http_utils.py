@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from fastapi import HTTPException
 
+from aria import secretguard
 from aria.config import get_settings
 from aria.core.events import event_bus
 from aria.db import models as m
@@ -276,7 +277,7 @@ def render_session_export_markdown(
             lines.append(json.dumps(report.metrics_compared, ensure_ascii=False, indent=2))
             lines.append("```")
             lines.append("")
-    return "\n".join(lines).strip() + "\n"
+    return secretguard.mask_secrets("\n".join(lines).strip() + "\n")
 
 
 def _redact_dsn(dsn: str | None) -> str:

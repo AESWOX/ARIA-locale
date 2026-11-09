@@ -12,9 +12,12 @@ import re
 
 _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bbot(\d{5,}):[A-Za-z0-9_-]{20,}"), r"bot\1:***"),
+    # SEC-6: голый токен бота без префикса bot (например, в аргументах или выводе tool).
+    (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b"), "***"),
     (re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
     (re.compile(r"(?i)\b([a-z0-9_]*(?:key[_-]?id|key|token|secret|password|pin))\s*=\s*([^&\s\"',;]{4,})"), r"\1=***"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "sk-***"),
+    (re.compile(r"\bgsk_[A-Za-z0-9]{16,}"), "gsk_***"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh*_***"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"), "AIza***"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AKIA***"),
