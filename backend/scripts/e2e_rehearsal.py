@@ -208,9 +208,14 @@ def main() -> int:
 
 def rc_ok(tmp: Path) -> bool:
     try:
-        return json.loads((tmp / "report.json").read_text(encoding="utf-8"))["failed"] == 0
+        report = json.loads((tmp / "report.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
+    if report.get("failed") != 0:
+        return False
+    # BUG-2: recall памяти должен реально отрабатывать, а не быть пропущенным.
+    memory = [row for row in report.get("results", []) if row.get("stage") == "memory"]
+    return bool(memory) and memory[0].get("status") == "PASS"
 
 
 if __name__ == "__main__":
