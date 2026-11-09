@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import shlex
@@ -40,9 +41,43 @@ _ENV_ALLOWLIST = frozenset(
 
 
 def build_shell_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """Окружение для дочернего процесса: только allowlist (+ ``LC_*``), без секретов."""
+    """Собирает окружение для дочернего процесса: только allowlist (+ ``LC_*``), без секретов."""
     source = os.environ if base is None else base
     return {k: v for k, v in source.items() if k.upper() in _ENV_ALLOWLIST or k.upper().startswith("LC_")}
+
+
+def shell_executable() -> str | None:
+    """S10: на Windows команды исполняет PowerShell, не cmd/bash."""
+    if os.name != "nt":
+        return None
+    root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(candidate) if candidate.is_file() else "powershell.exe"
+
+
+_CMD_ONLY = re.compile(r"&&|\|\||%\w+%|(?:^|\s)&(?:\s|$)")
+
+
+def shell_program(command: str) -> tuple[str, str | None]:
+    """Возвращает (команда для запуска, интерпретатор).
+
+    PowerShell по умолчанию; cmd остаётся только для унаследованных cmd-операторов
+    (``&&``, ``||``, ``%VAR%``), которые PowerShell 5.1 не понимает. Команды с
+    кавычками уходят в PowerShell как ``-EncodedCommand``: иначе вложенные кавычки
+    ломаются при shell=True.
+    """
+    ps = shell_executable()
+    if ps is None:
+        return command, None
+    script = command or ""
+    if _CMD_ONLY.search(script):
+        return script, None
+    if script.lstrip().startswith(('"', "'")):
+        script = "& " + script
+    if '"' in script or "'" in script:
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return f"{ps} -NoProfile -NonInteractive -EncodedCommand {encoded}", None
+    return script, ps
 
 
 _WIN_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
@@ -106,12 +141,14 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
         # песочница создаётся лениво: на свежем профиле её ещё нет, и спавн падал с ENOENT
         Path(cwd).mkdir(parents=True, exist_ok=True)
 
+    shell_command, executable = shell_program(command)
     proc = await asyncio.create_subprocess_shell(
-        command,
+        shell_command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=build_shell_env(),
+        **({"executable": executable} if executable else {}),
         **NO_WINDOW,
     )
     try:
