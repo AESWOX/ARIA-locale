@@ -233,8 +233,8 @@ def chat_target(profile: dict | None, router: Any, default_class: str, default_f
 
 
 def root_role(profile: dict | None) -> str:
-    """Root role for an Agent/Plan task: boss → orchestrator, solo → coder (needs write/shell)."""
-    return "orchestrator" if profile and profile.get("style") == "boss" else "coder"
+    """Root role for an Agent/Plan task: boss → orchestrator, solo → worker (default role)."""
+    return "orchestrator" if profile and profile.get("style") == "boss" else "worker"
 
 
 def thinking_hint(profile: dict | None) -> str:

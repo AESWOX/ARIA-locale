@@ -31,6 +31,17 @@ ROLE_REGISTRY: dict[str, RoleDefinition] = {
         tool_whitelist=("read_note", "search_vault", "list_vault", "search_vault_tags", "list_decisions", "file_read", "file_search", "file_grep", "file_extract", "vision_analyze", "audio_transcribe", "memory_search", "notebook_query", "skill_lookup", "skill_read", "web_search", "web_fetch", "telegram_channel"),
         default_model_policy="standard_reasoning",
     ),
+    "worker": RoleDefinition(
+        role_id="worker",
+        description="Worker: research, plan, act, verify, report. Code, Blender, orders; minimal changes with real command output.",
+        system_prompt_asset="prompts/worker.md",
+        tool_whitelist=("shell_execute", "file_read", "file_write", "file_search", "file_grep",
+                        "web_search", "web_fetch", "memory_search", "memory_save",
+                        "skill_lookup", "skill_read", "delegate_task", "vision_analyze", "set_mode"),
+        default_model_policy="subagent_execution",
+        can_delegate=True,
+        max_subagents=3,
+    ),
     "oracle": RoleDefinition(
         role_id="oracle",
         description="Генерация плана задачи в формате PlanStep. Результат проходит validate_plan().",
