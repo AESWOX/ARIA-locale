@@ -102,6 +102,31 @@ export function SessionTabs({
       >
         <Plus className="h-3.5 w-3.5" />
       </button>
+      <details className="relative shrink-0">
+        <summary
+          className="list-none border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-foreground/5"
+          aria-label="All sessions"
+          title="All sessions"
+        >
+          …
+        </summary>
+        <div className="absolute right-0 z-40 mt-1 max-h-72 w-64 overflow-y-auto border border-border bg-background p-1 shadow-lg">
+          {sessions.slice(0, 30).map((session) => (
+            <button
+              key={session.id}
+              type="button"
+              className="block w-full truncate px-2 py-1 text-left text-xs hover:bg-foreground/5"
+              title={session.title}
+              onClick={(event) => {
+                onOpen(session.id);
+                (event.currentTarget.closest("details") as HTMLDetailsElement | null)?.removeAttribute("open");
+              }}
+            >
+              {session.title || t.common.untitled}
+            </button>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }
