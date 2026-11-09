@@ -55,7 +55,8 @@ def _outside_project(path_value: str, sandbox_root: str) -> bool:
     if not raw:
         return False
     p = Path(raw)
-    if p.is_absolute() or raw.startswith("~"):
+    windows_abs = bool(re.match(r"^[A-Za-z]:[\\/]", raw)) or raw.startswith("\\\\")
+    if p.is_absolute() or windows_abs or raw.startswith("~"):
         base = Path(sandbox_root or ".").resolve()
         try:
             p.resolve().relative_to(base)
