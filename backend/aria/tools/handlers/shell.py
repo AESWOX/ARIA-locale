@@ -76,8 +76,8 @@ def shell_program(command: str) -> tuple[str, str | None]:
         script = "& " + script
     if '"' in script or "'" in script:
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return f"{ps} -NoProfile -NonInteractive -EncodedCommand {encoded}", None
-    return f"{ps} -NoProfile -NonInteractive -Command {script}", None
+        return f"{ps} -NoProfile -NonInteractive -InputFormat None -EncodedCommand {encoded}", None
+    return f"{ps} -NoProfile -NonInteractive -InputFormat None -Command {script}", None
 
 
 _WIN_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
@@ -144,6 +144,7 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
     shell_command, executable = shell_program(command)
     proc = await asyncio.create_subprocess_shell(
         shell_command,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
