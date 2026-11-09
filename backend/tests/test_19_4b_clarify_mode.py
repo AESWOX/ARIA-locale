@@ -32,7 +32,11 @@ def _session(title: str = "d21") -> str:
         return str(repo.create_session(db, title, active_role="general").id)
 
 
-def test_mode_from_the_message_is_stored_in_the_task_spec():
+def test_mode_from_the_message_is_stored_in_the_task_spec(monkeypatch):
+    from aria.config import get_settings
+
+    # UX-2: гейт выключен по умолчанию; этот тест проверяет сохранение режима при включённом гейте.
+    monkeypatch.setattr(get_settings(), "clarifier_gate_enabled", True)
     client, _ = _client()
     sid = _session()
 

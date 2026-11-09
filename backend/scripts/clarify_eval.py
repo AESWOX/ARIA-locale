@@ -100,6 +100,12 @@ def main() -> int:
     parser.add_argument("--detailed", action="store_true", help="раунд 2 п.4.1: выводить разбор лишних вопросов и пропусков")
     args = parser.parse_args()
 
+    # UX-2: в продукте гейт по умолчанию выключен; этот скрипт измеряет сам триаж,
+    # поэтому включает его явно (код и флаг оставлены для отката).
+    from aria.config import get_settings
+
+    get_settings().clarifier_gate_enabled = True
+
     if args.live:
         print(json.dumps({"error": "live mode requires provider keys; run outside CI"}, ensure_ascii=False))
         # живой режим отдельно: в CI он сознательно не запускается

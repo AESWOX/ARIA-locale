@@ -13,7 +13,9 @@ def test_chat_copies_only_the_transcript_and_has_a_right_sidebar():
     assert "w-[360px]" in page
     assert "<WorkPanel" in page
     work = (SRC / "components" / "WorkPanel.tsx").read_text(encoding="utf-8")
-    assert "<TaskSpecPanel" in work
+    assert "<TaskSpecPanel" not in work
+    assert '<Tab = "plan"' not in work
+    assert 'type Tab = "files" | "info"' in work
     assert "<SessionInspector" in work
 
 

@@ -77,8 +77,8 @@ def test_tool_request_in_chat_switches_to_agent(text):
     assert roles[-1] == "user"
 
 
-@pytest.mark.parametrize("text", ["что такое DNS?", "объясни разницу между TCP и UDP", "привет"])
-def test_plain_chat_request_stays_in_chat(text):
+@pytest.mark.parametrize("text", ["привет", "спасибо", "ок"])
+def test_small_talk_stays_in_chat(text):
     client, rec, provider = _client()
     sid = _session()
 
@@ -89,6 +89,25 @@ def test_plain_chat_request_stays_in_chat(text):
     assert body.get("mode") != "agent"
     assert rec.submitted == []
     assert body["assistant"]["content"] == "pong" and provider.calls == 1
+
+
+@pytest.mark.parametrize("text", [
+    "Что такое DNS?",
+    "что в папке C:\\logs",
+    "найди в интернете свежие новости про Python",
+])
+def test_non_small_talk_goes_to_agent_without_questions(text):
+    """UX-2: всё, кроме болтовни, исполняется агентом сразу; карточки нет."""
+    client, rec, provider = _client()
+    sid = _session()
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": text})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "agent" and body["queued"] is True
+    assert body.get("questions") in (None, [])
+    assert len(rec.submitted) == 1 and provider.calls == 0
 
 
 def test_tool_request_switches_even_when_previous_task_awaits_attention():

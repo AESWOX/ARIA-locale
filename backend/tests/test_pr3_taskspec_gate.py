@@ -60,14 +60,20 @@ def test_high_risk_detection():
 
 # ─────────────────────────── gate_required ───────────────────────────
 
-def test_every_nonempty_request_goes_through_the_gate():
-    """Решение владельца 19.10: структурированный запрос и вопросы — на ЛЮБОЙ непустой запрос."""
+def test_every_nonempty_request_goes_through_the_gate(monkeypatch):
+    """Решение владельца 19.10 действует при включённом гейте (UX-2: по умолчанию выкл)."""
+    from aria.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "clarifier_gate_enabled", True)
     assert clarifier.gate_required("напиши привет-мир на go", "agent") is True
     assert clarifier.gate_required("что нового в проекте?", "agent") is True
     assert clarifier.gate_required("   ", "agent") is False
 
 
-def test_task_like_message_goes_through_the_gate():
+def test_task_like_message_goes_through_the_gate(monkeypatch):
+    from aria.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "clarifier_gate_enabled", True)
     assert clarifier.gate_required("сделай отчёт по продажам", "agent") is True
     assert clarifier.gate_required("что угодно", "plan") is True
 
