@@ -97,7 +97,7 @@ HANDLER_TOOLS = sorted(n for n, s in TOOL_REGISTRY.items() if s.handler is not N
 
 
 def test_registry_has_26_tools_and_delegate_is_special_case():
-    assert len(TOOL_REGISTRY) == 29, f"в реестре {len(TOOL_REGISTRY)} тулов, обновите ожидаемое число"
+    assert len(TOOL_REGISTRY) == 30, f"в реестре {len(TOOL_REGISTRY)} тулов, обновите ожидаемое число"
     assert [n for n, s in TOOL_REGISTRY.items() if s.handler is None] == ["delegate_task"]
 
 
@@ -135,6 +135,7 @@ CASES = {
     "memory_save": (lambda sb: {"content": f"b5 fact {_uid()}", "layer": "fact"}, lambda o: o.get("saved") is True),
     "friend_memory_read": (lambda sb: {}, lambda o: "entries" in o and "total" in o),
     "make_plan": (lambda sb: {}, lambda o: isinstance(o, dict) and o.get("error")),
+    "set_mode": (lambda sb: {"value": "off"}, lambda o: isinstance(o, dict) and (o.get("ok") is True or "error" in o)),
     "tool_output_read": (lambda sb: {"ref": "11111111-1111-1111-1111-111111111111"}, lambda o: isinstance(o, dict) and o.get("error")),
     "file_extract": (lambda sb: {"path": "hello.txt"}, lambda o: "hello from sandbox" in o.get("text", "")),
     "audio_transcribe": (lambda sb: {"path": "hello.txt"}, lambda o: isinstance(o, dict) and o.get("error")),
@@ -482,7 +483,7 @@ def test_zz_print_inventory_table(capsys):
             rows.append((n, r.get("good", "не запускался"), r.get("empty", "—"), r.get("junk", "—")))
     w = [max(len(str(row[i])) for row in rows) for i in range(4)]
     with capsys.disabled():
-        print("\n=== B5 TOOL INVENTORY (22 tools) ===")
+        print("\n=== B5 TOOL INVENTORY (30 tools) ===")
         for i, row in enumerate(rows):
             print("  ".join(str(c).ljust(w[j]) for j, c in enumerate(row)))
             if i == 0:
