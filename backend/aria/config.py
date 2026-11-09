@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     plan_dag_parallel_enabled: bool = True
     # П.4.1 ТЗ: выключатель Clarifier-гейта (PR-3). False — поведение как до PR-3:
     # быстрый путь draft -> approved без уточняющих вопросов.
-    clarifier_gate_enabled: bool = True
+    clarifier_gate_enabled: bool = False
     # П.4.2 ТЗ: список глаголов-маркеров задачи (через запятую) для agent-режима;
     # пусто = встроенный список clarifier._DEFAULT_TASK_VERBS.
     clarifier_task_verbs: str = ""

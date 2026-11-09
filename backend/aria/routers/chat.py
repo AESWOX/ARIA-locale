@@ -197,12 +197,13 @@ async def _secrets_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dic
     }
 
 
-async def _switch_to_agent(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
-    """19.4b B2: запрос, которому нужен инструмент, уходит из Chat в Agent.
+async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
+    """UX-2: один автоматический режим. Короткая болтовня отвечает из чата,
+    всё остальное сразу уходит в agent-loop с function calling — без эвристики
+    «нужен ли инструмент» и без карточки уточнений.
 
     Возвращает ответ с ``mode="agent"`` (и ``task_id``), если сессия переключена,
-    иначе None — сообщение идёт обычным чат-путём. Гейт уточнений здесь не запускается:
-    действие уже названо, карточки только мешают (см. 19.4b B1/B2).
+    иначе None — сообщение идёт обычным чат-путём.
     """
     from aria.core import clarifier
 
@@ -213,13 +214,9 @@ async def _switch_to_agent(session_id: uuid.UUID, payload: dict[str, Any], reque
     has_attachments = bool(payload.get("attachments"))
     if has_attachments:
         logger.info("chat→agent: attachments present, switching to Agent")
-    else:
-        if clarifier.is_small_talk(content):
-            logger.debug("chat→agent skipped: small talk")
-            return None
-        if not clarifier.needs_tools(content):
-            logger.debug("chat→agent skipped: no tool intent")
-            return None
+    elif clarifier.is_small_talk(content):
+        logger.debug("chat→agent skipped: small talk")
+        return None
     runner = getattr(request.app.state, "task_runner", None)
     if runner is None:
         return None
@@ -721,7 +718,7 @@ async def chat_send(
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
             return telegram
-        switched = await _switch_to_agent(session_id, payload, request)
+        switched = await _auto_route_to_agent(session_id, payload, request)
         if switched is not None:
             if payload.get("stream"):
                 async def _switched_events() -> AsyncIterator[str]:

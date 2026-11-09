@@ -364,6 +364,16 @@ async def post_message(
         raise HTTPException(status_code=400, detail="mode must be one of ['agent', 'plan']")
     if not content:
         raise HTTPException(status_code=400, detail="content required")
+    # SEC-6 + S2/S11: секрет и Telegram-гейт — единый pre-check до маршрутизации,
+    # одинаковый для чата и agent-пути. Карточку формирует бэкенд, не модель.
+    from aria.routers.chat import _secrets_notice, _telegram_notice
+
+    secret = await _secrets_notice(session_id, {"content": content})
+    if secret is not None:
+        return secret
+    telegram = await _telegram_notice(session_id, {"content": content})
+    if telegram is not None:
+        return telegram
     # 19.4b B1: приветствие/«ок»/«спасибо» — это ответ чата в любой вкладке:
     # задача, план и карточки уточнений не создаются. Ответ на открытые вопросы
     # («да», «ок» при awaiting_clarification) сюда не попадает — он идёт в TaskSpec.
