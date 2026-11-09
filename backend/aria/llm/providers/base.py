@@ -36,6 +36,8 @@ class StreamChunk:
 class LlmProvider(ABC):
     provider_id: str
     provider_class: str
+    # Этап 3а: взрослые запросы идут только на провайдеров с этим флагом.
+    adult_ok: bool = False
 
     @abstractmethod
     async def check_connectivity(self, timeout_sec: float) -> bool: ...

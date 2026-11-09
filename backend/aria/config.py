@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # П.4.1 ТЗ: выключатель Clarifier-гейта (PR-3). False — поведение как до PR-3:
     # быстрый путь draft -> approved без уточняющих вопросов.
     clarifier_gate_enabled: bool = False
+    # Этап 3а: в сборке владельца 18+ включён по умолчанию и без карточек возраста.
+    adult_default: bool = False
+    # Провайдеры, которым разрешены взрослые запросы (помимо флага adult_ok).
+    adult_provider_ids: str = ""
     # П.4.2 ТЗ: список глаголов-маркеров задачи (через запятую) для agent-режима;
     # пусто = встроенный список clarifier._DEFAULT_TASK_VERBS.
     clarifier_task_verbs: str = ""

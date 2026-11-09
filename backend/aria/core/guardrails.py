@@ -28,7 +28,7 @@ IDEMPOTENT_TOOL_NAMES = frozenset({
 # (состояние изменилось — повторное чтение законно), а их повтор не считается «чтением».
 MUTATING_TOOL_NAMES = frozenset({
     "file_write", "shell_execute", "write_note", "create_vault_branch", "log_decision",
-    "memory_save", "delegate_task",
+    "memory_save", "delegate_task", "set_mode",
 })
 
 

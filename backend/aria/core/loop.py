@@ -382,6 +382,9 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         _t = repo.get_task(db, task_id)
         profile = runprofile.get_profile(db, _t.session_id)
         delegation_depth = _t.delegation_depth or 0
+        from aria.core import adult_mode
+
+        adult_enabled = adult_mode.is_enabled(db, _t.session_id)
     role_prompt = (
         f"Ты в роли {role.role_id} в режиме Agent. {role.description}\n"
         f"Доступные инструменты: {', '.join(tool_whitelist) or 'нет'}."
@@ -402,6 +405,10 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
         if COMPLIANCE_TEXT:
             role_prompt += "\n\n" + COMPLIANCE_TEXT
+    if adult_enabled:
+        from aria.core import prompt_composer
+
+        role_prompt += "\n\n" + prompt_composer.compose("", adult=True)
     # L6: owner preferences (vault/preferences.md) — часть стабильного префикса.
     from aria.memory.preferences import stable_block as _preferences_block
 

@@ -31,6 +31,7 @@ from aria.api.auth import require_runtime_token
 from aria import secretguard
 from aria.config import get_settings
 from aria.core import runprofile, telegram_gate, timing
+from aria.core import adult_mode, content_limits
 from aria.core.compliance import COMPLIANCE_TEXT
 from aria.core.persona import PERSONA_TEXT
 from aria.db import models as m
@@ -195,6 +196,80 @@ async def _secrets_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dic
         "user": user_payload,
         "assistant": assistant_payload,
     }
+
+
+async def _adult_gate(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
+    """Этап 3а: включение/выключение 18+ фразой, возрастная карточка и жёсткие лимиты."""
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry"):
+        return None
+    command = adult_mode.detect_command(content)
+    with session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        state = adult_mode.get_state(db, session_id)
+        history = repo.list_messages(db, session_id, limit=8)
+        last_notice = None
+        for msg in reversed(history):
+            if msg.role == "assistant" and isinstance(msg.content_json, dict):
+                last_notice = msg.content_json.get("notice")
+                break
+    yes = content.lower().strip(".! ") in {"да", "yes", "ок", "ok", "подтверждаю", "мне есть 18 лет", "мне 18"}
+    needs_confirm = adult_mode.needs_confirmation()
+
+    reply: tuple[str, str] | None = None
+    if command == "off":
+        with session_scope() as db:
+            adult_mode.set_adult(db, False, session_id=session_id, scope=state.get("adult_scope", "session"))
+        reply = ("adult_off", "Режим 18+ выключен.")
+    elif command == "on":
+        if needs_confirm and not state.get("adult_confirmed_at"):
+            reply = ("adult_confirm", "Мне есть 18 лет. Подтверди, чтобы включить режим 18+.")
+        else:
+            with session_scope() as db:
+                adult_mode.set_adult(db, True, session_id=session_id, mark_confirmed=True)
+            reply = ("adult_on", "Режим 18+ включён.")
+    elif last_notice == "adult_confirm" and yes:
+        with session_scope() as db:
+            adult_mode.set_adult(db, True, session_id=session_id, mark_confirmed=True)
+        reply = ("adult_on", "Режим 18+ включён.")
+    elif last_notice == "adult_prompt" and yes:
+        with session_scope() as db:
+            adult_mode.set_adult(db, True, session_id=session_id, mark_confirmed=not needs_confirm)
+        reply = ("adult_on", "Режим 18+ включён. Повтори запрос.")
+    elif adult_mode.looks_adult(content):
+        violation = content_limits.check(content)
+        if violation is not None:
+            reply = ("blocked_limits", f"Этот запрос нарушает жёсткие лимиты: {violation.reason}.")
+        elif not state.get("adult"):
+            reply = ("adult_prompt", "Включить 18+? Да / Нет")
+        elif not adult_mode.available_providers(getattr(request.app.state, "router", None)):
+            reply = ("adult_no_provider", "Нет провайдера с флагом adult_ok: взрослый запрос не отправлен.")
+
+    if reply is None:
+        return None
+    notice, text = reply
+
+    def _store() -> tuple[Any, dict[str, Any], Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            user_msg = repo.append_message(
+                db, session, role="user", content=secretguard.mask_secrets(content), source_trust=SourceTrust.trusted
+            )
+            assistant = repo.append_message(
+                db, session, role="assistant", content=text, source_trust=SourceTrust.trusted,
+                content_json={"notice": notice, "action": "adult_mode", "adult": notice != "adult_off"},
+            )
+            session.updated_at = datetime.now(timezone.utc)
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = content.replace("\n", " ")[:60]
+            return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
+
+    user_msg, user_payload, assistant_msg, assistant_payload = run_with_db_retry(_store)
+    emit_message_created(user_msg, session_id, None)
+    emit_message_created(assistant_msg, session_id, None)
+    return {"ok": True, "mode": notice, "notice": notice, "user": user_payload, "assistant": assistant_payload}
 
 
 async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
@@ -706,6 +781,18 @@ async def chat_send(
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
             return secrets
+        adult = await _adult_gate(session_id, payload, request)
+        if adult is not None:
+            if payload.get("stream"):
+                async def _adult_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": adult})
+
+                return StreamingResponse(
+                    _adult_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return adult
         telegram = await _telegram_notice(session_id, payload)
         if telegram is not None:
             if payload.get("stream"):
@@ -852,6 +939,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
     t_prompt = time.monotonic()
     with session_scope() as db:
         profile = runprofile.get_profile(db, session_id)
+        adult_enabled = adult_mode.is_enabled(db, session_id)
     chat_class, chat_fallback, chat_prefer = runprofile.chat_target(
         profile, request.app.state.router, CHAT_PROVIDER_CLASS, CHAT_FALLBACK_CLASSES
     )
@@ -866,6 +954,10 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
     # PR-7: DLP применяется к исходящему промпту и снимается с ответа. Только чат —
     # агентский цикл не трогаем: плейсхолдеры сломали бы пути и команды в tool calls.
     prompt, dlp_applied = _dlp_mask(prompt, session_id)
+    if adult_enabled and prompt and prompt[0].role == "system":
+        from aria.core import prompt_composer
+
+        prompt[0] = ChatMessage(role="system", content=prompt_composer.compose(prompt[0].content, adult=True))
     timing.record("chat_prompt", (time.monotonic() - t_prompt) * 1000.0)
     # всё до вызова модели (запись сообщения, сжатие, память, сборка промпта): то, что пользователь ждёт зря
     timing.record("chat_prepare", (time.monotonic() - t_start) * 1000.0)
@@ -1232,3 +1324,32 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
             },
         }
     )
+
+
+@router.get("/modes")
+async def get_modes(request: Request, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    with session_scope() as db:
+        state = adult_mode.get_state(db)
+    return {
+        "adult": bool(state.get("adult")),
+        "adult_scope": state.get("adult_scope", "session"),
+        "adult_confirmed_at": state.get("adult_confirmed_at"),
+        "needs_confirmation": adult_mode.needs_confirmation(),
+        "providers": [p.provider_id for p in adult_mode.available_providers(getattr(request.app.state, "router", None))],
+    }
+
+
+@router.post("/modes")
+async def set_modes(payload: dict[str, Any], request: Request, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    enabled = bool(payload.get("adult"))
+    scope = str(payload.get("adult_scope") or "session")
+    if scope not in ("session", "global"):
+        raise HTTPException(status_code=400, detail="adult_scope must be session or global")
+    confirm = bool(payload.get("confirm"))
+    if enabled and adult_mode.needs_confirmation() and not confirm:
+        return {"ok": False, "needs_confirmation": True, "message": "Мне есть 18 лет"}
+    with session_scope() as db:
+        state = adult_mode.set_adult(db, enabled, scope=scope, mark_confirmed=enabled and confirm)
+    logger.info("mode_changed adult=%s scope=%s", enabled, scope)
+    return {"ok": True, "adult": bool(state.get("adult")), "adult_scope": state.get("adult_scope"),
+            "adult_confirmed_at": state.get("adult_confirmed_at")}

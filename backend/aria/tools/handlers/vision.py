@@ -58,7 +58,7 @@ def _resolve_in_sandbox(file_path: str, sandbox_root: str | None) -> Path | dict
     return target
 
 
-async def vision_analyze(input_json: dict, sandbox_root: str | None = None, **_ctx) -> dict:
+async def _vision_analyze_impl(input_json: dict, sandbox_root: str | None = None, **_ctx) -> dict:
     """Analyze an image with a multimodal model (Gemini, or DeepSeek Flash when Gemini is not available).
 
     Accepts either:
@@ -302,3 +302,15 @@ def _detect_mime(data: bytes) -> str:
     if data[:4] == b"MM\x00*" or data[:4] == b"II*\x00":
         return "image/tiff"
     return "error: unsupported image format (supported: PNG, JPEG, WebP, GIF, TIFF)"
+
+
+async def vision_analyze(input_json: dict, sandbox_root: str | None = None, **ctx) -> dict:
+    """Этап 3а: маркер ``possible minor`` блокирует выдачу описания."""
+    result = await _vision_analyze_impl(input_json, sandbox_root=sandbox_root, **ctx)
+    text = str(result.get("text") or "")
+    if "possible minor" in text.lower():
+        return {
+            "error": "possible minor detected: description withheld",
+            "blocked": "possible_minor",
+        }
+    return result

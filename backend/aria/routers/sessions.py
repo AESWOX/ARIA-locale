@@ -366,11 +366,14 @@ async def post_message(
         raise HTTPException(status_code=400, detail="content required")
     # SEC-6 + S2/S11: секрет и Telegram-гейт — единый pre-check до маршрутизации,
     # одинаковый для чата и agent-пути. Карточку формирует бэкенд, не модель.
-    from aria.routers.chat import _secrets_notice, _telegram_notice
+    from aria.routers.chat import _adult_gate, _secrets_notice, _telegram_notice
 
     secret = await _secrets_notice(session_id, {"content": content})
     if secret is not None:
         return secret
+    adult = await _adult_gate(session_id, {"content": content}, request)
+    if adult is not None:
+        return adult
     telegram = await _telegram_notice(session_id, {"content": content})
     if telegram is not None:
         return telegram

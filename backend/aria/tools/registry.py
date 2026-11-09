@@ -291,6 +291,22 @@ async def _memory_save(input_json: dict, approved: bool = False, **_ctx) -> dict
     return {"saved": True, "id": item["id"], "duplicate": bool(item.get("duplicate"))}
 
 
+async def _set_mode(input_json: dict, **_ctx) -> dict:
+    """Этап 3а: включение/выключение 18+ из агентского цикла."""
+    value = str(input_json.get("value") or "").strip().lower()
+    if value not in ("on", "off"):
+        return {"error": "value must be on or off"}
+    from aria.core import adult_mode
+    from aria.db.base import session_scope
+
+    with session_scope() as db:
+        confirmed = bool(adult_mode.get_state(db).get("adult_confirmed_at"))
+        if value == "on" and adult_mode.needs_confirmation() and not confirmed:
+            return {"error": "confirmation_required", "message": "Мне есть 18 лет"}
+        adult_mode.set_adult(db, value == "on", scope="global", mark_confirmed=(value == "on"))
+    return {"ok": True, "adult": value == "on"}
+
+
 async def _make_plan(input_json: dict, router=None, task_id=None, **_ctx) -> dict:
     """B3: построить/вернуть план задачи через Oracle (deepseek-v4-pro, потолок 30 с,
     откат на flash с thinking=high). Идемпотентно: существующий план не пересобирается.
@@ -974,6 +990,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         allowed_roles=("orchestrator", "general", "coder", "research"),
         idempotency_class=IdempotencyClass.safe_read,
         handler=_make_plan,
+    ),
+    "set_mode": ToolSpec(
+        tool_name="set_mode",
+        description="Turn Adult mode (18+) on or off. value=on|off. Hard limits still apply.",
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string", "enum": ["on", "off"]}},
+            "required": ["value"],
+        },
+        output_schema={"type": "object", "properties": {"ok": {"type": "boolean"}, "adult": {"type": "boolean"}, "error": {"type": "string"}}},
+        timeout_sec=10,
+        risk_level=RiskLevel.low,
+        null_output_allowed=False,
+        requires_approval=False,
+        allowed_roles=("general", "worker", "content_creative", "orchestrator"),
+        idempotency_class=IdempotencyClass.safe_write,
+        handler=_set_mode,
     ),
 }
 

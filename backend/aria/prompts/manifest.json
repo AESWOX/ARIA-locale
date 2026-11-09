@@ -1,0 +1,12 @@
+{
+  "layers": {
+    "L0": ["persona.md", "compliance.md"],
+    "L1": "role prompt (prompts/manifest.json roles are resolved by ROLE_REGISTRY)",
+    "L2": {
+      "adult": "adult.md",
+      "storytelling": "storytelling.md",
+      "vision_describe": "vision_describe.md"
+    },
+    "L3": "active modes and context"
+  }
+}
