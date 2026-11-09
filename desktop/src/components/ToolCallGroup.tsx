@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { ChatMsg } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -19,6 +19,12 @@ export function ToolCallGroup({ messages }: { messages: ChatMsg[] }) {
   const names = messages.map((msg) => msg.tool_output?.tool_name || msg.content || "tool");
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<Record<string, string>>({});
+  const [expanded, setExpanded] = useState(() => localStorage.getItem("aria.showProcessDetails") === "1");
+  useEffect(() => {
+    const sync = () => setExpanded(localStorage.getItem("aria.showProcessDetails") === "1");
+    window.addEventListener("aria-process-details", sync);
+    return () => window.removeEventListener("aria-process-details", sync);
+  }, []);
   const undo = async (messageId: string, checkpointId: string) => {
     if (!window.confirm("Restore the file from before this change?")) return;
     setBusy(messageId);
@@ -32,7 +38,7 @@ export function ToolCallGroup({ messages }: { messages: ChatMsg[] }) {
     }
   };
   return (
-    <details className="group border border-border bg-background/40 text-xs">
+    <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)} className="group border border-border bg-background/40 text-xs">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1 text-muted-foreground hover:text-foreground">
         <ChevronDown className="h-3 w-3 -rotate-90 transition-transform group-open:rotate-0" />
         <span className="shrink-0">Processes · {messages.length}</span>

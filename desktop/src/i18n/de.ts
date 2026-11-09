@@ -767,7 +767,6 @@ export const de: Translations = {
     thinkingDeep: "Deep",
     send: "Send",
     stop: "Stop",
-    useForNew: "Use for new chats",
     newChatTab: "New chat",
     closeTab: "Close tab",
     close: "Close",

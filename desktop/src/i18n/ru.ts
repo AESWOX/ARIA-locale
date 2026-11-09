@@ -798,7 +798,6 @@ export const ru: Translations = {
     thinkingDeep: "Глубоко",
     send: "Отправить",
     stop: "Стоп",
-    useForNew: "Использовать для новых чатов",
     newChatTab: "Новый чат",
     closeTab: "Закрыть вкладку",
     close: "Закрыть",

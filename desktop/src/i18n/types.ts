@@ -872,7 +872,6 @@ export interface Translations {
     thinkingDeep: string;
     send: string;
     stop: string;
-    useForNew: string;
     newChatTab: string;
     closeTab: string;
     close: string;

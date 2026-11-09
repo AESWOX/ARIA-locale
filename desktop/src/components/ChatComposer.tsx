@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronUp, Loader2, Plus, Send, Settings2, Square, X } from "lucide-react";
 import type { ChatModels, ProfileSeat, RunProfile } from "@/lib/api";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
 import { Button } from "@vendor/ui/ui/components/button";
@@ -37,8 +38,6 @@ export function ChatComposer({
   profile,
   models,
   onChangeProfile,
-  onSaveDefault,
-  savingDefault,
   onSend,
   onStop,
   advancedOpen,
@@ -56,8 +55,6 @@ export function ChatComposer({
   profile: RunProfile | null;
   models: ChatModels | null;
   onChangeProfile: (profile: RunProfile) => void;
-  onSaveDefault: () => void;
-  savingDefault: boolean;
   onSend: () => void;
   onStop: () => void;
   advancedOpen: boolean;
@@ -65,6 +62,9 @@ export function ChatComposer({
   error: string | null;
 }) {
   const { t } = useI18n();
+  const [config, setConfig] = useState<Record<string, unknown> | null>(null);
+  const [dailyLimit, setDailyLimit] = useState("");
+  const [showDetails, setShowDetails] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -74,6 +74,29 @@ export function ChatComposer({
     el.style.height = "auto";
     el.style.height = `${Math.min(Math.max(el.scrollHeight, 36), 168)}px`;
   }, [input]);
+
+  useEffect(() => {
+    if (!advancedOpen) return;
+    api.getConfig().then((cfg) => {
+      setConfig(cfg);
+      setDailyLimit(String(cfg.budget_daily_usd ?? ""));
+    }).catch(() => undefined);
+    setShowDetails(localStorage.getItem("aria.showProcessDetails") === "1");
+  }, [advancedOpen]);
+
+  const saveDailyLimit = async () => {
+    if (!config) return;
+    const value = Math.max(0, Number(dailyLimit) || 0);
+    const next = { ...config, budget_daily_usd: value };
+    setConfig(next);
+    await api.saveConfig(next).catch(() => undefined);
+  };
+
+  const toggleProcessDetails = (checked: boolean) => {
+    setShowDetails(checked);
+    localStorage.setItem("aria.showProcessDetails", checked ? "1" : "0");
+    window.dispatchEvent(new Event("aria-process-details"));
+  };
 
   useEffect(() => {
     if (!advancedOpen) return;
@@ -91,26 +114,38 @@ export function ChatComposer({
       {advancedOpen && <div className="fixed inset-0 z-20" onClick={onToggleAdvanced} />}
       {advancedOpen && profile && models && (
         <div className="absolute bottom-full left-2 right-2 z-30 mb-1 max-h-[60vh] overflow-y-auto border border-border bg-background p-2 shadow-lg">
-          <div className="flex items-center justify-between gap-2 px-2 py-1">
-            <Button ghost size="sm" disabled={savingDefault || busy} onClick={onSaveDefault}>
-              {savingDefault ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
-              {t.chatComposer.useForNew}
-            </Button>
-            <div className="flex items-center gap-1">
-              <Button
-                ghost
-                size="sm"
+          <div className="flex flex-wrap items-center gap-3 px-2 py-1 text-sm">
+            <label className="flex items-center gap-2">
+              <span className="text-muted-foreground">Daily limit, USD</span>
+              <input
+                type="number"
+                min={0}
+                step="0.1"
+                className="w-24 border border-border bg-background/40 px-2 py-1 text-sm"
+                value={dailyLimit}
+                onChange={(event) => setDailyLimit(event.target.value)}
+                onBlur={() => void saveDailyLimit()}
                 disabled={busy}
-                onClick={() =>
-                  onChangeProfile({ style: "solo", audit: "strict", thinking: "off", main: {}, workers: {}, auditor: {} })
-                }
-              >
-                {t.chatComposer.reset}
-              </Button>
-              <Button ghost size="sm" onClick={onToggleAdvanced}>
-                <X className="mr-1 h-3 w-3" /> {t.chatComposer.close}
-              </Button>
-            </div>
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={showDetails} onChange={(event) => toggleProcessDetails(event.target.checked)} />
+              Show process details
+            </label>
+            <span className="flex-1" />
+            <Button
+              ghost
+              size="sm"
+              disabled={busy}
+              onClick={() =>
+                onChangeProfile({ style: "solo", audit: "strict", thinking: "off", main: {}, workers: {}, auditor: {} })
+              }
+            >
+              {t.chatComposer.reset}
+            </Button>
+            <Button ghost size="sm" onClick={onToggleAdvanced}>
+              <X className="mr-1 h-3 w-3" /> {t.chatComposer.close}
+            </Button>
           </div>
         </div>
       )}
