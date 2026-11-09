@@ -158,6 +158,75 @@ function AgentShellCard() {
   );
 }
 
+function AdultModeCard() {
+  const { toast, showToast } = useToast();
+  const [adult, setAdult] = useState(false);
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
+  const [needsConfirmation, setNeedsConfirmation] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .getModes()
+      .then((modes) => {
+        setAdult(Boolean(modes.adult));
+        setNeedsConfirmation(Boolean(modes.needs_confirmation));
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const result = await api.setModes({ adult, confirm: ageConfirmed });
+      if (result.needs_confirmation) {
+        showToast(result.message ?? "Мне есть 18 лет", "error");
+        return;
+      }
+      showToast(adult ? "Режим 18+ включён" : "Режим 18+ выключен", "success");
+    } catch (e) {
+      showToast(String(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="border-border">
+      <CardContent className="flex flex-col gap-3 p-4">
+        <div className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Adult mode (18+)</span>
+          <span className="text-xs text-muted-foreground">
+            Applies on top of any role. Hard limits always apply: no minors, no real people, no real-world non-consent,
+            no crime or self-harm instructions.
+          </span>
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={adult} onChange={(e) => setAdult(e.target.checked)} />
+          Enable Adult mode
+        </label>
+        {needsConfirmation && adult && (
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={ageConfirmed} onChange={(e) => setAgeConfirmed(e.target.checked)} />
+            Мне есть 18 лет
+          </label>
+        )}
+        <div>
+          <button
+            type="button"
+            className="border border-border px-3 py-1.5 text-sm disabled:opacity-50"
+            onClick={() => void save()}
+            disabled={busy}
+          >
+            Save
+          </button>
+        </div>
+        <Toast toast={toast} />
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SettingsPage() {
   return (
     <div className="flex flex-col gap-8">
@@ -166,6 +235,7 @@ export default function SettingsPage() {
       </H2>
       <AppearanceCard />
       <AgentShellCard />
+      <AdultModeCard />
       {GROUPS.map((group) => (
         <div key={group.title} className="flex flex-col gap-3">
           <H2 variant="sm" className="text-muted-foreground">

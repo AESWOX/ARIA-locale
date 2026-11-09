@@ -94,6 +94,7 @@ export default function NativeChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [models, setModels] = useState<ChatModels | null>(null);
+  const [adultMode, setAdultMode] = useState(false);
   const [run, setRun] = useState<RunState | null>(null);
   const [usage, setUsage] = useState<ChatUsage | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -111,6 +112,10 @@ export default function NativeChatPage() {
   const [costTodayUnpriced, setCostTodayUnpriced] = useState(0);
   const profileDirty = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    api.getModes().then((modes) => setAdultMode(Boolean(modes.adult))).catch(() => undefined);
+  }, [activeId]);
 
   useEffect(() => {
     void (async () => {
@@ -610,6 +615,7 @@ export default function NativeChatPage() {
       setSending(false);
       setSendStartedAt(null);
       void refreshSessions();
+      void api.getModes().then((modes) => setAdultMode(Boolean(modes.adult))).catch(() => undefined);
     }
   };
 
@@ -646,6 +652,7 @@ export default function NativeChatPage() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col border border-border bg-background/40">
         <ChatTopBar
           title={sessions.find((x) => x.id === activeId)?.title ?? ""}
+          adult={adultMode}
           busy={runBusy(run) || sending}
           waiting={(run?.attention.length ?? 0) > 0}
           costToday={costToday}

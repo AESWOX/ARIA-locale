@@ -798,6 +798,16 @@ export const api = {
     }),
   // ---- Chat (backend: routers/chat.py) ----
   chatStatus: () => fetchJSON<ChatStatus>("/api/chat/status"),
+  getModes: () =>
+    fetchJSON<{ adult: boolean; adult_scope: string; adult_confirmed_at: string | null; needs_confirmation: boolean; providers: string[] }>(
+      "/api/chat/modes",
+    ),
+  setModes: (body: { adult: boolean; adult_scope?: "session" | "global"; confirm?: boolean }) =>
+    fetchJSON<{ ok: boolean; adult?: boolean; needs_confirmation?: boolean; message?: string }>("/api/chat/modes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   chatSessions: () => fetchJSON<ChatSessionRow[]>("/api/chat/sessions"),
   chatCreate: (title?: string) =>
     fetchJSON<{ session_id: string; title: string }>("/api/chat/sessions", {

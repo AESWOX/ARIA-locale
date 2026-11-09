@@ -28,9 +28,10 @@ function Chip({ children, title, tone }: { children: React.ReactNode; title?: st
 }
 
 export function ChatTopBar({
-  title, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
+  title, adult, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
 }: {
   title: string;
+  adult?: boolean;
   busy: boolean;
   waiting: boolean;
   costToday: number | null;
@@ -55,6 +56,7 @@ export function ChatTopBar({
       <div className="min-w-0 flex-1 truncate text-sm font-medium" title={title}>
         {title || "New chat"}
       </div>
+      {adult && <Chip title="Adult mode (18+)">18+</Chip>}
       {waiting && <Chip tone="warn" title="A step is waiting for your Approve / Reject">needs you</Chip>}
       {busy && !waiting && (
         <Chip title="A task is running">
