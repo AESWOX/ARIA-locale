@@ -1033,6 +1033,10 @@ async def _execute_step_isolated(
                 # D-24: аргументы могут лежать в input/input_json или корнем шага.
                 handler_input = step_tool_input(step, spec)
 
+            # SEC-6: секрет не подставляется в аргументы инструмента и не уходит в хуки/логи.
+            from aria import secretguard
+
+            handler_input = secretguard.mask_obj(handler_input)
             # Тот же барьер аргументов, что в loop._execute_tool: Plan-режим ходит в handler напрямую,
             # и без этого пустой url/path/glob давал бы «успех» или невнятный KeyError.
             arg_errors = validate_tool_input(spec.input_schema, handler_input)
@@ -1054,6 +1058,7 @@ async def _execute_step_isolated(
             if tool_ref == "file_read" and isinstance(output_json, dict) and output_json.get("exists") is False:
                 # Чтение несуществующего файла раньше шло как успех (exists=false), и зависимые шаги работали по пустоте.
                 output_json = {"error": f"file not found: {handler_input.get('path')}"}
+            output_json = secretguard.mask_obj(output_json)
             await toolhooks.post_tool(
                 spec.tool_name, handler_input, output_json,
                 "error" if isinstance(output_json, dict) and output_json.get("error") else "ok",

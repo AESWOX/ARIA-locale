@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
 from aria.api.auth import require_runtime_token
+from aria import secretguard
 from aria.config import get_settings
 from aria.core import runprofile, telegram_gate, timing
 from aria.core.compliance import COMPLIANCE_TEXT
@@ -144,6 +145,53 @@ async def _telegram_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> di
     return {
         "ok": True,
         "mode": "telegram_not_connected",
+        "user": user_payload,
+        "assistant": assistant_payload,
+    }
+
+
+async def _secrets_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """SEC-6: секрет в сообщении маскируется и не уходит ни модели, ни в инструменты."""
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry") or not secretguard.contains_secret(content):
+        return None
+    masked = secretguard.mask_secrets(content)
+    from aria.core.clarifier import detect_language
+
+    text = secretguard.notice_text(detect_language(content))
+
+    def _store() -> tuple[Any, dict[str, Any], Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            user_msg = repo.append_message(
+                db, session, role="user", content=masked, source_trust=SourceTrust.trusted
+            )
+            assistant = repo.append_message(
+                db,
+                session,
+                role="assistant",
+                content=text,
+                source_trust=SourceTrust.trusted,
+                content_json={
+                    "notice": "secret_redacted",
+                    "action": "open_settings",
+                    "action_path": "/settings",
+                },
+            )
+            session.updated_at = datetime.now(timezone.utc)
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = masked.replace("\n", " ")[:60]
+            return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
+
+    user_msg, user_payload, assistant_msg, assistant_payload = run_with_db_retry(_store)
+    emit_message_created(user_msg, session_id, None)
+    emit_message_created(assistant_msg, session_id, None)
+    return {
+        "ok": True,
+        "mode": "secret_redacted",
+        "notice": "secret_redacted",
         "user": user_payload,
         "assistant": assistant_payload,
     }
@@ -649,6 +697,18 @@ async def chat_send(
     # chat_total: весь хендлер, от запроса до сохранённого ответа (4xx/5xx считаются как errors).
     # Не декоратор: при ``from __future__ import annotations`` FastAPI разбирает аннотации в globals обёртки.
     with timing.stage("chat_total"):
+        secrets = await _secrets_notice(session_id, payload)
+        if secrets is not None:
+            if payload.get("stream"):
+                async def _secrets_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": secrets})
+
+                return StreamingResponse(
+                    _secrets_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return secrets
         telegram = await _telegram_notice(session_id, payload)
         if telegram is not None:
             if payload.get("stream"):
@@ -705,6 +765,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
     t_start = time.monotonic()
     started_monotonic = _monotonic()
     content = str(payload.get("content") or "").strip()
+    content = secretguard.mask_secrets(content)
     retry = bool(payload.get("retry"))  # re-ask using the last stored user message (no duplicate)
     if not content and not retry:
         raise HTTPException(status_code=400, detail="content required")

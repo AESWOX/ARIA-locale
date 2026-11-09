@@ -909,6 +909,10 @@ async def _execute_tool(
     # Аргументы приходят от модели: сверяем с input_schema ДО handler'а. Ошибка уходит модели понятным
     # текстом (какой аргумент и что не так), а не «KeyError: 'path'» и не молчаливым «ok» на пустой вызов.
     from aria.tools.validators import validate_tool_input
+    from aria import secretguard
+
+    # SEC-6: секрет из модели/вывода не попадает в аргументы shell и других инструментов.
+    arguments = secretguard.mask_obj(arguments)
     arg_errors = validate_tool_input(spec.input_schema, arguments)
     if arg_errors:
         return None, ToolStatus.error, "invalid_arguments", f"{spec.tool_name}: " + "; ".join(arg_errors)
@@ -927,6 +931,7 @@ async def _execute_tool(
             ),
             timeout=spec.timeout_sec,
         )
+        output = secretguard.mask_obj(output)
         if isinstance(output, dict) and output.get("status") == "approval_required":
             # Команда НЕ исполнялась — это не «ok» (иначе аудит считает действие выполненным).
             return output, ToolStatus.blocked_policy, "approval_required", output.get("error")
