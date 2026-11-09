@@ -74,10 +74,8 @@ def shell_program(command: str) -> tuple[str, str | None]:
         return script, None
     if script.lstrip().startswith(('"', "'")):
         script = "& " + script
-    if '"' in script or "'" in script:
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return f"{ps} -NoProfile -NonInteractive -InputFormat None -EncodedCommand {encoded}", None
-    return f"{ps} -NoProfile -NonInteractive -InputFormat None -Command {script}", None
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return f"{ps} -NoProfile -NonInteractive -InputFormat None -EncodedCommand {encoded}", None
 
 
 _WIN_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")

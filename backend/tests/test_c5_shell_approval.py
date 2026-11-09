@@ -49,6 +49,15 @@ SEC2_SAFE = ["rm file.txt", "rm -f a.txt", "rm -i x"]  # рекурсии нет
 SPAWNED: list[str] = []
 
 
+def _spawned_command(raw: str) -> str:
+    """S10: на Windows команда уходит в PowerShell как -EncodedCommand."""
+    if "-EncodedCommand" in raw:
+        import base64
+
+        return base64.b64decode(raw.rsplit(" ", 1)[-1]).decode("utf-16-le")
+    return raw
+
+
 class _FakeProc:
     returncode = 0
 
@@ -125,7 +134,7 @@ def test_trap_is_real_safe_variants_reach_the_spawn_point(sandbox, trap):
     for cmd in SEC2_SAFE:
         out = asyncio.run(spec.handler(input_json={"command": cmd}, timeout_sec=5, sandbox_root=sandbox))
         assert out.get("returncode") == 0, (cmd, out)
-    assert len(trap) == len(SEC2_SAFE) and all(cmd in spawned for cmd, spawned in zip(SEC2_SAFE, trap))
+    assert len(trap) == len(SEC2_SAFE) and all(cmd in _spawned_command(spawned) for cmd, spawned in zip(SEC2_SAFE, trap))
 
 
 @pytest.mark.parametrize("cmd", SEC2_SAFE)
@@ -147,7 +156,7 @@ def test_execute_tool_reports_blocked_policy_not_ok(cmd, sandbox, trap):
 def test_execute_tool_runs_only_with_system_approved_kwarg(sandbox, trap):
     spec = TOOL_REGISTRY["shell_execute"]
     out, status, code, _e = asyncio.run(_execute_tool(spec, {"command": "rm -rf x"}, sandbox, approved=True))
-    assert status == ToolStatus.ok and code is None and len(trap) == 1 and "rm -rf x" in trap[0]
+    assert status == ToolStatus.ok and code is None and len(trap) == 1 and "rm -rf x" in _spawned_command(trap[0])
 
 
 # --------------------------------------------------------------------------- 3. полный цикл
@@ -221,7 +230,7 @@ def test_approve_runs_the_command_exactly_once(world, trap):
         item = repo.get_attention_item(db, item_id)
         db.expunge(item)
     asyncio.run(resume_after_approval(task_id, router, sandbox, item))
-    assert len(trap) == 1 and "rm -rf build" in trap[0], "после Approve команда исполнена один раз"
+    assert len(trap) == 1 and "rm -rf build" in _spawned_command(trap[0]), "после Approve команда исполнена один раз"
 
     # повторная доставка того же Approve (дубль, перезапуск с задачей в in_progress) не запускает команду второй раз
     with session_scope() as db:
@@ -229,7 +238,7 @@ def test_approve_runs_the_command_exactly_once(world, trap):
         task.status = TaskStatus.in_progress
     sub.push(final_answer("second pass"))
     asyncio.run(resume_after_approval(task_id, router, sandbox, item))
-    assert len(trap) == 1 and "rm -rf build" in trap[0]
+    assert len(trap) == 1 and "rm -rf build" in _spawned_command(trap[0])
     _st, _items, calls = _snapshot(task_id)
     shell = [c for c in calls if c[0] == "shell_execute"]
     assert len(shell) == 1 and shell[0][1] == "ok" and shell[0][2] == item_id, "tool_call привязан к attention item"

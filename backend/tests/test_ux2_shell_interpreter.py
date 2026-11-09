@@ -28,8 +28,12 @@ def test_shell_execute_uses_powershell(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_shell", _spawn)
     asyncio.run(shell_handler.shell_execute({"command": "echo hi"}, timeout_sec=5, approved=True))
 
-    assert "powershell" in seen["command"].lower()
-    assert "-NoProfile" in seen["command"] and "echo hi" in seen["command"]
+    import base64
+
+    raw = seen["command"]
+    assert "powershell" in raw.lower() and "-EncodedCommand" in raw
+    decoded = base64.b64decode(raw.rsplit(" ", 1)[-1]).decode("utf-16-le")
+    assert decoded == "echo hi"
 
 
 def test_bash_syntax_is_not_allowed():
