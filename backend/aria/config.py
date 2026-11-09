@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Волна 1 (A10): размер пула TaskRunner. На 4 ГБ RAM держим 3 по умолчанию,
     # при нехватке памяти TaskRunner сам опускается до 1 воркера.
     runner_max_workers: int = 3
-    audit_max_attempts: int = 3
+    audit_max_attempts: int = 2
     # П.1.6 ТЗ: выключатель параллельного EXECUTE. False — волны DAG не собираются,
     # план исполняется строго по порядку шагов (аварийный режим для старых планов).
     plan_dag_parallel_enabled: bool = True

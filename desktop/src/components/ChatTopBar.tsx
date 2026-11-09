@@ -28,10 +28,11 @@ function Chip({ children, title, tone }: { children: React.ReactNode; title?: st
 }
 
 export function ChatTopBar({
-  title, adult, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
+  title, adult, audit, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
 }: {
   title: string;
   adult?: boolean;
+  audit?: string | null;
   busy: boolean;
   waiting: boolean;
   costToday: number | null;
@@ -57,6 +58,10 @@ export function ChatTopBar({
         {title || "New chat"}
       </div>
       {adult && <Chip title="Adult mode (18+)">18+</Chip>}
+      {audit === "pass" && <Chip title="Audit verdict">verified</Chip>}
+      {(audit === "needs_rework" || audit === "fail_after_max_attempts") && (
+        <Chip title="Audit verdict">unverified</Chip>
+      )}
       {waiting && <Chip tone="warn" title="A step is waiting for your Approve / Reject">needs you</Chip>}
       {busy && !waiting && (
         <Chip title="A task is running">

@@ -103,7 +103,6 @@ export default function NativeChatPage() {
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [profile, setProfile] = useState<RunProfile | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [savingDefault, setSavingDefault] = useState(false);
   const [openIds, setOpenIds] = useState<string[]>([]);
   const prefsLoaded = useRef(false);
   const [seen, setSeen] = useState<SeenMap>(() => loadSeen());
@@ -396,19 +395,6 @@ export default function NativeChatPage() {
     }
   };
 
-  const saveDefaultProfile = async () => {
-    if (!profile) return;
-    setSavingDefault(true);
-    try {
-      const saved = await api.chatSaveDefaultProfile(profile);
-      setProfile(saved.profile);
-        profileDirty.current = false;
-    } catch (e) {
-      setError(errMessage(e));
-    } finally {
-      setSavingDefault(false);
-    }
-  };
 
   const resumeId = searchParams.get("resume");
   useEffect(() => {
@@ -653,6 +639,7 @@ export default function NativeChatPage() {
         <ChatTopBar
           title={sessions.find((x) => x.id === activeId)?.title ?? ""}
           adult={adultMode}
+          audit={run?.audit?.verdict ?? null}
           busy={runBusy(run) || sending}
           waiting={(run?.attention.length ?? 0) > 0}
           costToday={costToday}
@@ -878,8 +865,6 @@ export default function NativeChatPage() {
           profile={profile}
           models={models}
           onChangeProfile={changeProfile}
-          onSaveDefault={() => void saveDefaultProfile()}
-          savingDefault={savingDefault}
           onSend={() => void send(false)}
           onStop={() => {
             if (activeId) void api.chatStop(activeId).catch(() => undefined);

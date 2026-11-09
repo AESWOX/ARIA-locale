@@ -2426,6 +2426,8 @@ export interface RunState {
   /** Why the task failed (provider_http_429, provider_unavailable, runner_error, ...); null otherwise. */
   error_code?: string | null;
   error_message?: string | null;
+  /** Latest audit report: verdict pass_ | needs_rework | fail_after_max_attempts | unaudited. */
+  audit?: { verdict: string; attempt_no: number; model: string } | null;
 }
 
 export interface ProfileSeat {

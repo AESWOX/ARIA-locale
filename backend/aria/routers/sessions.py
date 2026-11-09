@@ -336,6 +336,16 @@ async def get_session_run(session_id: uuid.UUID, _: str = Depends(require_runtim
             for item in repo.list_attention_items(db, only_pending=True)
             if item.session_id == session.id or (task is not None and item.task_id == task.id)
         ]
+        audit = None
+        if task is not None:
+            reports = repo.list_audit_reports(db, task.id)
+            if reports:
+                last = reports[-1]
+                audit = {
+                    "verdict": last.verdict.value if hasattr(last.verdict, "value") else str(last.verdict),
+                    "attempt_no": last.attempt_no,
+                    "model": last.auditor_model,
+                }
     return {
         "session_id": str(session_id),
         "task_id": str(task.id) if task is not None else None,
@@ -347,6 +357,7 @@ async def get_session_run(session_id: uuid.UUID, _: str = Depends(require_runtim
         # причина падения (provider_unavailable, runner_error, ...) — чтобы UI и смоук не гадали
         "error_code": error_code,
         "error_message": error_message,
+        "audit": audit,
     }
 
 

@@ -203,8 +203,8 @@ async def run_audit(
             auditor_role="qa_auditor",
             auditor_model="structural-only",
             budget_degraded=False,
-            verdict=AuditVerdict.needs_rework,
-            plan_vs_fact={"objective": task.objective, "note": "no tool calls — conversational turn, not a failure"},
+            verdict=AuditVerdict.unaudited,
+            plan_vs_fact={"objective": task.objective, "note": "no tool calls — audit is not run"},
             tool_success_summary={"total": 0, "ok": 0, "error": 0, "blocked_policy": 0},
             missing_requirements=["Разговорный ход без tool calls — не расходует audit_attempt_no."],
             patch_suggestions=[],
@@ -269,12 +269,22 @@ async def run_audit(
                         + json.dumps([dict(c) if isinstance(c, dict) else c for c in criteria], ensure_ascii=False, default=str)
                         + "\nПроставь статус КАЖДОМУ критерию в поле criteria."
                     )
+                from pathlib import Path as _Path
+
+                from aria.core.roles import get_role as _get_role
+
+                _asset = _get_role("qa_auditor").system_prompt_asset
+                _prompt_path = _Path(__file__).resolve().parent.parent / _asset
+                try:
+                    _auditor_prompt = _prompt_path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    _auditor_prompt = "Ты qa_auditor. Проверяй результат по фактам; нет доказательства — fail."
                 messages = [
                     ChatMessage(
                         role="system",
                         content=(
-                            "Ты qa_auditor. Проверь, соответствует ли результат objective задачи и её критериям приёмки.\n"
-                            "Ответь строго в формате JSON: "
+                            _auditor_prompt
+                            + "\n\nОтветь строго в формате JSON: "
                             "{\"verdict\": \"pass\" | \"needs_rework\" | \"needs_info\", \"issues\": [\"недостаток 1\", \"...\"], "
                             "\"criteria\": [{\"id\": \"ac-1\", \"status\": \"pass\" | \"fail\", \"note\": \"коротко\"}]}. "
                             "pass — только если результат полностью соответствует objective, все критерии выполнены и замечаний нет."
@@ -315,6 +325,10 @@ async def run_audit(
                 verdict = AuditVerdict.unaudited
                 budget_degraded = True
 
+    logger.info(
+        "audit task=%s attempt=%s verdict=%s model=%s",
+        str(task.id)[:8], attempt_no, verdict.value, auditor_model,
+    )
     report = repo.create_audit_report(
         db,
         session,
