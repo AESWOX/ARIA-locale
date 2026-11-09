@@ -173,6 +173,7 @@ class _RecordingRunner:
 
 def test_cron_due_job_is_executed_and_last_run_is_recorded():
     recorder = _RecordingRunner()
+    sim_now = datetime(2026, 11, 7, 2, 0, tzinfo=timezone.utc)
     with session_scope() as db:
         job = repo.create_scheduler_job(
             db,
@@ -183,12 +184,11 @@ def test_cron_due_job_is_executed_and_last_run_is_recorded():
         )
         job_id = job.job_id
         # job «уже запускался 2 минуты назад» → следующая минута давно наступила
-        from aria.http_utils import utc_now
         from datetime import timedelta
 
-        repo.update_scheduler_job(db, job_id, last_run_at=utc_now() - timedelta(minutes=2), last_run_status="ok")
+        repo.update_scheduler_job(db, job_id, last_run_at=sim_now - timedelta(minutes=2), last_run_status="ok")
 
-    result = asyncio.run(run_due_jobs(router=None, runner=recorder, now=datetime(2026, 11, 7, 2, 0, tzinfo=timezone.utc)))
+    result = asyncio.run(run_due_jobs(router=None, runner=recorder, now=sim_now))
 
     assert "wave1-every-minute" in result["due"], result
     assert recorder.submitted, "due-job обязан превратиться в задачу"
