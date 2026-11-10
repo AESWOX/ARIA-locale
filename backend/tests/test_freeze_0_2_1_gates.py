@@ -271,8 +271,11 @@ def test_shell_env_adds_git_to_path(tmp_path, monkeypatch):
 
 def test_code_theme_overrides_vendor_background_text():
     css = (Path(__file__).resolve().parents[2] / "desktop" / "src" / "index.css").read_text(encoding="utf-8")
+    # F-003: unlayered rule (beats Tailwind utilities) + solid token (never alpha 0).
     assert "color: var(--foreground-base)" in css
     assert "pre," in css
+    # Hardening: answer body does not depend on a color-mix token that can be transparent.
+    assert ".aria-rich-text," in css
 
 
 @pytest.mark.anyio

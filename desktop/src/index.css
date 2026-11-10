@@ -362,8 +362,29 @@ kbd,
 samp {
   /* Vendor globals paint code with the page background colour (text-background),
      which is black on the Black theme. Code must always use readable foreground.
-     F-003: `--foreground` is LENS_0 alpha 0 (invisible); use the solid base. */
+     F-003: `--foreground` is LENS_0 alpha 0 (invisible); use the solid base.
+     Unlayered on purpose: Tailwind v4 utilities live in @layer utilities and
+     lose to any unlayered rule, so a class like text-foreground-base alone
+     cannot fix an invisible <pre>/<code>. */
   color: var(--foreground-base);
+}
+
+/* F-003 hardening: the chat answer body must never depend on a color-mix()
+   token that can resolve to transparent (midground alpha, theme switch,
+   surface image). Solid base = readable on every bundled theme. */
+.aria-rich-text,
+.aria-rich-text p,
+.aria-rich-text li,
+.aria-rich-text h1,
+.aria-rich-text h2,
+.aria-rich-text h3,
+.aria-rich-text h4,
+.aria-rich-text strong,
+.aria-rich-text em {
+  color: var(--foreground-base);
+}
+.aria-rich-text a {
+  color: var(--midground-base);
 }
 
 *::selection {

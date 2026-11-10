@@ -23,7 +23,7 @@ export function Markdown({
   const caret = streaming ? <StreamingCaret /> : null;
 
   return (
-    <div className="text-sm text-foreground leading-relaxed space-y-2">
+    <div className="aria-rich-text text-sm text-foreground leading-relaxed space-y-2">
       {blocks.map((block, i) => (
         <Block
           key={i}
