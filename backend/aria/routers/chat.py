@@ -1001,7 +1001,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
     )
 
 
-def _log_chat_timing(prepared: _Prepared, session_id: uuid.UUID, first_token_at: float | None = None) -> None:
+def _log_chat_timing(prepared: _Prepared, session_id: uuid.UUID, first_token_at: float | None = None) -> float:
     """UX-1: одна строка на готовый ответ чата, включая стрим. Без текстов сообщений."""
     now = _monotonic()
     total_ms = max(0.0, (now - prepared.started_monotonic) * 1000.0)
@@ -1016,6 +1016,7 @@ def _log_chat_timing(prepared: _Prepared, session_id: uuid.UUID, first_token_at:
         total_ms,
         str(session_id)[:8],
     )
+    return total_ms
 
 
 async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> dict[str, Any]:
@@ -1332,6 +1333,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
 
     with timing.stage("chat_store"):
         assistant_msg, assistant_payload = run_with_db_retry(_store_assistant)
+    total_ms = _log_chat_timing(prepared, session_id, first_token_at)
     # E1/F-016: стрим идёт мимо route_chat — пишем строку ledger'а здесь, один раз.
     # Строка usage.jsonl пишется даже без usage (видно, что вызов был), в БД — только с токенами.
     from aria.llm import usage as llm_usage
@@ -1343,9 +1345,9 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
         purpose="chat",
         session_id=session_id,
         provider_class=getattr(provider, "provider_class", ""),
+        ms=total_ms,
     )
     emit_message_created(assistant_msg, session_id, None)
-    _log_chat_timing(prepared, session_id, first_token_at)
     yield _ndjson_line(
         {
             "type": "done",

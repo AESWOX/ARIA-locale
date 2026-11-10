@@ -23,7 +23,7 @@ async def get_bytes(url: str, params: dict | None = None, *, max_bytes: int = MA
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SEC, headers=merged) as client:
             async with client.stream("GET", url, params=params) as response:
-                if response.status_code in (403, 429):
+                if response.status_code in (402, 403, 429):
                     from aria.tools.search.base import SearchRateLimited
 
                     raise SearchRateLimited(f"HTTP {response.status_code}")
@@ -62,7 +62,7 @@ async def post_json(url: str, payload: dict, *, headers: dict | None = None, max
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SEC, headers=merged) as client:
             async with client.stream("POST", url, content=body) as response:
-                if response.status_code in (403, 429):
+                if response.status_code in (402, 403, 429):
                     from aria.tools.search.base import SearchRateLimited
 
                     raise SearchRateLimited(f"HTTP {response.status_code}")

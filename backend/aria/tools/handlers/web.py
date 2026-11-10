@@ -328,6 +328,22 @@ def _inflate_limited(data: bytes, wbits: int) -> bytes:
     return obj.decompress(data, MAX_FETCH_BYTES)
 
 
+def _brotli_limited(data: bytes) -> bytes:
+    """Потоковая распаковка br с жёстким пределом (bomb не съедает память)."""
+    import brotli
+
+    decoder = brotli.Decompressor()
+    method = getattr(decoder, "process", None) or getattr(decoder, "decompress", None)
+    if method is None:
+        raise FetchError("the installed brotli module has no streaming decompressor")
+    out = bytearray()
+    for offset in range(0, len(data), 65536):
+        out.extend(method(data[offset:offset + 65536]))
+        if len(out) > MAX_FETCH_BYTES:
+            return bytes(out[:MAX_FETCH_BYTES])
+    return bytes(out)
+
+
 def _decompress(data: bytes, encoding: str) -> bytes:
     """Распаковать gzip/deflate/br по заголовку Content-Encoding (F-010)."""
     codings = [part.strip().lower() for part in (encoding or "").split(",") if part.strip()]
@@ -342,16 +358,14 @@ def _decompress(data: bytes, encoding: str) -> bytes:
             except zlib.error:
                 data = _inflate_limited(data, -zlib.MAX_WBITS)
         elif coding in ("br", "brotli"):
-            try:
-                import brotli
-            except Exception as exc:  # noqa: BLE001
-                raise FetchError(
-                    "the server sent brotli (br) but no brotli decoder is installed"
-                ) from exc
-            data = brotli.decompress(data)[:MAX_FETCH_BYTES]
+            if not _brotli_available():
+                raise FetchError("the server sent brotli (br) but no brotli decoder is installed")
+            data = _brotli_limited(data)
         else:
             raise FetchError(f"unsupported content-encoding: {coding}")
     return data
+
+
 _BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 

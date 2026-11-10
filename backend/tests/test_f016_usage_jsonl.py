@@ -11,7 +11,7 @@ from aria.api.auth import require_runtime_token
 from aria.db import models as m
 from aria.db.base import session_scope
 from aria.llm import usage as llm_usage
-from aria.llm.providers.base import LlmProvider, LlmResponse
+from aria.llm.providers.base import LlmProvider, LlmResponse, StreamChunk
 from aria.llm.router import ProviderRouter
 from aria.routers import chat as chat_mod
 from fastapi import FastAPI
@@ -59,6 +59,12 @@ class FailingLlm(FakeLlm):
         request = httpx.Request("POST", "https://example.invalid/chat")
         response = httpx.Response(self.status, request=request)
         raise httpx.HTTPStatusError(f"HTTP {self.status}", request=request, response=response)
+
+
+class StreamingLlm(FakeLlm):
+    async def stream(self, messages, tools, timeout_sec):
+        yield StreamChunk(text="Привет", final=False)
+        yield StreamChunk(text="", final=True, usage=dict(USAGE))
 
 
 def _router(*providers: LlmProvider) -> ProviderRouter:
@@ -143,6 +149,17 @@ def test_trivial_chat_is_exactly_one_llm_call():
     assert fake.calls == 1
     chat_lines = [line for line in _lines() if line["source"] == "chat"]
     assert len(chat_lines) == 1 and chat_lines[0]["provider"] == "probe"
+
+
+def test_stream_usage_line_has_duration():
+    client = _client(StreamingLlm(text="Привет"))
+    sid = client.post("/chat/sessions", json={}).json()["session_id"]
+
+    response = client.post(f"/chat/sessions/{sid}/send", json={"content": "привет", "stream": True})
+
+    assert response.status_code == 200, response.text
+    chat_lines = [line for line in _lines() if line["source"] == "chat"]
+    assert chat_lines and chat_lines[-1]["ms"] is not None
 
 
 def test_session_cost_sums_agent_subagent_audit_compression():

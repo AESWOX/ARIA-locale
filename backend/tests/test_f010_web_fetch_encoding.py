@@ -107,3 +107,23 @@ def test_accept_encoding_never_promises_brotli_without_decoder():
     assert "gzip" in value and "deflate" in value
     if not web._brotli_available():
         assert "br" not in value
+
+
+def test_brotli_decompression_is_bounded(monkeypatch):
+    """MAJOR ревью: br-бомба не должна распаковываться целиком в память."""
+    import sys
+    import types
+
+    fake = types.ModuleType("brotli")
+
+    class Decompressor:
+        def process(self, chunk):
+            return b"x" * (web.MAX_FETCH_BYTES + 50)
+
+    fake.Decompressor = Decompressor
+    monkeypatch.setitem(sys.modules, "brotli", fake)
+    monkeypatch.setattr(web, "MAX_FETCH_BYTES", 1024)
+
+    out = web._brotli_limited(b"compressed-junk" * 10)
+
+    assert len(out) == 1024
