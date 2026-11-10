@@ -56,11 +56,21 @@ def _extra_windows_paths() -> list[str]:
     return [str(p) for p in candidates if p.is_dir()]
 
 
+def _toolchain_paths() -> list[str]:
+    """F-009: python/pytest/ruff из managed venv приложения (если он установлен)."""
+    try:
+        from aria import toolchain
+
+        return toolchain.path_entries()
+    except Exception:  # noqa: BLE001 — отсутствие venv не ломает shell
+        return []
+
+
 def build_shell_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Собирает окружение для дочернего процесса: только allowlist (+ ``LC_*``), без секретов."""
     source = os.environ if base is None else base
     env = {k: v for k, v in source.items() if k.upper() in _ENV_ALLOWLIST or k.upper().startswith("LC_")}
-    extra = _extra_windows_paths() if base is None else []
+    extra = _toolchain_paths() + (_extra_windows_paths() if base is None else [])
     if extra:
         current = env.get("PATH") or source.get("PATH") or ""
         env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)

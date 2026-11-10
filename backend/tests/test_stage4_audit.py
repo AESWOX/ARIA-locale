@@ -81,7 +81,7 @@ def test_auditor_uses_the_qa_prompt_asset():
 
 
 def test_one_automatic_rework_attempt_then_honest_fail():
-    assert get_settings().audit_max_attempts == 2
+    assert get_settings().audit_max_attempts == 3
     _sid, tid = _world()
     _add_tool(tid, status=ToolStatus.error)
     router = _FakeRouter("fail")
@@ -90,8 +90,10 @@ def test_one_automatic_rework_attempt_then_honest_fail():
         session = repo.get_session(db, task.session_id)
         first = asyncio.run(run_audit(db, session, task, router))
         second = asyncio.run(run_audit(db, session, task, router))
+        third = asyncio.run(run_audit(db, session, task, router))
     assert first.verdict == AuditVerdict.needs_rework and first.attempt_no == 1
-    assert second.verdict == AuditVerdict.fail_after_max_attempts and second.attempt_no == 2
+    assert second.verdict == AuditVerdict.needs_rework and second.attempt_no == 2
+    assert third.verdict == AuditVerdict.fail_after_max_attempts and third.attempt_no == 3
     assert router.calls == 0, "структурный провал решается без модели"
 
 

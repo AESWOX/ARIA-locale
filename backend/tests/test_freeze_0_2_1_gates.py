@@ -271,7 +271,7 @@ def test_shell_env_adds_git_to_path(tmp_path, monkeypatch):
 
 def test_code_theme_overrides_vendor_background_text():
     css = (Path(__file__).resolve().parents[2] / "desktop" / "src" / "index.css").read_text(encoding="utf-8")
-    assert "color: var(--foreground)" in css
+    assert "color: var(--foreground-base)" in css
     assert "pre," in css
 
 

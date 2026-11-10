@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 import httpx
@@ -78,8 +79,19 @@ def history_tokens(history: list[m.Message]) -> int:
     return sum(estimate_tokens(_message_text(msg, 6000)) for msg in history)
 
 
+def compression_threshold(settings=None) -> int:
+    """F-005: явный порог, иначе 70% окна модели (по умолчанию 1 048 576 → ~734k)."""
+    settings = settings or get_settings()
+    if settings.compression_token_threshold and settings.compression_token_threshold > 0:
+        return int(settings.compression_token_threshold)
+    window = int(getattr(settings, "compression_context_window", 0) or 0)
+    ratio = float(getattr(settings, "compression_trigger_ratio", 0.70) or 0.70)
+    return int(window * ratio) if window > 0 else 0
+
+
 def _needs_compression(history: list[m.Message], settings) -> bool:
-    if settings.compression_token_threshold > 0 and history_tokens(history) > settings.compression_token_threshold:
+    threshold = compression_threshold(settings)
+    if threshold > 0 and history_tokens(history) > threshold:
         return True
     limit = settings.compression_hard_message_limit
     return limit > 0 and len(history) > limit
@@ -136,13 +148,72 @@ async def _summarize_with_model(pool: KeyPool, model: str, prompt: str) -> str:
     raise last_error or NoAvailableKeys("compression pool exhausted")
 
 
+_REQUIRED_SECTIONS = (
+    "Instructions",
+    "Task",
+    "Constraints",
+    "Decisions",
+    "Verified facts",
+    "Entities",
+    "Open questions",
+    "State",
+)
+_FIDELITY_RE = re.compile(r'\{\s*"ok"\s*:\s*(true|false)\s*,\s*"missing"\s*:\s*\[([^\]]*)\]\s*\}')
+
+
 def _summary_prompt(text_block: str) -> str:
     return (
-        "Сожми диалог ниже в краткое фактологическое summary для памяти агента. "
-        "Сохрани: принятые решения, важные факты, незавершённые задачи. "
-        "Не сохраняй: технический шум, повторы, приветствия.\n\n"
+        "Сожми диалог ниже в структурированное summary для памяти агента. "
+        "Сохрани смысл дословно там, где он критичен; не добавляй новых фактов.\n\n"
+        "Секции (заголовки пиши как есть):\n"
+        "Instructions:\nTask:\nConstraints:\nDecisions:\nVerified facts:\n"
+        "Entities:\nOpen questions:\nState:\n\n"
+        "В конце добавь ровно одну строку JSON-проверки целостности: "
+        '{"ok": true, "missing": []} — ok=false и список missing, если какой-то раздел потерян.\n\n'
         f"{text_block}"
     )
+
+
+def validate_summary(summary: str, original_chars: int, target_ratio: float = 0.25) -> tuple[bool, list[str]]:
+    """Redflag-валидация: обязательные секции, fidelity JSON, размер ≤ target_ratio."""
+    problems: list[str] = []
+    text = summary or ""
+    present = sum(1 for section in _REQUIRED_SECTIONS if section.lower() in text.lower())
+    if present < 5:
+        problems.append(f"required sections missing ({present}/{len(_REQUIRED_SECTIONS)})")
+    if original_chars > 0 and len(text) > max(1, int(original_chars * target_ratio)):
+        problems.append(f"summary exceeds {int(target_ratio * 100)}% of the original")
+    match = _FIDELITY_RE.search(text)
+    if match is None:
+        problems.append("fidelity check JSON is missing")
+    elif match.group(1) != "true" or match.group(2).strip():
+        problems.append("fidelity check reported missing sections")
+    return (not problems, problems)
+
+
+async def _escalate_summary(router, text_block: str, session_id=None) -> str | None:
+    """RED FLAG: переспросить сжатие у DeepSeek (база), не заменяя raw на плохую сводку."""
+    if router is None:
+        return None
+    from aria.llm.providers.base import ChatMessage
+
+    try:
+        result = await router.route_chat(
+            "standard_reasoning",
+            [ChatMessage(role="user", content=_summary_prompt(text_block))],
+            [],
+            timeout_sec=120,
+            resilient=True,
+            fallback_classes=("premium_reasoning",),
+            prefer_provider_id="deepseek-chat",
+            purpose="compress",
+            session_id=session_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — эскалация не должна ронять сжатие
+        logger.warning("compression escalation failed: %s", exc)
+        return None
+    text = (result.response.text or "").strip()
+    return text or None
 
 
 async def _summarize_via_router(router, text_block: str, session_id=None) -> str:
@@ -246,6 +317,25 @@ async def _maybe_compress_impl(session_id, router=None) -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("compression failed for session %s, leaving history uncompressed: %s", session_id, exc)
         return False
+
+    ok, problems = validate_summary(summary_text, len(text_block), settings.compression_target_ratio)
+    if not ok:
+        logger.warning(
+            "compression redflag session=%s problems=%s; escalating to DeepSeek",
+            session_id, problems,
+        )
+        escalated = await _escalate_summary(router, text_block, session_id)
+        if escalated is None:
+            logger.warning("compression redflag session=%s: escalation unavailable, keeping raw history", session_id)
+            return False
+        summary_text = escalated
+        ok, problems = validate_summary(summary_text, len(text_block), settings.compression_target_ratio)
+        if not ok:
+            logger.warning(
+                "compression redflag session=%s: escalation also invalid (%s), keeping raw history",
+                session_id, problems,
+            )
+            return False
 
     # ---- отдельная короткая сессия только на запись результата ----
     with session_scope() as db:

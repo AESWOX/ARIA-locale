@@ -41,6 +41,7 @@ import type {
   HooksResponse,
   HookEntry,
   SystemStats,
+  ToolchainStatus,
   UpdateCheckResponse,
   PortalStatus,
 } from "@/lib/api";
@@ -146,6 +147,8 @@ export default function SystemPage() {
   );
   const [hooks, setHooks] = useState<HooksResponse | null>(null);
   const [portal, setPortal] = useState<PortalStatus | null>(null);
+  const [toolchain, setToolchain] = useState<ToolchainStatus | null>(null);
+  const [installingTools, setInstallingTools] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [activeAction, setActiveAction] = useState<string | null>(null);
@@ -186,17 +189,19 @@ export default function SystemPage() {
       api.getCheckpoints(),
       api.getHooks(),
       api.getPortal(),
+      api.toolchainStatus(),
       // Cached (non-forced) check so the version row shows update status on
       // load without a separate effect / a forced network round-trip.
       api.checkARIAUpdate(false),
     ])
-      .then(([s, st, m, c, h, prt, upd]) => {
+      .then(([s, st, m, c, h, prt, tc, upd]) => {
         if (s.status === "fulfilled") setStatus(s.value);
         if (st.status === "fulfilled") setStats(st.value);
         if (m.status === "fulfilled") setMemory(m.value);
         if (c.status === "fulfilled") setCheckpoints(c.value);
         if (h.status === "fulfilled") setHooks(h.value);
         if (prt.status === "fulfilled") setPortal(prt.value);
+        if (tc.status === "fulfilled") setToolchain(tc.value);
         if (upd.status === "fulfilled") setUpdateInfo(upd.value);
       })
       .finally(() => setLoading(false));
@@ -205,6 +210,25 @@ export default function SystemPage() {
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  // ── Agent toolchain (F-009): offline "install tools" button ────────
+  const installToolchain = async () => {
+    setInstallingTools(true);
+    try {
+      const res = await api.toolchainInstall();
+      if (res.ok) {
+        showToast("Agent toolchain installed", "success");
+      } else {
+        showToast(res.error ?? "Toolchain install failed", "error");
+      }
+      if (res.status) setToolchain(res.status);
+      else setToolchain(await api.toolchainStatus());
+    } catch {
+      showToast("Toolchain install failed", "error");
+    } finally {
+      setInstallingTools(false);
+    }
+  };
 
   // ── Gateway lifecycle ──────────────────────────────────────────────
   const runGateway = async (verb: "start" | "stop" | "restart") => {
@@ -882,6 +906,31 @@ export default function SystemPage() {
             </Button>
             <Button size="sm" ghost prefix={<Database className="h-3.5 w-3.5" />} onClick={() => runOp(api.runDump, "Support dump")}>
               Support dump
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
+            <div className="flex items-start gap-2">
+              <Terminal className="h-4 w-4 mt-0.5 text-muted-foreground" />
+              <div className="flex flex-col">
+                <span className="text-sm font-medium">Agent toolchain</span>
+                <span className="text-xs text-muted-foreground max-w-prose">
+                  {toolchain?.installed
+                    ? `python ${toolchain.versions.python ?? "?"}, pytest, ruff and pip-audit are ready in ${toolchain.runtime_dir}.`
+                    : `Offline toolchain: missing ${(toolchain?.missing ?? ["python", "pytest", "ruff", "pip-audit"]).join(", ")}. Install with a network connection; without it the agent runs code only if a system Python is present.`}
+                </span>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              ghost
+              prefix={<Download className="h-3.5 w-3.5" />}
+              disabled={installingTools || Boolean(toolchain?.installed)}
+              onClick={() => void installToolchain()}
+            >
+              {installingTools ? "Installing…" : toolchain?.installed ? "Installed" : "Install tools"}
             </Button>
           </CardContent>
         </Card>

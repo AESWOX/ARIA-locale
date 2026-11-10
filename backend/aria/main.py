@@ -71,6 +71,7 @@ from aria.routers.webhooks import router as webhooks_router
 from aria.routers.system import router as system_router
 from aria.routers.tasks import router as tasks_router
 from aria.routers.tools import router as tools_router
+from aria.routers.toolchain import router as toolchain_router
 from aria.routers.vault import router as vault_router
 
 # --- Файловое логирование (иначе история живёт только в scrollback консоли
@@ -263,6 +264,7 @@ for _r in (
     system_router,
     tasks_router,
     tools_router,
+    toolchain_router,
     vault_router,
 ):
     app.include_router(_r)
@@ -336,8 +338,7 @@ async def startup() -> None:
     token_store.issue()
     seed_database()
     from aria.db.skills_seed import seed_skills
-    seed_skills()
-    # L2 prod-release: дефолтные scheduler_jobs при первом старте (идемпотентно)
+    seed_skills()    # L2 prod-release: дефолтные scheduler_jobs при первом старте (идемпотентно)
     from aria.scheduler.jobs import seed_default_scheduler_jobs
     seed_default_scheduler_jobs()
     # Register real providers from router into DB health table
@@ -357,6 +358,14 @@ async def startup() -> None:
     # S4: поисковая цепочка без ключей (Wikipedia/HN/arXiv/SE/GitHub/OpenAlex) + DDG последним.
     from aria.tools.search.providers import install_default_providers
     install_default_providers()
+
+    # F-009: managed toolchain (python/pytest/ruff/pip-audit). Онлайн — в фоне сразу,
+    # офлайн — кнопка POST /toolchain/install. Старт не ждёт установку.
+    from aria import toolchain as _toolchain
+
+    _background_tasks["toolchain_install"] = asyncio.create_task(
+        asyncio.to_thread(_toolchain.ensure_online_install)
+    )
 
     # ── TaskRunner (волна 1, A10): единая дверь для всех источников задач ──
     # UI, cron, Telegram и рой кладут задачу сюда; агент больше не исполняется

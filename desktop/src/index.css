@@ -361,8 +361,9 @@ pre,
 kbd,
 samp {
   /* Vendor globals paint code with the page background colour (text-background),
-     which is black on the Black theme. Code must always use readable foreground. */
-  color: var(--foreground);
+     which is black on the Black theme. Code must always use readable foreground.
+     F-003: `--foreground` is LENS_0 alpha 0 (invisible); use the solid base. */
+  color: var(--foreground-base);
 }
 
 *::selection {

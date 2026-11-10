@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from aria.tools.search.providers.arxiv import ArxivProvider
 from aria.tools.search.providers.ddg import DuckDuckGoProvider
+from aria.tools.search.providers.deepseek import active_deepseek_provider
 from aria.tools.search.providers.keyed import active_keyed_providers
 from aria.tools.search.providers.searxng import active_searxng_provider
 from aria.tools.search.providers.github import GitHubProvider
@@ -13,7 +14,12 @@ from aria.tools.search.providers.wikipedia import WikipediaProvider
 
 
 def build_default_providers():
-    providers = list(active_keyed_providers())
+    providers = []
+    deepseek = active_deepseek_provider()
+    if deepseek is not None:
+        # F-011: DeepSeek Search первым — тот же ключ, что у моделей (1=1).
+        providers.append(deepseek)
+    providers.extend(active_keyed_providers())
     searxng = active_searxng_provider()
     if searxng is not None:
         providers.append(searxng)

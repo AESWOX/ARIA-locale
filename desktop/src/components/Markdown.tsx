@@ -179,7 +179,7 @@ function CodeBlock({ content, caret }: { content: string; caret?: ReactNode }) {
       >
         {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
       </button>
-      <pre className="overflow-x-auto px-3 py-2.5 pr-9 text-xs font-mono leading-relaxed text-foreground">
+      <pre className="overflow-x-auto px-3 py-2.5 pr-9 text-xs font-mono leading-relaxed text-foreground-base">
         <code className="whitespace-pre">
           {content}
           {caret}

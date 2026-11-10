@@ -127,7 +127,7 @@ def test_audit_levels():
         for c in repo.list_tool_calls(db, t.id):
             repo.finish_tool_call(db, c, __import__("aria.db.enums", fromlist=["ToolStatus"]).ToolStatus.ok, output_json={"a": 1})
         light = asyncio.run(run_audit(db, s, t, r, level="light"))
-        assert light.verdict == AuditVerdict.pass_ and p["std-a"].calls == 0, "лёгкий аудит не зовёт модель"
+        assert light.verdict == AuditVerdict.pass_ and p["std-a"].calls == 1, "лёгкий аудит зовёт дешёвую модель"
 
 
 def _client(r):

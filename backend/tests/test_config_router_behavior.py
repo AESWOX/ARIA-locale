@@ -46,7 +46,7 @@ def test_get_config_hides_secrets_and_has_defaults(client):
     body = r.json()
     _assert_no_secret_fields(body)
     assert body["loop_max_iterations"] == 15
-    assert body["audit_max_attempts"] == 2
+    assert body["audit_max_attempts"] == 3
 
 
 def test_uppercase_secret_fields_are_not_exposed(client):

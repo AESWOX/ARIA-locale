@@ -20,6 +20,8 @@ export const ru: Translations = {
     auditTitle: "Отчёт аудита",
     auditVerdict: "вердикт",
     auditCriteria: "критерии приёмки",
+    attentionWaiting: "Ждём вашего решения",
+    taskLabel: "Задача:",
   },
   common: {
     save: "Сохранить",

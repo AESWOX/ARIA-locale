@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from pathlib import Path
 
 from sqlalchemy.orm import Session as OrmSession
 
@@ -62,6 +64,83 @@ def _tool_calls_detail(tool_calls: list[m.ToolCall]) -> str:
             entry["output"] = c.output_json
         lines.append(json.dumps(entry, ensure_ascii=False))
     return "\n".join(lines)
+
+
+_CODE_WRITE_TOOLS = frozenset({"file_write", "file_edit", "apply_patch"})
+
+
+def _changed_code_paths(tool_calls: list[m.ToolCall], sandbox_root: str) -> list[str]:
+    """F-004: heavy-аудит нужен только если задача меняла код/файлы."""
+    paths: list[str] = []
+    root = Path(sandbox_root or ".")
+    for call in tool_calls:
+        if call.tool_name not in _CODE_WRITE_TOOLS:
+            continue
+        data = call.input_json if isinstance(call.input_json, dict) else {}
+        raw = data.get("path") or data.get("file_path")
+        if not raw or not str(raw).lower().endswith((".py", ".pyw")):
+            continue
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = root / path
+        paths.append(str(path))
+    return paths
+
+
+def _heavy_local_checks(paths: list[str]) -> tuple[list[str], list[str], bool]:
+    """(findings, notes, heavy_available). ruff — только если реально установлен.
+
+    Без managed toolchain heavy честно деградирует: syntax/структура остаются,
+    ruff/pip-audit помечаются «не установлено», а не выдумывают «проверено».
+    """
+    findings: list[str] = []
+    notes: list[str] = []
+    from aria import toolchain
+
+    status = toolchain.probe()
+    existing = [p for p in paths if Path(p).exists()]
+    if not existing:
+        notes.append("changed files were not found on disk: ruff skipped")
+        return findings, notes, False
+    heavy_available = bool(status["versions"].get("ruff"))
+    if heavy_available:
+        ruff = toolchain.scripts_dir() / ("ruff.exe" if os.name == "nt" else "ruff")
+        command = str(ruff) if ruff.is_file() else "ruff"
+        code, out = toolchain.run(
+            [command, "check", "--output-format", "concise", "--no-cache", *existing], timeout=60
+        )
+        if code not in (0, 1):
+            notes.append(f"ruff failed: {out[:200]}")
+        elif out.strip():
+            findings.extend(out.splitlines()[:15])
+        else:
+            notes.append("ruff: no findings")
+    else:
+        notes.append("ruff is not installed: heavy checks degraded to structure")
+    if not status["versions"].get("pip-audit"):
+        notes.append("pip-audit is not installed: dependency audit skipped")
+    notes.append("pytest: not run automatically (the project test command is unknown)")
+    return findings, notes, heavy_available
+
+
+def _tier_prefer(router: ProviderRouter, tier: str) -> str | None:
+    """Light — Flash-Lite (объём), затем DeepSeek; heavy — DeepSeek (база)."""
+    try:
+        groups = router.providers_by_class.values()
+    except AttributeError:  # тестовые/fake-роутеры без каталога: цепочка класса сама выберет
+        return None
+    providers = [p for group in groups for p in group]
+    deepseek = [
+        p.provider_id for p in providers
+        if p.provider_id.startswith("deepseek") and "reasoner" not in p.provider_id
+    ]
+    if tier == "light":
+        lite = [
+            p.provider_id for p in providers
+            if "flash-lite" in str(getattr(p, "model", "")).lower()
+        ]
+        return (lite or deepseek or [None])[0]
+    return (deepseek or [None])[0]
 
 
 # PR-2: pass-маркер целиком как слово, чтобы "token"/"look" не считались успехом.
@@ -196,7 +275,7 @@ async def run_audit(
             auditor_model="structural-only",
             budget_degraded=False,
             verdict=AuditVerdict.unaudited,
-            plan_vs_fact={"objective": task.objective, "note": "no tool calls — audit is not run"},
+            plan_vs_fact={"objective": task.objective, "note": "no tool calls — audit is not run", "audit_tier": "unaudited"},
             tool_success_summary={"total": 0, "ok": 0, "error": 0, "blocked_policy": 0},
             missing_requirements=["Разговорный ход без tool calls — не расходует audit_attempt_no."],
             patch_suggestions=[],
@@ -234,6 +313,15 @@ async def run_audit(
     verdict: AuditVerdict
     patch_suggestions: list[str] = []
     auditor_model = "structural-only"
+    audit_tier = "structural"
+    same_provider = False
+
+    changed_paths = _changed_code_paths(tool_calls, settings.agent_sandbox_root)
+    heavy_findings: list[str] = []
+    heavy_notes: list[str] = []
+    heavy_available = False
+    if changed_paths:
+        heavy_findings, heavy_notes, heavy_available = _heavy_local_checks(changed_paths)
 
     if not structural_ok:
         verdict = AuditVerdict.needs_rework if attempt_no < settings.audit_max_attempts else AuditVerdict.fail_after_max_attempts
@@ -245,12 +333,18 @@ async def run_audit(
         patch_suggestions = [
             f"Критерий приёмки {cid} не выполнен: {criteria_status[cid].get('note')}" for cid in failed_by_fact
         ]
-    elif level == "light":
-        verdict = AuditVerdict.pass_  # лёгкий аудит: только структура, второй модели нет
+    elif heavy_findings:
+        # F-004: локальные инструменты (ruff) нашли дефекты — это evidence, модель не нужна.
+        audit_tier = "heavy"
+        auditor_model = "ruff"
+        verdict = AuditVerdict.needs_rework if attempt_no < settings.audit_max_attempts else AuditVerdict.fail_after_max_attempts
+        patch_suggestions = [f"ruff: {item}" for item in heavy_findings]
     else:
-        # структура в порядке — пробуем качественный проход через auditor role
+        audit_tier = "heavy" if changed_paths and heavy_available else "light"
+        # структура в порядке — качественный проход через auditor role
         if router is None:
             verdict = AuditVerdict.unaudited
+            audit_tier = "unaudited"
             budget_degraded = True
         else:
             try:
@@ -293,14 +387,16 @@ async def run_audit(
                     ),
                 ]
                 release_write_lock(db)  # BUG-5
+                prefer = auditor_prefer or _tier_prefer(router, audit_tier)
                 with timing.stage("audit_model_call"):  # вторая модель отдельно от структурной проверки
                     result = await router.route_chat(
-                        auditor_class, messages, tools=[], allow_degrade=True, db=db, prefer_provider_id=auditor_prefer,
+                        auditor_class, messages, tools=[], allow_degrade=True, db=db, prefer_provider_id=prefer,
                         resilient=True, fallback_classes=("standard_reasoning", "free_tier_reasoning"),
                         reject_empty=True,
                         purpose="audit", session_id=task.session_id, task_id=task.id,
                     )
                 auditor_model = result.provider_id
+                same_provider = result.provider_id.startswith("deepseek")
                 budget_degraded = result.degraded_to_free
                 verdict, parsed_issues = _parse_audit_verdict(result.response.text)
                 if parsed_issues:
@@ -318,8 +414,8 @@ async def run_audit(
                 budget_degraded = True
 
     logger.info(
-        "audit task=%s attempt=%s verdict=%s model=%s",
-        str(task.id)[:8], attempt_no, verdict.value, auditor_model,
+        "audit task=%s attempt=%s verdict=%s tier=%s model=%s",
+        str(task.id)[:8], attempt_no, verdict.value, audit_tier, auditor_model,
     )
     report = repo.create_audit_report(
         db,
@@ -335,6 +431,9 @@ async def run_audit(
             "tool_success_summary": tool_success_summary,
             "criteria_status": criteria_status,
             "assumptions": list(assumptions or []),
+            "audit_tier": audit_tier,
+            "audited_same_provider": same_provider,
+            "heavy_checks": {"findings": heavy_findings, "notes": heavy_notes},
         },
         tool_success_summary=tool_success_summary,
         missing_requirements=missing,

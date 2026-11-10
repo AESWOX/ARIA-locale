@@ -20,6 +20,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+import zlib
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
@@ -293,8 +294,64 @@ MAX_REDIRECTS = 5
 _TEXT_TYPES = frozenset({
     "text/html", "application/xhtml+xml", "text/plain", "text/markdown", "text/csv",
     "text/xml", "application/xml", "application/json", "application/rss+xml", "application/atom+xml",
+    "application/javascript", "text/javascript", "application/x-javascript", "application/ecmascript",
 })
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+
+def _is_textual(ctype: str) -> bool:
+    """F-010: текст, JSON (+json), XML (+xml), JS; остальное — честный отказ."""
+    ctype = (ctype or "").lower()
+    return (
+        ctype in _TEXT_TYPES
+        or ctype.startswith("text/")
+        or ctype.endswith("+json")
+        or ctype.endswith("+xml")
+    )
+
+
+def _brotli_available() -> bool:
+    try:
+        import brotli  # noqa: F401
+    except Exception:  # noqa: BLE001 — модуль необязательный
+        return False
+    return True
+
+
+def accept_encoding() -> str:
+    """Не обещаем br, если декодера нет (иначе сервер пришлёт нечитаемое)."""
+    return "gzip, deflate, br" if _brotli_available() else "gzip, deflate"
+
+
+def _inflate_limited(data: bytes, wbits: int) -> bytes:
+    obj = zlib.decompressobj(wbits)
+    return obj.decompress(data, MAX_FETCH_BYTES)
+
+
+def _decompress(data: bytes, encoding: str) -> bytes:
+    """Распаковать gzip/deflate/br по заголовку Content-Encoding (F-010)."""
+    codings = [part.strip().lower() for part in (encoding or "").split(",") if part.strip()]
+    for coding in reversed(codings):
+        if coding in ("identity",):
+            continue
+        if coding in ("gzip", "x-gzip"):
+            data = _inflate_limited(data, 16 + zlib.MAX_WBITS)
+        elif coding == "deflate":
+            try:
+                data = _inflate_limited(data, zlib.MAX_WBITS)
+            except zlib.error:
+                data = _inflate_limited(data, -zlib.MAX_WBITS)
+        elif coding in ("br", "brotli"):
+            try:
+                import brotli
+            except Exception as exc:  # noqa: BLE001
+                raise FetchError(
+                    "the server sent brotli (br) but no brotli decoder is installed"
+                ) from exc
+            data = brotli.decompress(data)[:MAX_FETCH_BYTES]
+        else:
+            raise FetchError(f"unsupported content-encoding: {coding}")
+    return data
 _BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
@@ -519,13 +576,26 @@ def _read_limited(resp, limit: int, deadline: float) -> tuple[bytes, bool]:
     return data[:limit], len(data) > limit
 
 
+_JS_APP_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__next_data__", "ng-app")
+
+
+def _looks_js_rendered(raw_html: str, extracted_text: str) -> bool:
+    """HTML без читаемого текста и с кучей <script> — почти наверняка рендерится JS."""
+    if len(extracted_text) >= 200:
+        return False
+    low = raw_html.lower()
+    if low.count("<script") >= 3:
+        return True
+    return any(marker in low for marker in _JS_APP_MARKERS)
+
+
 def _fetch_blocking(url: str, max_chars: int, etag: str | None = None, last_modified: str | None = None) -> dict:
     url = validate_public_url(url)
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.1",
         "Accept-Language": "en-US,en;q=0.8",
-        "Accept-Encoding": "identity",
+        "Accept-Encoding": accept_encoding(),
     }
     if etag:
         headers["If-None-Match"] = etag
@@ -552,12 +622,12 @@ def _fetch_blocking(url: str, max_chars: int, etag: str | None = None, last_modi
         validate_public_url(final_url)
         headers = resp.headers
         ctype = headers.get_content_type()
-        if ctype not in _TEXT_TYPES:
+        if not _is_textual(ctype):
             raise FetchError(f"unsupported content type: {ctype}")
         encoding = (headers.get("Content-Encoding") or "identity").strip().lower()
-        if encoding not in ("", "identity"):
-            raise FetchError(f"unsupported content-encoding: {encoding}")
         data, byte_truncated = _read_limited(resp, MAX_FETCH_BYTES, deadline)
+        if encoding not in ("", "identity"):
+            data = _decompress(data, encoding)
         status = getattr(resp, "status", None) or 200
         charset = headers.get_content_charset()
         resp_etag = headers.get("ETag")
@@ -565,13 +635,15 @@ def _fetch_blocking(url: str, max_chars: int, etag: str | None = None, last_modi
 
     raw = _decode(data, charset, ctype in _HTML_TYPES)
     page_date = ""
+    js_rendered = False
     if ctype in _HTML_TYPES:
         title, text, page_date = extract_readable_meta(raw)
+        js_rendered = _looks_js_rendered(raw, text)
     else:
         title, text = "", _clean_plain(raw)
 
     truncated = byte_truncated or len(text) > max_chars
-    return {
+    out = {
         "url": url,
         "final_url": final_url,
         "status": status,
@@ -583,7 +655,14 @@ def _fetch_blocking(url: str, max_chars: int, etag: str | None = None, last_modi
         "truncated": truncated,
         "etag": resp_etag,
         "last_modified": resp_last_modified,
+        "js_rendered": js_rendered,
     }
+    if js_rendered:
+        out["note"] = (
+            "No readable text was extracted: the page looks JavaScript-rendered. "
+            "ARIA does not execute JavaScript, so this is not evidence that the page has no content."
+        )
+    return out
 
 
 def _render_page(text: str, max_chars: int, focus: str | None = None) -> tuple[str, bool]:
@@ -619,7 +698,7 @@ def _render_page(text: str, max_chars: int, focus: str | None = None) -> tuple[s
 
 def _page_response(data: dict, max_chars: int, focus: str | None) -> dict:
     content, truncated = _render_page(str(data.get("content") or ""), max_chars, focus)
-    return {
+    out = {
         "url": data.get("url"),
         "final_url": data.get("final_url") or data.get("url"),
         "status": data.get("status"),
@@ -632,6 +711,12 @@ def _page_response(data: dict, max_chars: int, focus: str | None) -> dict:
         "source_trust": "untrusted",
         "notice": UNTRUSTED_NOTICE,
     }
+    if data.get("js_rendered"):
+        out["js_rendered"] = True
+        out["note"] = data.get("note") or (
+            "No readable text was extracted: the page looks JavaScript-rendered."
+        )
+    return out
 
 
 async def web_fetch(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:

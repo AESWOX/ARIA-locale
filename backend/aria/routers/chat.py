@@ -73,6 +73,11 @@ SYSTEM_PROMPT_BASE = (
     "You are in Chat mode: no tools are available in this mode. "
     "If the user asks for a tool, file, web, shell, or other action, say plainly that Chat has no tools "
     "and that they need to switch to Agent; do not claim you have no access. "
+    "Do not state counts, versions, file contents, or command results you have not actually obtained; "
+    "say you have not checked instead of guessing (F-008). "
+    "Features that answer HTTP 501 in this local build are not implemented: OAuth login, gateway, pairing, "
+    "the plugin hub, credential pool, curator, config migration, debug share, and in-app auto-update. "
+    "Say \"not implemented in this build\" instead of inventing a CLI or a workaround (F-006). "
     "Reply in the language the user writes in. Be concise and honest; say so when you are unsure."
 )
 # L0/L1: contract and persona are part of the stable system prefix (PR-1),
@@ -741,7 +746,7 @@ async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_run
     session_cost_partial = priced_messages > 0 and unpriced_messages > 0
     priced_total = sum(float(c) for c in costs if c is not None)
     context_pct = round(context_tokens / context_window * 100, 1) if context_window else None
-    threshold = int(get_settings().compression_token_threshold or 0)
+    threshold = compression.compression_threshold(get_settings())
     return {
         "context_tokens": context_tokens,
         "context_window": context_window,
@@ -1327,17 +1332,18 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
 
     with timing.stage("chat_store"):
         assistant_msg, assistant_payload = run_with_db_retry(_store_assistant)
-    if final_usage:
-        # E1: стрим идёт мимо route_chat — пишем строку ledger'а здесь, один раз.
-        from aria.llm import usage as llm_usage
+    # E1/F-016: стрим идёт мимо route_chat — пишем строку ledger'а здесь, один раз.
+    # Строка usage.jsonl пишется даже без usage (видно, что вызов был), в БД — только с токенами.
+    from aria.llm import usage as llm_usage
 
-        llm_usage.record_usage(
-            provider_id=provider.provider_id,
-            model=getattr(provider, "model", None),
-            usage=final_usage,
-            purpose="chat",
-            session_id=session_id,
-        )
+    llm_usage.record_usage(
+        provider_id=provider.provider_id,
+        model=getattr(provider, "model", None),
+        usage=final_usage,
+        purpose="chat",
+        session_id=session_id,
+        provider_class=getattr(provider, "provider_class", ""),
+    )
     emit_message_created(assistant_msg, session_id, None)
     _log_chat_timing(prepared, session_id, first_token_at)
     yield _ndjson_line(

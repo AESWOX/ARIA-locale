@@ -17,8 +17,8 @@ def request_high_risk_shell_approval(db: OrmSession, session: m.Session, task: m
     item = repo.create_attention_item(
         db,
         type_=AttentionType.high_risk_shell,
-        title=f"Подтверждение high-risk shell: {command[:60]}",
-        body_md=f"Команда классифицирована как high-risk по §14.2. Причина: {reason}",
+        title=f"Approve: {command[:60]}",
+        body_md=f"Runs:\n{command}\n\nGoal: {(task.objective or '')[:300]}",
         session=session,
         task=task,
         payload_json={

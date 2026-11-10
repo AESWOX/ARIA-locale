@@ -789,7 +789,7 @@ export default function NativeChatPage() {
             <div className="flex items-center justify-between gap-2">
               <span>
                 {runBusy(run) && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
-                {run.attention.length > 0 ? <span className="font-medium text-amber-500">Waiting for your decision</span> : <>Task: <span className="font-medium">{run.status.replace(/_/g, " ")}</span></>}
+                {run.attention.length > 0 ? <span className="font-medium text-amber-500">{t.taskSpec?.attentionWaiting ?? "Waiting for your decision"}</span> : <>{t.taskSpec?.taskLabel ?? "Task:"} <span className="font-medium">{run.status.replace(/_/g, " ")}</span></>}
               </span>
               {runBusy(run) && (
                 <Button ghost size="sm" onClick={() => void cancelRun()}>
@@ -831,10 +831,10 @@ export default function NativeChatPage() {
                 )}
                 <div className="flex gap-2">
                   <Button size="sm" disabled={decidingId !== null} onClick={() => void decide(item.id, true)}>
-                    <Check className="mr-1 h-3 w-3" /> Approve
+                    <Check className="mr-1 h-3 w-3" /> {t.taskSpec?.planApprove ?? "Approve"}
                   </Button>
                   <Button ghost size="sm" disabled={decidingId !== null} onClick={() => void decide(item.id, false)}>
-                    <X className="mr-1 h-3 w-3" /> Reject
+                    <X className="mr-1 h-3 w-3" /> {t.taskSpec?.planReject ?? "Reject"}
                   </Button>
                 </div>
               </div>

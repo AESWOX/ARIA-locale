@@ -713,6 +713,23 @@ function SessionsPagination({
   );
 }
 
+/** The server names the export (title + `.md`); use its Content-Disposition, not a fake `.json`. */
+function exportFilename(disposition: string | null, id: string): string {
+  if (disposition) {
+    const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+    if (extended?.[1]) {
+      try {
+        return decodeURIComponent(extended[1]);
+      } catch {
+        /* malformed header: fall through to the plain name */
+      }
+    }
+    const plain = /filename="([^"]+)"/i.exec(disposition);
+    if (plain?.[1]) return plain[1];
+  }
+  return `session-${id}.md`;
+}
+
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [total, setTotal] = useState(0);
@@ -1134,7 +1151,7 @@ export default function SessionsPage() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `session-${id}.json`;
+        a.download = exportFilename(res.headers.get("content-disposition"), id);
         a.click();
         URL.revokeObjectURL(url);
         showToast(t.sessions.exported ?? "Session exported", "success");

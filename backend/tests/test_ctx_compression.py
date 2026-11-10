@@ -27,7 +27,12 @@ def ctx(monkeypatch):
 
     async def fake_summarize(block: str) -> str:
         calls.append(block)
-        return "SUMMARY-TEXT"
+        return (
+            "Instructions: keep\nTask: SUMMARY-TEXT\nConstraints: none\n"
+            "Decisions: none\nVerified facts: none\nEntities: none\n"
+            "Open questions: none\nState: compressed\n"
+            '{"ok": true, "missing": []}'
+        )
 
     monkeypatch.setattr(compression, "_summarize", fake_summarize)
     # Фикстура изображает настроенное Gemini-сжатие: без пула ключей сжатие уходит через роутер (test_single_key.py).

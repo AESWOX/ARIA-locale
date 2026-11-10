@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Волна 1 (A10): размер пула TaskRunner. На 4 ГБ RAM держим 3 по умолчанию,
     # при нехватке памяти TaskRunner сам опускается до 1 воркера.
     runner_max_workers: int = 3
-    audit_max_attempts: int = 2
+    audit_max_attempts: int = 3
     # П.1.6 ТЗ: выключатель параллельного EXECUTE. False — волны DAG не собираются,
     # план исполняется строго по порядку шагов (аварийный режим для старых планов).
     plan_dag_parallel_enabled: bool = True
@@ -233,8 +233,10 @@ class Settings(BaseSettings):
     gemini_flash_models: str = ""
     gemini_pro_models: str = ""
     # 0027: автоподбор цепочек по доступным моделям (aria/llm/gemini_discovery.py, scripts/gemini_autoconfig.py).
-    # Работает, только когда цепочка не задана явно; явные GEMINI_*_MODELS всегда главнее. 0 = выключить.
     gemini_models_auto: bool = True
+    # F-005: число Google-проектов у владельца. Free-tier RPD считается на проект,
+    # поэтому суточный бакет = лимит модели × projects (Flash-Lite 500 × 10 = 5000).
+    gemini_projects: int = 10
 
     groq_api_key: str = ""
     # GROQ_API_KEYS=key1,key2,...,key10
@@ -252,19 +254,24 @@ class Settings(BaseSettings):
     # main answer pool above. Does NOT share state with gemini_api_keys. ---
     compression_enabled: bool = True
     compression_gemini_api_keys: str = ""  # falls back to gemini_api_keys if empty
-    compression_model: str = "gemini-3.8-flash"
+    compression_model: str = "gemini-3.5-flash-lite"
     compression_models: str = ""  # цепочка моделей сжатия (см. gemini_flash_models); пусто = compression_model
     compression_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     compression_timeout_sec: int = 120
     # CTX: основной триггер — оценка токенов истории сессии (порог на СЕССИЮ,
     # не на ключ Gemini: ротация ключей по квоте историю не меняет).
-    # 0 = токенный триггер выключен.
-    compression_token_threshold: int = 100_000
+    # 0 = токенный триггер выключен (тогда порог считается от окна модели).
+    compression_token_threshold: int = 0
+    # F-005/решение 10.11: окно 1 048 576; trigger 70% (~734k), hard 85% (~891k).
+    compression_context_window: int = 1_048_576
+    compression_trigger_ratio: float = 0.70
+    compression_hard_ratio: float = 0.85
     # запасной триггер по числу сообщений; 0 = выключен (раньше было 60)
     compression_hard_message_limit: int = 0
     compression_protect_first_n: int = 3
     compression_protect_last_n: int = 15
-    compression_target_ratio: float = 0.2
+    # сжатый блок ≤25% оригинала (redflag-валидация)
+    compression_target_ratio: float = 0.25
 
     agent_sandbox_root: str = paths.default_sandbox_path()
     # Папка проекта пользователя, которую агент может ТОЛЬКО читать (file_read/file_search/file_grep со scope="project").

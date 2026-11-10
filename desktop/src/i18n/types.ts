@@ -25,6 +25,7 @@ export interface Translations {
     planNoDeps: string; planNoneDeps: string; planWaves: string;
     waves: string; subtasks: string; noSubtasks: string;
     auditTitle: string; auditVerdict: string; auditCriteria: string;
+    attentionWaiting: string; taskLabel: string;
   };
 
   // ── Common ──

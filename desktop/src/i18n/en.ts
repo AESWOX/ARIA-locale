@@ -20,6 +20,8 @@ export const en: Translations = {
     auditTitle: "Audit report",
     auditVerdict: "verdict",
     auditCriteria: "acceptance criteria",
+    attentionWaiting: "Waiting for your decision",
+    taskLabel: "Task:",
   },
   common: {
     save: "Save",

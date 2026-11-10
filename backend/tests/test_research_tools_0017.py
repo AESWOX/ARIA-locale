@@ -69,8 +69,8 @@ def test_grep_reads_russian_cp1251_and_limits_results(proj):
 def test_grep_cannot_leave_the_root(proj, tmp_path):
     with pytest.raises(PathEscapeError):
         run(fh.file_grep({"pattern": "x", "glob": "../*"}, str(proj)))
-    with pytest.raises(PathEscapeError):
-        run(fh.file_grep({"pattern": "x", "path": "../"}, str(proj)))
+    escaped = run(fh.file_grep({"pattern": "x", "path": "../"}, str(proj)))
+    assert escaped["files_scanned"] == 0 and "outside the readable root" in escaped["error"]
     outside = tmp_path / "secret.txt"
     outside.write_text("parse_args secret\n", encoding="utf-8")
     try:

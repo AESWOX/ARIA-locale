@@ -1387,6 +1387,9 @@ export const api = {
   // ── Admin: Operations ───────────────────────────────────────────────
   runDoctor: () =>
     fetchJSON<ActionResponse>("/api/ops/doctor", { method: "POST" }),
+  toolchainStatus: () => fetchJSON<ToolchainStatus>("/api/toolchain/status"),
+  toolchainInstall: () =>
+    fetchJSON<ToolchainInstallResult>("/api/toolchain/install", { method: "POST" }),
   runSecurityAudit: () =>
     fetchJSON<ActionResponse>("/api/ops/security-audit", { method: "POST" }),
   runBackup: (output?: string) =>
@@ -1517,6 +1520,24 @@ export interface AuthMeResponse {
   org_id: string;
   provider: string;
   expires_at: number;
+}
+
+export interface ToolchainStatus {
+  runtime_dir: string;
+  python_path: string;
+  versions: Record<string, string | null>;
+  missing: string[];
+  installed: boolean;
+}
+
+export interface ToolchainInstallResult {
+  ok: boolean;
+  offline: boolean;
+  error?: string;
+  runtime_dir: string;
+  steps?: string[];
+  errors?: string[];
+  status?: ToolchainStatus;
 }
 
 export interface ActionResponse {

@@ -165,24 +165,39 @@ async def file_search(input_json: dict, sandbox_root: str) -> dict:
 
 
 async def file_grep(input_json: dict, sandbox_root: str) -> dict:
-    """Поиск текста (или regex) по содержимому файлов. Ответ: path, line, text."""
+    """Поиск текста (или regex) по содержимому файлов. Ответ: root, path, line, text.
+
+    ``root`` — фактический корень поиска. Если запрошенный ``path`` вне этого
+    корня, инструмент честно отвечает «недоступен», а не сканирует корень молча
+    (F-001: агент выдавал файлы проекта ARIA за чужую папку).
+    """
     root = Path(sandbox_root).resolve()
     pattern = str(input_json.get("pattern") or "")
     if not pattern:
-        return {"error": "pattern is empty"}
+        return {"error": "pattern is empty", "root": str(root)}
     use_regex = bool(input_json.get("regex"))
     flags = 0 if input_json.get("case_sensitive") else re.IGNORECASE
     try:
         rx = re.compile(pattern if use_regex else re.escape(pattern), flags)
     except re.error as exc:
-        return {"error": f"invalid regex: {exc}"}
+        return {"error": f"invalid regex: {exc}", "root": str(root)}
     glob = _check_glob(input_json.get("glob") or "**/*", root)
     limit = min(max(_as_int(input_json.get("max_results"), 100) or 100, 1), MAX_GREP_RESULTS)
     ctx = min(max(_as_int(input_json.get("context"), 0) or 0, 0), 5)
     sub = input_json.get("path")
-    base = _resolve_within(root, sub) if sub else root
+    if sub:
+        try:
+            base = _resolve_within(root, str(sub))
+        except PathEscapeError:
+            return {
+                "error": f"path is outside the readable root: {sub} (root={root})",
+                "root": str(root),
+                "files_scanned": 0,
+            }
+    else:
+        base = root
     if not base.is_dir():
-        return {"error": f"path is not a directory: {sub}"}
+        return {"error": f"path is not a directory: {sub}", "root": str(root)}
 
     matches: list[dict] = []
     files_scanned = 0
@@ -218,7 +233,7 @@ async def file_grep(input_json: dict, sandbox_root: str) -> dict:
                 break
         if truncated:
             break
-    return {"matches": matches, "truncated": truncated, "files_scanned": files_scanned}
+    return {"matches": matches, "truncated": truncated, "files_scanned": files_scanned, "root": str(root)}
 
 
 MAX_TOOL_OUTPUT_READ = 4000

@@ -336,10 +336,13 @@ class TestWebFetchExtraction:
         out = await web.web_fetch({"url": "https://example.com/file"})
         assert "unsupported content type" in out["error"] and "content" not in out
 
-    async def test_rejects_compressed_responses(self, opener):
+    async def test_decodes_compressed_responses(self, opener):
         install, _ = opener
-        install(FakeResp(b"\x1f\x8b....", extra={"Content-Encoding": "gzip"}))
-        assert "content-encoding" in (await web.web_fetch({"url": "https://example.com/"}))["error"]
+        import gzip
+
+        install(FakeResp(gzip.compress(b"<p>hello gzip</p>"), extra={"Content-Encoding": "gzip"}))
+        out = await web.web_fetch({"url": "https://example.com/"})
+        assert "error" not in out and "hello gzip" in out["content"]
 
     async def test_http_and_network_errors_are_clean_answers(self, opener):
         install, _ = opener
