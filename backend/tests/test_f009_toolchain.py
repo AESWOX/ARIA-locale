@@ -55,6 +55,7 @@ def test_install_online_uses_pinned_versions(runtime, monkeypatch):
             toolchain.scripts_dir().mkdir(parents=True, exist_ok=True)
             toolchain.venv_python().write_text("", encoding="utf-8")
             (toolchain.scripts_dir() / "ruff.exe").write_text("", encoding="utf-8")
+            (toolchain.scripts_dir() / "ruff").write_text("", encoding="utf-8")
             return 0, ""
         if "pip" in args:
             return 0, "Successfully installed"
@@ -78,13 +79,14 @@ def test_install_online_uses_pinned_versions(runtime, monkeypatch):
     assert result["ok"] is True, result
 
 
-def test_shell_env_prepends_toolchain(monkeypatch):
-    monkeypatch.setattr(toolchain, "path_entries", lambda: ["C:/app/runtime/Scripts"])
+def test_shell_env_prepends_toolchain(monkeypatch, tmp_path):
+    fake_scripts = str(tmp_path / "runtime" / "Scripts")
+    monkeypatch.setattr(toolchain, "path_entries", lambda: [fake_scripts])
 
-    env = shell.build_shell_env({"PATH": "C:/Windows/System32"})
+    env = shell.build_shell_env({"PATH": "base-path"})
 
-    assert env["PATH"].split(os.pathsep)[0].replace("\\", "/") == "C:/app/runtime/Scripts"
-    assert "C:/Windows/System32" in env["PATH"]
+    assert env["PATH"].split(os.pathsep)[0] == fake_scripts
+    assert "base-path" in env["PATH"]
 
 
 def test_auto_install_skipped_in_dev(monkeypatch, runtime):
