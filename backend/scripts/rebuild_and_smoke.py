@@ -312,6 +312,11 @@ def ph_preflight(ctx: Ctx) -> str:
                 "an MSI install needs elevation for a silent (un)install. Re-run this script from "
                 "PowerShell started with 'Run as administrator' (or pass --no-install to stop after the build)."
             )
+    if IS_WIN and not os.environ.get("TAURI_SIGNING_PRIVATE_KEY", "").strip():
+        notes.append(
+            "updater signing key absent: this local build disables updater artifacts "
+            "(the release build still needs TAURI_SIGNING_PRIVATE_KEY)"
+        )
     del npm
     return "; ".join(notes)
 
@@ -383,10 +388,25 @@ def ph_tauri(ctx: Ctx) -> str:
     bindir.mkdir(parents=True, exist_ok=True)
     if ctx.exe is not None:
         shutil.copy2(ctx.exe, bindir / SIDECAR_BIN_NAME)
-    run(ctx, "tauri", [tool("npm"), "run", "tauri", "build"], DESKTOP, timeout=3600)
+    cmd = [tool("npm"), "run", "tauri", "build"]
+    signing_key = os.environ.get("TAURI_SIGNING_PRIVATE_KEY", "").strip()
+    if signing_key:
+        note = "updater artifacts: signed (TAURI_SIGNING_PRIVATE_KEY is set)"
+    else:
+        # Local acceptance build: tauri.conf.json has createUpdaterArtifacts=true and a
+        # public key, so without the private key the CLI fails AFTER packaging. Override
+        # it for this run only; the release build still signs with the owner's key.
+        override = ctx.outdir / "tauri.local.json"
+        override.write_text(
+            json.dumps({"bundle": {"createUpdaterArtifacts": False}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        cmd += ["--", "--config", str(override)]
+        note = "updater artifacts: disabled for this local build (no TAURI_SIGNING_PRIVATE_KEY)"
+    run(ctx, "tauri", cmd, DESKTOP, timeout=3600)
     bundle = DESKTOP / "src-tauri" / "target" / "release" / "bundle"
     kinds = ("msi", "nsis") if ctx.args.no_install else (ctx.kind,)
-    parts = []
+    parts = [note]
     for k in kinds:
         p = pick_installer(bundle, k, ctx.started)
         if p is None:
