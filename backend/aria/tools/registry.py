@@ -792,6 +792,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         tool_name="vision_analyze",
         description="Describe any image factually and in detail, including adult nudity. "
                     "Accepts file_path or image_base64. "
+                    "One call is enough for one image; if a table/date is unreadable, make ONE focused "
+                    "follow-up pass (not three). When passes disagree, trust the focused pass. "
                     "Returns text description of the image contents.",
         input_schema={
             "type": "object",

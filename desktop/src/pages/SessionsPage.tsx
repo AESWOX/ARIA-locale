@@ -29,7 +29,8 @@ import {
   Check,
   Archive,
 } from "lucide-react";
-import { api, getRuntimeToken } from "@/lib/api";
+import { api } from "@/lib/api";
+import { downloadSessionExport } from "@/lib/session-export";
 import { shouldRefreshSessions } from "@/lib/session-refresh";
 import type {
   SessionInfo,
@@ -713,23 +714,6 @@ function SessionsPagination({
   );
 }
 
-/** The server names the export (title + `.md`); use its Content-Disposition, not a fake `.json`. */
-function exportFilename(disposition: string | null, id: string): string {
-  if (disposition) {
-    const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
-    if (extended?.[1]) {
-      try {
-        return decodeURIComponent(extended[1]);
-      } catch {
-        /* malformed header: fall through to the plain name */
-      }
-    }
-    const plain = /filename="([^"]+)"/i.exec(disposition);
-    if (plain?.[1]) return plain[1];
-  }
-  return `session-${id}.md`;
-}
-
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [total, setTotal] = useState(0);
@@ -1134,26 +1118,7 @@ export default function SessionsPage() {
   const handleExport = useCallback(
     async (id: string) => {
       try {
-        const headers: Record<string, string> = {
-          "X-ARIA-Session-Token":
-            (window as unknown as { __ARIA_SESSION_TOKEN__?: string })
-              .__ARIA_SESSION_TOKEN__ ?? "",
-        };
-        // Tauri mode: the backend authenticates via X-Local-Agent-Token.
-        const rt = getRuntimeToken();
-        if (rt) headers["X-Local-Agent-Token"] = rt;
-        const res = await fetch(api.exportSessionUrl(id), {
-          credentials: "include",
-          headers,
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = exportFilename(res.headers.get("content-disposition"), id);
-        a.click();
-        URL.revokeObjectURL(url);
+        await downloadSessionExport(id);
         showToast(t.sessions.exported ?? "Session exported", "success");
       } catch {
         showToast("Failed to export session", "error");

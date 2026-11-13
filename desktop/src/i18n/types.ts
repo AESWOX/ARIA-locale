@@ -191,6 +191,8 @@ export interface Translations {
     sessionDeleted: string;
     /** Optional — toast after a successful JSON export. */
     exported?: string;
+    exportChat?: string;
+    deleteChat?: string;
     failedToDelete: string;
     deleteEmpty: string;
     deleteEmptyConfirmTitle: string;

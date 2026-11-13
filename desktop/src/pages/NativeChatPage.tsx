@@ -2,6 +2,7 @@
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Check, Loader2, RotateCcw, Square, X } from "lucide-react";
 import { api } from "@/lib/api";
+import { downloadSessionExport } from "@/lib/session-export";
 import { formatLocalTime, processingSeconds } from "@/lib/message-timing";
 import { useI18n } from "@/i18n";
 import type { ChatModels, ChatMsg, ChatSessionRow, ChatStatus, ChatUsage, RunProfile, RunState } from "@/lib/api";
@@ -395,6 +396,24 @@ export default function NativeChatPage() {
     }
   };
 
+  const exportTab = async (id: string) => {
+    try {
+      await downloadSessionExport(id);
+    } catch (e) {
+      setError(errMessage(e));
+    }
+  };
+
+  const deleteTab = async (id: string) => {
+    try {
+      await api.deleteSession(id);
+      setSessions((prev) => prev.filter((row) => row.id !== id));
+      closeTab(id);
+    } catch (e) {
+      setError(errMessage(e));
+    }
+  };
+
 
   const resumeId = searchParams.get("resume");
   useEffect(() => {
@@ -632,6 +651,8 @@ export default function NativeChatPage() {
         onClose={closeTab}
         onNew={newChat}
         onRename={(id, title) => void renameTab(id, title)}
+        onExport={(id) => void exportTab(id)}
+        onDelete={(id) => void deleteTab(id)}
       />
 
       {/* ---------------- conversation ---------------- */}

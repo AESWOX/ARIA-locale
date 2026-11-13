@@ -23,6 +23,7 @@ import re
 import shlex
 from pathlib import Path
 
+from aria.config import get_settings
 from aria.tools.validators import classify_shell_command
 from aria.core.winproc import NO_WINDOW
 
@@ -169,6 +170,12 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
 
     if not approved:
         decision = classify_shell_command(command)
+        if decision != "allow" and get_settings().shell_auto_approve_sandbox:
+            from aria.tools.validators import is_sandbox_code_runner
+
+            if is_sandbox_code_runner(command):
+                # Автономный агент: свой скрипт/тесты в песочнице — не «опасное действие».
+                decision = "allow"
         if decision != "allow":
             return {
                 "status": "approval_required",

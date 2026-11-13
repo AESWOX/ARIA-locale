@@ -41,6 +41,7 @@ SHELL_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ls", "dir", "cat", "type", "pwd", "echo", "head", "tail", "wc", "sort",
         "uniq", "cut", "tr", "rg", "grep", "find", "which", "where", "tree",
+        "cd", "chdir", "ver",
         "mkdir", "touch", "cp", "copy", "mv", "move", "rm", "del", "test",
         "python", "python3", "pip", "node", "npm", "git", "pytest",
         "black", "ruff", "mypy", "tsc",
@@ -149,6 +150,41 @@ def _segment_allowed(segment: str) -> bool:
     ):
         return False
     return True
+
+
+_SANDBOX_AUTO_HEADS = frozenset({"python", "python3", "pytest", "node", "cd", "chdir", "dir", "echo", "type"})
+_SANDBOX_RUNNERS = frozenset({"python", "python3", "pytest", "node"})
+
+
+def is_sandbox_code_runner(command: str) -> bool:
+    """True: агент запускает свой скрипт/тесты в песочнице — это не «опасное действие».
+
+    Разрешены только python/pytest/node/npm run по относительным путям, без inline-кода
+    (``-c``/``-e``), без абсолютных путей/``..``/переменных, без редиректов. Всё остальное
+    (curl, powershell, rm, запуск вне песочницы) по-прежнему требует Approve.
+    """
+    if not command or is_high_risk_command(command):
+        return False
+    if "$(" in command or "`" in command or re.search(r"[<>]", command):
+        return False
+    segments = [seg for seg in _SHELL_SEPARATORS.split(command) if seg.strip()]
+    if not segments:
+        return False
+    saw_runner = False
+    for segment in segments:
+        head, args = _normalize_head(_tokens(segment))
+        if head not in _SANDBOX_AUTO_HEADS:
+            if head == "npm" and next((a for a in args if not a.startswith("-")), "") in _NPM_CODE_SUBCOMMANDS:
+                saw_runner = True
+                continue
+            return False
+        if any(_PATH_ESCAPE.search(arg) for arg in args):
+            return False
+        if head in _INTERPRETERS and any(arg in _INLINE_CODE_FLAGS for arg in args):
+            return False
+        if head in _SANDBOX_RUNNERS or head == "npm":
+            saw_runner = True
+    return saw_runner
 
 
 def classify_shell_command(command: str) -> str:

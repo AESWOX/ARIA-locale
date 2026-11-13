@@ -182,6 +182,8 @@ export const en: Translations = {
       "This permanently removes the conversation and all of its messages. This cannot be undone.",
     sessionDeleted: "Session deleted",
     exported: "Session exported",
+    exportChat: "Export chat",
+    deleteChat: "Delete chat",
     failedToDelete: "Failed to delete session",
     deleteEmpty: "Delete empty",
     deleteEmptyConfirmTitle: "Delete empty sessions?",

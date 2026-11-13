@@ -173,6 +173,8 @@ export const ru: Translations = {
       "Это безвозвратно удалит разговор и все его сообщения. Действие нельзя отменить.",
     sessionDeleted: "Сессия удалена",
     exported: "Сессия экспортирована",
+    exportChat: "Экспорт чата",
+    deleteChat: "Удалить чат",
     failedToDelete: "Не удалось удалить сессию",
     deleteEmpty: "Удалить пустые",
     deleteEmptyConfirmTitle: "Удалить пустые сессии?",

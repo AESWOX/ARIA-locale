@@ -11,6 +11,15 @@ import { ThemeProvider, initSurface } from "./themes";
 
 initSurface();
 
+// The WebView's native menu (Back/Reload/Save as/Print) is not part of ARIA and
+// "Save as" writes the HTML page into Downloads. ARIA has its own menus.
+document.addEventListener("contextmenu", (event) => event.preventDefault());
+document.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "s" || key === "p") event.preventDefault();
+});
+
 /** The splash (static markup in index.html) stays at least this long after navigation start. */
 const SPLASH_MIN_MS = 1500;
 /** If React never gets to dismiss the splash (render crash), remove it anyway. */

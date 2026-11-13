@@ -274,6 +274,9 @@ class Settings(BaseSettings):
     compression_target_ratio: float = 0.25
 
     agent_sandbox_root: str = paths.default_sandbox_path()
+    # Автономный агент: python/pytest/node по относительным путям в песочнице запускаются
+    # без пошагового Approve. Опасное (rm, powershell, сеть, пути вне песочницы) — всегда Approve.
+    shell_auto_approve_sandbox: bool = True
     # Папка проекта пользователя, которую агент может ТОЛЬКО читать (file_read/file_search/file_grep со scope="project").
     # Пусто = выключено. При agent_shell_enabled=True этот же корень становится рабочим каталогом shell.
     agent_project_root: str = Field(
