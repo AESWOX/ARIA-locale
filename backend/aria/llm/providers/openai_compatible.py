@@ -122,6 +122,7 @@ class OpenAICompatibleProvider(LlmProvider):
         api_key: str | None = None,
         key_pool: KeyPool | None = None,
         extra_payload: dict | None = None,
+        adult_ok: bool = False,
     ):
         self.provider_id = provider_id
         self.provider_class = provider_class
@@ -130,6 +131,8 @@ class OpenAICompatibleProvider(LlmProvider):
         self.api_key = api_key
         self.key_pool = key_pool
         self.extra_payload = dict(extra_payload or {})
+        # Only the owner's paid DeepSeek key is allowed for 18+ requests.
+        self.adult_ok = adult_ok
 
     def _headers(self, key: str | None) -> dict:
         headers = {"Content-Type": "application/json"}

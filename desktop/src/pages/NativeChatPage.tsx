@@ -636,6 +636,7 @@ export default function NativeChatPage() {
         focus={focus}
         onOpen={(id) => void openSession(id)}
         onNew={newChat}
+        onExport={(id) => void exportTab(id)}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
       <SessionTabs

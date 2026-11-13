@@ -1,4 +1,4 @@
-import { MessageCircle, Plus } from "lucide-react";
+import { Download, MessageCircle, Plus } from "lucide-react";
 import type { ChatSessionRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
@@ -13,6 +13,7 @@ export function ChatSessionsPanel({
   focus,
   onOpen,
   onNew,
+  onExport,
 }: {
   sessions: ChatSessionRow[];
   activeId: string | null;
@@ -21,6 +22,7 @@ export function ChatSessionsPanel({
   focus: boolean;
   onOpen: (id: string) => void;
   onNew: () => void;
+  onExport: (id: string) => void;
 }) {
   const { t } = useI18n();
   if (focus) return null;
@@ -47,22 +49,35 @@ export function ChatSessionsPanel({
                   ? "unread"
                   : null;
           return (
-            <button
+            <div
               key={session.id}
-              type="button"
-              onClick={() => onOpen(session.id)}
-              title={session.title}
               className={cn(
-                "flex w-full items-center gap-1 px-2 py-1.5 text-left text-xs hover:bg-foreground/5",
+                "group flex w-full items-center gap-1 text-left text-xs hover:bg-foreground/5",
                 session.id === activeId && "bg-foreground/10",
               )}
             >
-              <MessageCircle className="h-3 w-3 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{session.title || t.sessions.untitledSession}</span>
-              {indicator === "approve" && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />}
-              {indicator === "unread" && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />}
-              {indicator === "busy" && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground" />}
-            </button>
+              <button
+                type="button"
+                onClick={() => onOpen(session.id)}
+                title={session.title}
+                className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1.5 text-left"
+              >
+                <MessageCircle className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate">{session.title || t.sessions.untitledSession}</span>
+                {indicator === "approve" && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />}
+                {indicator === "unread" && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />}
+                {indicator === "busy" && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => onExport(session.id)}
+                title={t.sessions.exportChat ?? "Export chat"}
+                aria-label={t.sessions.exportChat ?? "Export chat"}
+                className="mr-1 shrink-0 text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100"
+              >
+                <Download className="h-3 w-3" />
+              </button>
+            </div>
           );
         })}
       </div>

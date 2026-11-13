@@ -780,6 +780,7 @@ def build_default_router() -> ProviderRouter:
                 model=settings.deepseek_chat_model,
                 api_key=settings.deepseek_api_key_resolved,
                 extra_payload=thinking_payload(settings.deepseek_chat_thinking),
+                adult_ok=True,
             )
         )
         router.register(
@@ -790,6 +791,7 @@ def build_default_router() -> ProviderRouter:
                 model=settings.deepseek_reasoner_model,
                 api_key=settings.deepseek_api_key_resolved,
                 extra_payload=thinking_payload(settings.deepseek_reasoner_thinking),
+                adult_ok=True,
             )
         )
         # B3: отдельный fallback-класс планирования. Тот же физический endpoint,
@@ -803,6 +805,7 @@ def build_default_router() -> ProviderRouter:
                 model=settings.deepseek_chat_model,
                 api_key=settings.deepseek_api_key_resolved,
                 extra_payload=thinking_payload(settings.deepseek_plan_fallback_thinking),
+                adult_ok=True,
             )
         )
 
