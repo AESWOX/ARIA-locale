@@ -11,12 +11,15 @@
     <!-- Boot splash: pure HTML + CSS (CSP forbids inline scripts), painted from the first frame so the
          window is never white. main.tsx removes it once the app has mounted. -->
     <style>
-      html, body { margin: 0; background: #041c1c; }
+      html, body { margin: 0; background: #050608; }
       #boot-splash {
         position: fixed; inset: 0; z-index: 2147483001;
         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px;
-        background: radial-gradient(ellipse at 50% 38%, #0b3b37 0%, #041c1c 62%);
-        color: #bffbe6;
+        background:
+          radial-gradient(ellipse at 50% 34%, rgba(92, 242, 196, 0.10) 0%, rgba(92, 242, 196, 0) 46%),
+          radial-gradient(ellipse at 50% 118%, rgba(96, 76, 190, 0.12) 0%, rgba(96, 76, 190, 0) 58%),
+          linear-gradient(158deg, #0c0f15 0%, #07090d 52%, #020304 100%);
+        color: #dcece7;
         font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
         transition: opacity 0.4s ease;
       }
@@ -25,7 +28,7 @@
         overflow: visible; /* the glow must not be clipped into a square */
       }
       #boot-splash .bs-ring circle { fill: none; stroke-width: 3; stroke-linecap: round; }
-      #boot-splash .bs-ring .bs-track { stroke: rgba(191, 251, 230, 0.12); }
+      #boot-splash .bs-ring .bs-track { stroke: rgba(220, 236, 231, 0.10); }
       #boot-splash .bs-ring .bs-arc {
         stroke: #5cf2c4; stroke-dasharray: 90 270; transform-origin: 66px 66px;
         animation: bs-spin 1.4s linear infinite;
@@ -37,7 +40,7 @@
         pointer-events: none;
       }
       #boot-splash .bs-ring text {
-        fill: #bffbe6; font-size: 26px; font-weight: 700; letter-spacing: 3px;
+        fill: #e7f7f1; font-size: 26px; font-weight: 700; letter-spacing: 3px;
         text-anchor: middle; dominant-baseline: central;
       }
       #boot-splash .bs-phrases { position: relative; width: min(86vw, 620px); height: 3.1em; text-align: center; font-size: 14px; letter-spacing: 0.12em; }
@@ -51,7 +54,7 @@
       #boot-splash .bs-phrases span:nth-child(3) { animation-delay: 6s; }
       #boot-splash .bs-phrases span:nth-child(4) { animation-delay: 9s; }
       #boot-splash .bs-phrases span:nth-child(5) { animation-delay: 12s; }
-      #boot-splash .bs-bar { width: 180px; height: 2px; overflow: hidden; background: rgba(191, 251, 230, 0.12); border-radius: 2px; }
+      #boot-splash .bs-bar { width: 180px; height: 2px; overflow: hidden; background: rgba(220, 236, 231, 0.10); border-radius: 2px; }
       #boot-splash .bs-bar i {
         display: block; width: 40%; height: 100%; background: #5cf2c4; border-radius: 2px;
         box-shadow: 0 0 8px rgba(92, 242, 196, 0.9); animation: bs-slide 1.3s ease-in-out infinite;

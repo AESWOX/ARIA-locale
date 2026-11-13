@@ -67,6 +67,8 @@ def _run(args: list[str], timeout: int = 120) -> tuple[int, str]:
 
 def run(args: list[str], timeout: int = 120) -> tuple[int, str]:
     """Публичный запуск инструмента: (exit_code, stdout+stderr). Не бросает."""
+    from aria.core.winproc import NO_WINDOW
+
     try:
         completed = subprocess.run(
             args,
@@ -76,6 +78,7 @@ def run(args: list[str], timeout: int = 120) -> tuple[int, str]:
             encoding="utf-8",
             errors="replace",
             check=False,
+            **NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
