@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
 from aria.db import repository as repo
 from aria.db.base import session_scope
-
 
 DEFAULT_SCHEDULER_JOBS: list[dict] = [
     {
@@ -97,6 +96,12 @@ def list_scheduler_jobs_payload() -> list[dict]:
             "timeout_sec": row.timeout_sec,
             "max_retries": row.max_retries,
             "last_run_status": row.last_run_status,
+            "urgent": bool(getattr(row, "urgent", False)),
+            "defer_until": row.defer_until.isoformat() if getattr(row, "defer_until", None) else None,
+            "deferred_note": (
+                f"отложена до {row.defer_until.strftime('%H:%M')} (экономия)"
+                if getattr(row, "defer_until", None) else None
+            ),
             "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
         }
         for row in rows
@@ -125,9 +130,8 @@ class RefreshGate:
 
 async def refresh_provider_models_job(router) -> int:
     """Fetches /models from registered providers and upserts provider_models."""
-    from datetime import datetime, timezone
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     refreshed = 0
     seen: set[str] = set()
     # Звенья цепочки одного хоста (до ~30 «провайдеров» на Gemini) получают один и тот же список: спрашиваем хост один раз.
@@ -187,6 +191,12 @@ _FIRST_SEEN: dict[str, datetime] = {}
 _BUILTIN_RUNNERS = ("expire_stale_attention_items", "refresh_provider_models")
 
 
+def _offpeak_start(now: datetime) -> datetime:
+    from aria.llm import pricing
+
+    return pricing.next_offpeak(now)
+
+
 def _next_run_after(expr: str, base: datetime) -> datetime | None:
     """Следующее срабатывание cron-выражения после base (None — выражение битое)."""
     try:
@@ -201,7 +211,6 @@ def _next_run_after(expr: str, base: datetime) -> datetime | None:
 
 def _enqueue_scheduled_task(job_name: str, objective: str, role: str, tools: list, runner) -> str | None:
     """Незарегистрированный cron-job превращается в задачу для TaskRunner."""
-    from aria.db import models as m
 
     with session_scope() as db:
         session = repo.create_session(db, title=f"cron: {job_name}"[:120], active_role=role)
@@ -214,36 +223,57 @@ def _enqueue_scheduled_task(job_name: str, objective: str, role: str, tools: lis
     return task_id
 
 
-async def run_due_jobs(router=None, runner=None) -> dict:
+async def run_due_jobs(router=None, runner=None, now: datetime | None = None) -> dict:
     """Найти jobs, у которых наступило расписание, и реально их запустить.
 
     Builtin-имена исполняются напрямую (run_scheduler_job_by_name), остальные
     кладутся задачей в TaskRunner (единая дверь, A10). ``last_run_at``
     обновляется в обоих случаях — иначе job срабатывает бесконечно.
     """
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     due: list[str] = []
     submitted: list[str] = []
 
     with session_scope() as db:
         snapshot = [
-            (str(r.job_id), r.name, r.schedule, r.last_run_at, r.objective, r.role or "general", list(r.allowed_tools or []))
+            (
+                str(r.job_id), r.name, r.schedule, r.last_run_at, r.objective, r.role or "general",
+                list(r.allowed_tools or []), bool(getattr(r, "urgent", False)), getattr(r, "defer_until", None),
+            )
             for r in repo.list_scheduler_jobs(db)
             if r.enabled
         ]
 
-    for job_id, name, schedule, last_run_at, objective, role, tools in snapshot:
+    for job_id, name, schedule, last_run_at, objective, role, tools, urgent, defer_until in snapshot:
         base = last_run_at
         if base is not None and base.tzinfo is None:
-            base = base.replace(tzinfo=timezone.utc)
+            base = base.replace(tzinfo=UTC)
         # Никогда не запускавшийся job привязываем к моменту, когда планировщик
         # впервые его увидел. Раньше якорем было «сутки назад», и свежесозданный
         # «каждый день в 9:00» срабатывал на ближайшем тике, а не в 9:00.
         anchor = base or _FIRST_SEEN.setdefault(job_id, now)
 
+        if defer_until is not None:
+            if defer_until.tzinfo is None:
+                defer_until = defer_until.replace(tzinfo=UTC)
+            if now < defer_until:
+                continue
+
         nxt = _next_run_after(schedule, anchor)
         if nxt is None or nxt > now:
             continue
+
+        # E8: несрочные job'ы в пик переносим в ближайшее off-peak, но не более чем на 6 часов.
+        from aria.llm import pricing
+
+        if pricing.tier_for(now) == "peak" and not urgent:
+            target = _offpeak_start(now)
+            if target - now <= timedelta(hours=6):
+                with session_scope() as db:
+                    repo.update_scheduler_job(
+                        db, uuid.UUID(job_id), defer_until=target, last_run_status="deferred"
+                    )
+                continue
 
         due.append(name)
         ok = False
@@ -268,6 +298,7 @@ async def run_due_jobs(router=None, runner=None) -> dict:
                 uuid.UUID(job_id),
                 last_run_at=now,
                 last_run_status="ok" if ok else "error",
+                defer_until=None,
             )
 
     return {"due": due, "submitted": submitted}

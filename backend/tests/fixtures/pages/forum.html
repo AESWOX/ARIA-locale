@@ -1,0 +1,9 @@
+<!doctype html><html><head><title>Forum: pytest fixture scope</title></head><body>
+<header><div class="menu">Login Register Search Rules FAQ</div></header>
+<section class="thread">
+<div class="post"><p>Question: why does my fixture run twice?</p><p>I use pytest 8 and a session-scoped fixture, but setup is executed twice.</p></div>
+<div class="post"><p>Answer: module-level fixture with autouse plus an explicit request can do this.</p><p>Check conftest.py and remove the duplicate autouse declaration.</p></div>
+</section>
+<aside>Related threads: fixtures, mocks, plugins, CI.</aside>
+<footer>Forum rules. Contact moderators.</footer>
+</body></html>

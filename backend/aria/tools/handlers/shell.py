@@ -17,13 +17,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
+import re
 import shlex
 from pathlib import Path
 
-from aria.tools.validators import classify_shell_command
+from aria.config import get_settings
 from aria.core.winproc import NO_WINDOW
-
+from aria.tools.validators import classify_shell_command
 
 # Дочерний процесс получает ТОЛЬКО эти переменные (default-deny, как и сама политика команд).
 # Раньше он наследовал весь os.environ родителя: ключи провайдеров, runtime-токен и PIN.
@@ -38,10 +40,126 @@ _ENV_ALLOWLIST = frozenset(
 )
 
 
+def _extra_windows_paths() -> list[str]:
+    """Каталоги Git/Node/Python, которые установщик не всегда добавляет в PATH sidecar'а."""
+    if os.name != "nt":
+        return []
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git" / "cmd",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git" / "bin",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "cmd",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "nodejs",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python311",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python312",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python313",
+    ]
+    return [str(p) for p in candidates if p.is_dir()]
+
+
+def _toolchain_paths() -> list[str]:
+    """F-009: python/pytest/ruff из managed venv приложения (если он установлен)."""
+    try:
+        from aria import toolchain
+
+        return toolchain.path_entries()
+    except Exception:  # отсутствие venv не ломает shell
+        return []
+
+
 def build_shell_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """Окружение для дочернего процесса: только allowlist (+ ``LC_*``), без секретов."""
+    """Собирает окружение для дочернего процесса: только allowlist (+ ``LC_*``), без секретов."""
     source = os.environ if base is None else base
-    return {k: v for k, v in source.items() if k.upper() in _ENV_ALLOWLIST or k.upper().startswith("LC_")}
+    env = {k: v for k, v in source.items() if k.upper() in _ENV_ALLOWLIST or k.upper().startswith("LC_")}
+    extra = _toolchain_paths() + (_extra_windows_paths() if base is None else [])
+    if extra:
+        current = env.get("PATH") or source.get("PATH") or ""
+        env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
+    return env
+
+
+def shell_executable() -> str | None:
+    """S10: на Windows команды исполняет PowerShell, не cmd/bash."""
+    if os.name != "nt":
+        return None
+    root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(candidate) if candidate.is_file() else "powershell.exe"
+
+
+_CMD_ONLY = re.compile(r"&&|\|\||%\w+%|(?:^|\s)&(?:\s|$)")
+_PS_ONLY = re.compile(
+    r"(?i)^\s*(?:Get|Set|New|Remove|Start|Stop|Test|Write|Invoke|Select|Where|ForEach|Copy|Move|"
+    r"Rename|Out|Import|Export|ConvertTo|ConvertFrom|Resolve|Join|Split|Measure|Sort|Group)-[A-Za-z]"
+)
+_PS_VAR = re.compile(r"\$env:|\$PSVersionTable|\$\w+\s*=")
+
+
+def _needs_powershell(script: str) -> bool:
+    """PowerShell нужен для кавычек, PS-командлетов и PS-переменных; простые
+    allowlist-команды (`echo`, `git status`, `whoami`) идут через cmd без задержки
+    холодного старта PowerShell."""
+    return bool('"' in script or "'" in script or _PS_ONLY.search(script) or _PS_VAR.search(script))
+
+
+def shell_program(command: str) -> tuple[str, str | None]:
+    """Возвращает (команда для запуска, интерпретатор).
+
+    PowerShell исполняет команды с кавычками, PS-командлетами и PS-переменными
+    (``-EncodedCommand``: иначе вложенные кавычки ломаются при shell=True).
+    Унаследованные cmd-операторы (``&&``, ``||``, ``%VAR%``) и простые allowlist-
+    команды остаются на cmd — PowerShell 5.1 их не понимает или стартует медленно.
+    """
+    ps = shell_executable()
+    if ps is None:
+        return command, None
+    script = command or ""
+    if _CMD_ONLY.search(script):
+        return script, None
+    if not _needs_powershell(script):
+        return script, None
+    if script.lstrip().startswith(('"', "'")):
+        script = "& " + script
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return f"{ps} -NoProfile -NonInteractive -InputFormat None -EncodedCommand {encoded}", None
+
+
+_WIN_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_ESCAPE_RE = re.compile(r"%[A-Za-z_]+%|\$HOME|\$env:|(?:^|[\\/])~[\\/]?")
+
+
+def outside_root_reason(command: str, root: Path) -> str | None:
+    """P0 A2: не выпускаем Agent-shell за пределы project root.
+
+    Ловит ``dir C:\\Windows``, ``..\\secret``, ``%USERPROFILE%``, ``~/x``.
+    Флаги вида ``/b`` не считаются путём.
+    """
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        tokens = command.split()
+    for raw in tokens:
+        tok = raw.strip("\"'")
+        if not tok or tok.startswith("-"):
+            continue
+        if _ESCAPE_RE.search(tok):
+            return f"Agent shell: environment/home paths are not allowed: {tok}"
+        candidate: Path | None = None
+        if _WIN_ABS_RE.match(tok):
+            candidate = Path(tok)
+        elif tok.startswith("/") and not (len(tok) <= 3 and tok[1:].isalpha()):
+            candidate = Path(tok)
+        elif ".." in Path(tok).parts:
+            candidate = root / tok
+        if candidate is None:
+            continue
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(root)
+        except ValueError:
+            return f"Agent shell: path outside project root is not allowed: {tok}"
+        except OSError:
+            return f"Agent shell: cannot resolve path: {tok}"
+    return None
 
 
 async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = None, *, approved: bool = False) -> dict:
@@ -51,6 +169,12 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
 
     if not approved:
         decision = classify_shell_command(command)
+        if decision != "allow" and get_settings().shell_auto_approve_sandbox:
+            from aria.tools.validators import is_sandbox_code_runner
+
+            if is_sandbox_code_runner(command):
+                # Автономный агент: свой скрипт/тесты в песочнице — не «опасное действие».
+                decision = "allow"
         if decision != "allow":
             return {
                 "status": "approval_required",
@@ -66,12 +190,15 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
         # песочница создаётся лениво: на свежем профиле её ещё нет, и спавн падал с ENOENT
         Path(cwd).mkdir(parents=True, exist_ok=True)
 
+    shell_command, executable = shell_program(command)
     proc = await asyncio.create_subprocess_shell(
-        command,
+        shell_command,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=build_shell_env(),
+        **({"executable": executable} if executable else {}),
         **NO_WINDOW,
     )
     try:
@@ -81,7 +208,7 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
             "stdout": stdout.decode(errors="replace")[-20000:],
             "stderr": stderr.decode(errors="replace")[-20000:],
         }
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except (TimeoutError, asyncio.CancelledError):
         # Cancel/Stop must not leave the child running (it used to survive until the OS reaped it).
         if proc.returncode is None:
             await asyncio.shield(_terminate_then_kill(proc))
@@ -92,7 +219,7 @@ async def _terminate_then_kill(proc: asyncio.subprocess.Process) -> None:
     proc.terminate()
     try:
         await asyncio.wait_for(proc.wait(), timeout=3)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()
 

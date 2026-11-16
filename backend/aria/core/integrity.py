@@ -8,11 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-
 
 # ═══════════════════════════════════════════════════════════════════
 # IntegrityFlag — результат работы детектора
@@ -34,11 +31,11 @@ class IntegrityFlag:
     missing_steps: list[str] = field(default_factory=list)
 
     @classmethod
-    def NAEBAL(cls, reason: str, tool_call_id: str | None = None) -> "IntegrityFlag":
+    def NAEBAL(cls, reason: str, tool_call_id: str | None = None) -> IntegrityFlag:
         return cls(kind="naebal", reason=reason, tool_call_id=tool_call_id)
 
     @classmethod
-    def ZABYL(cls, reason: str, missing_steps: list[str] | None = None) -> "IntegrityFlag":
+    def ZABYL(cls, reason: str, missing_steps: list[str] | None = None) -> IntegrityFlag:
         return cls(kind="zabyl", reason=reason, missing_steps=missing_steps or [])
 
 

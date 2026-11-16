@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import TypeVar
+
+T = TypeVar("T")
+
+_LOCK_MARKERS = ("database is locked", "database table is locked", "database is busy")
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
+
 from aria.config import get_settings
 from aria.db.models import Base
 
@@ -60,10 +67,11 @@ def run_migrations(dsn: str | None = None) -> None:
         (старая история / create_all-snapshot) -> alembic stamp head
       - alembic_version актуальная          -> no-op (upgrade head ничего не делает)
     """
-    from alembic import command
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     from sqlalchemy import inspect, text
+
+    from alembic import command
 
     settings = get_settings()
     dsn = dsn or settings.POSTGRES_DSN
@@ -102,6 +110,37 @@ def get_engine():
     return _engine
 
 
+def is_locked_error(exc: BaseException) -> bool:
+    """True for SQLite writer-lock errors (including the table-level variant)."""
+    message = str(exc).lower()
+    return any(marker in message for marker in _LOCK_MARKERS)
+
+
+def run_with_db_retry(
+    fn: Callable[[], T],
+    *,
+    attempts: int = 3,
+    delays: tuple[float, ...] = (0.2, 0.5, 1.0),
+) -> T:
+    """Run a short DB operation again when SQLite reports a writer lock.
+
+    The operation must open its own transaction: a failed commit rolls the whole
+    scope back, so re-running the callable is safe. Non-lock errors propagate at
+    once. This is a bounded retry, not a queue: after ``attempts`` the last error
+    is raised to the caller.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # only lock errors are retried
+            if not is_locked_error(exc) or attempt == attempts - 1:
+                raise
+            last_exc = exc
+            time.sleep(delays[min(attempt, len(delays) - 1)])
+    raise last_exc  # pragma: no cover - loop always returns or raises
+
+
 @contextmanager
 def session_scope() -> Iterator[OrmSession]:
     if _SessionLocal is None:
@@ -128,11 +167,11 @@ def release_write_lock(db) -> None:
         return
     try:
         db.commit()
-    except Exception:  # noqa: BLE001 - блокировка не должна ронять сам вызов модели
+    except Exception:  # блокировка не должна ронять сам вызов модели
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         import logging
 
-        logging.getLogger("local_agent.db").warning("release_write_lock: commit failed", exc_info=True)
+        logging.getLogger("local_agent.db").error("release_write_lock: commit failed", exc_info=True)

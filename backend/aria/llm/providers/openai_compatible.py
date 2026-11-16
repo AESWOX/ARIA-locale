@@ -5,12 +5,18 @@ import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 
 from aria.llm.key_pool import KeyPool, NoAvailableKeys
-from aria.llm.providers.base import ChatMessage, LlmProvider, LlmResponse, ToolCallRequest
-
+from aria.llm.providers.base import (
+    ChatMessage,
+    LlmProvider,
+    LlmResponse,
+    StreamChunk,
+    ToolCallRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,9 @@ def _log_http_error(provider_id: str, model: str, resp: httpx.Response) -> None:
 FORBIDDEN_COOLDOWN_SEC = 15 * 60
 DAILY_QUOTA_COOLDOWN_SEC = 60 * 60
 MAX_QUOTA_COOLDOWN_SEC = 24 * 60 * 60
+# PERF-1: one call must not walk the whole key pool (10 keys x 0.7 s + requests = tens of seconds).
+MAX_KEY_ATTEMPTS_PER_CALL = 3
+MAX_404_RETRIES = 1
 _RETRY_DELAY_RE = re.compile(r'"retrydelay":\s*"(\d+(?:\.\d+)?)s"')
 
 _INVALID_KEY_MARKERS = (
@@ -118,6 +127,7 @@ class OpenAICompatibleProvider(LlmProvider):
         api_key: str | None = None,
         key_pool: KeyPool | None = None,
         extra_payload: dict | None = None,
+        adult_ok: bool = False,
     ):
         self.provider_id = provider_id
         self.provider_class = provider_class
@@ -126,6 +136,8 @@ class OpenAICompatibleProvider(LlmProvider):
         self.api_key = api_key
         self.key_pool = key_pool
         self.extra_payload = dict(extra_payload or {})
+        # Only the owner's paid DeepSeek key is allowed for 18+ requests.
+        self.adult_ok = adult_ok
 
     def _headers(self, key: str | None) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -134,7 +146,9 @@ class OpenAICompatibleProvider(LlmProvider):
         return headers
 
     def _max_attempts(self) -> int:
-        return len(self.key_pool) if self.key_pool else 1
+        if not self.key_pool:
+            return 1
+        return min(len(self.key_pool), MAX_KEY_ATTEMPTS_PER_CALL)
 
     def _current_key(self) -> str | None:
         if self.key_pool:
@@ -210,7 +224,7 @@ class OpenAICompatibleProvider(LlmProvider):
 
         last_error: Exception | None = None
         _404_attempts = 0
-        max_404_retries = 4
+        max_404_retries = MAX_404_RETRIES
 
         for _ in range(max(self._max_attempts(), max_404_retries)):
             try:
@@ -262,6 +276,90 @@ class OpenAICompatibleProvider(LlmProvider):
                 raise
             else:
                 return self._parse_response(data)
+
+        raise last_error or NoAvailableKeys(f"provider '{self.provider_id}': no usable key")
+
+    async def stream(
+        self, messages: list[ChatMessage], tools: list[dict], timeout_sec: float
+    ) -> AsyncIterator[StreamChunk]:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+        payload.update(self.extra_payload)
+
+        last_error: Exception | None = None
+        _404_attempts = 0
+        max_404_retries = MAX_404_RETRIES
+
+        for _ in range(max(self._max_attempts(), max_404_retries)):
+            try:
+                key = self._current_key()
+            except NoAvailableKeys as exc:
+                last_error = exc
+                break
+
+            usage: dict = {}
+            try:
+                async with httpx.AsyncClient(timeout=timeout_sec) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers=self._headers(key),
+                        json=payload,
+                    ) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            line = line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            data_str = line[len("data:"):].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                            except json.JSONDecodeError:
+                                continue
+                            chunk_usage = data.get("usage")
+                            if chunk_usage:
+                                usage = chunk_usage
+                            delta = (data.get("choices") or [{}])[0].get("delta") or {}
+                            text = delta.get("content")
+                            if text:
+                                yield StreamChunk(text=text, final=False)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                _log_http_error(self.provider_id, self.model, exc.response)
+                if self.key_pool and key is not None:
+                    body = _error_text(exc.response)
+                    if status == 429:
+                        self.key_pool.mark_rate_limited(key, _cooldown_for_429(exc.response, body, self.key_pool.cooldown_sec))
+                        last_error = exc
+                        continue
+                    if status == 401 or (status in (400, 403) and _is_invalid_key(body)):
+                        self.key_pool.mark_dead(key)
+                        last_error = exc
+                        continue
+                    if status == 403:
+                        self.key_pool.mark_rate_limited(key, FORBIDDEN_COOLDOWN_SEC)
+                        last_error = exc
+                        continue
+                    if status == 404:
+                        _404_attempts += 1
+                        last_error = exc
+                        if _404_attempts < max_404_retries:
+                            await asyncio.sleep(0.7)
+                            continue
+                        raise
+                raise
+            else:
+                yield StreamChunk(text="", final=True, usage=usage)
+                return
 
         raise last_error or NoAvailableKeys(f"provider '{self.provider_id}': no usable key")
 

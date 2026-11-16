@@ -98,7 +98,6 @@ async def _handle_tools_call(name: str, arguments: dict[str, Any]) -> dict[str, 
 def _process_request(msg: dict) -> dict:
     """Synchronous dispatcher for a single JSON-RPC request."""
     method = msg.get("method", "")
-    msg_id = msg.get("id")
     params = msg.get("params", {})
 
     if method == "initialize":

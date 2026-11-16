@@ -8,7 +8,7 @@ qa_auditor, obsidian_keeper, housekeeping. Остальные роли прис�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -28,8 +28,19 @@ ROLE_REGISTRY: dict[str, RoleDefinition] = {
         role_id="general",
         description="Базовая роль общего назначения, диспетчеризация простых задач.",
         system_prompt_asset="prompts/general.md",
-        tool_whitelist=("read_note", "search_vault", "list_vault", "search_vault_tags", "list_decisions", "file_read", "file_search", "file_grep", "memory_search", "notebook_query", "skill_lookup", "skill_read", "web_search", "web_fetch"),
+        tool_whitelist=("read_note", "search_vault", "list_vault", "search_vault_tags", "list_decisions", "file_read", "file_search", "file_grep", "file_extract", "vision_analyze", "audio_transcribe", "memory_search", "notebook_query", "skill_lookup", "skill_read", "web_search", "web_fetch", "telegram_channel"),
         default_model_policy="standard_reasoning",
+    ),
+    "worker": RoleDefinition(
+        role_id="worker",
+        description="Worker: research, plan, act, verify, report. Code, Blender, orders; minimal changes with real command output.",
+        system_prompt_asset="prompts/worker.md",
+        tool_whitelist=("shell_execute", "file_read", "file_write", "file_search", "file_grep",
+                        "web_search", "web_fetch", "memory_search", "memory_save",
+                        "skill_lookup", "skill_read", "delegate_task", "vision_analyze", "set_mode"),
+        default_model_policy="subagent_execution",
+        can_delegate=True,
+        max_subagents=3,
     ),
     "oracle": RoleDefinition(
         role_id="oracle",
@@ -120,7 +131,7 @@ ROLE_REGISTRY: dict[str, RoleDefinition] = {
     "research": RoleDefinition(
         role_id="research", description="Веб-исследования — поиск в интернете через DuckDuckGo.",
         system_prompt_asset="prompts/research.md",
-        tool_whitelist=("web_search", "web_fetch", "file_read", "file_search", "file_grep"),
+        tool_whitelist=("web_search", "web_fetch", "telegram_channel", "file_read", "file_search", "file_grep"),
         default_model_policy="subagent_execution",
     ),
     "social_monitor": RoleDefinition(
@@ -140,8 +151,10 @@ ROLE_REGISTRY: dict[str, RoleDefinition] = {
         tool_whitelist=(), default_model_policy="standard_reasoning", enabled=False,
     ),
     "content_creative": RoleDefinition(
-        role_id="content_creative", description="Креативный контент.", system_prompt_asset="prompts/content_creative.md",
-        tool_whitelist=(), default_model_policy="standard_reasoning", enabled=False,
+        role_id="content_creative", description="Creative content: research, concepts, storyboards, card templates.",
+        system_prompt_asset="prompts/content_creative.md",
+        tool_whitelist=("web_search", "web_fetch", "memory_search", "memory_save", "read_note", "write_note", "file_write"),
+        default_model_policy="standard_reasoning",
     ),
 }
 

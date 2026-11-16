@@ -12,47 +12,362 @@ behind POST /sessions/{id}/messages for real tasks.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
+from aria import secretguard
 from aria.api.auth import require_runtime_token
 from aria.config import get_settings
-from aria.core import runprofile, timing
+from aria.core import adult_mode, content_limits, runprofile, telegram_gate, timing
+from aria.core.compliance import COMPLIANCE_TEXT
+from aria.core.persona import PERSONA_TEXT
 from aria.db import models as m
 from aria.db import repository as repo
-from aria.db.base import session_scope
-from aria.db.enums import SourceTrust
-from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
+from aria.db.base import run_with_db_retry, session_scope
+from aria.db.enums import SourceTrust, TaskStatus
+from aria.http_utils import (
+    emit_message_created,
+    emit_session_updated,
+    iso,
+    serialize_message,
+)
 from aria.llm import compression
 from aria.llm.key_pool import NoAvailableKeys
-from aria.llm.providers.base import ChatMessage
-from aria.llm.router import ProviderUnavailable, tried_suffix
+from aria.llm.providers.base import ChatMessage, LlmProvider
+from aria.llm.router import TIMEOUT_COOLDOWN_SEC, ProviderUnavailable, tried_suffix
 from aria.memory import store as memory_store
 
 logger = logging.getLogger("local_agent.chat")
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-CHAT_PROVIDER_CLASS = "free_tier_reasoning"  # Gemini Flash first, then Groq
-CHAT_FALLBACK_CLASSES = ("standard_reasoning",)  # DeepSeek chat, then Gemini Pro (A20)
+# UX-1: отдельная точка замера, чтобы тесты подменяли часы без секундомера.
+_monotonic = time.monotonic
+
+# PERF-1: the owner's working key is DeepSeek. Gemini free-tier streams through the
+# compatibility proxy can hang until the read timeout; use DeepSeek first and keep
+# the free tier as a fallback. An explicit "free" seat in the run profile still wins.
+CHAT_PROVIDER_CLASS = "standard_reasoning"
+CHAT_FALLBACK_CLASSES = ("free_tier_reasoning",)
+# PERF-1: a stuck provider must not hold the chat. First token budget p95 <= 12 s.
+CHAT_STREAM_TIMEOUT_SEC = 8
+CHAT_CALL_TIMEOUT_SEC = 6
+# PERF-1: total time spent walking stream candidates before falling back to one non-stream call.
+STREAM_TOTAL_BUDGET_SEC = 6.0
+# PERF-1: a chat fallback must not walk ten hanging models. Sensitive chats keep a longer budget.
+NONSTREAM_TOTAL_BUDGET_SEC = 20.0
+NONSTREAM_SENSITIVE_BUDGET_SEC = 30.0
 HISTORY_MESSAGES = 40
 HISTORY_CHAR_BUDGET = 60_000
 MAX_CONTENT_CHARS = 20_000
 DEFAULT_TITLES = {"", "Untitled session", "New chat"}
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT_BASE = (
     "You are ARIA, a helpful assistant running locally on the user's machine. "
+    "This application is you: its code, tools, logs and UI are your own body, not a third-party product. "
+    "Never talk about ARIA as a separate assistant and never claim you are another model. "
+    "You are in Chat mode: no tools are available in this mode. "
+    "If the user asks for a tool, file, web, shell, or other action, say plainly that Chat has no tools "
+    "and that they need to switch to Agent; do not claim you have no access. "
+    "Do not state counts, versions, file contents, or command results you have not actually obtained; "
+    "say you have not checked instead of guessing (F-008). "
+    "Features that answer HTTP 501 in this local build are not implemented: OAuth login, gateway, pairing, "
+    "the plugin hub, credential pool, curator, config migration, debug share, and in-app auto-update. "
+    "Say \"not implemented in this build\" instead of inventing a CLI or a workaround (F-006). "
     "Reply in the language the user writes in. Be concise and honest; say so when you are unsure."
+)
+# L0/L1: contract and persona are part of the stable system prefix (PR-1),
+# so the provider prompt cache keeps working. Flags off -> the previous prompt.
+SYSTEM_PROMPT = "\n\n".join(
+    part for part in (SYSTEM_PROMPT_BASE, PERSONA_TEXT, COMPLIANCE_TEXT) if part
 )
 NOT_CONFIGURED_HINT = (
     "No language model is configured. Open Keys and add a key for any provider "
     "(DeepSeek, Gemini or Groq), then send the message again."
 )
+
+
+@dataclass
+class _ChatStream:
+    stop_event: asyncio.Event
+    task: asyncio.Task | None = None
+
+
+_ACTIVE_STREAMS: dict[uuid.UUID, _ChatStream] = {}
+
+_TERMINAL_TASK_STATUSES = {
+    TaskStatus.done,
+    TaskStatus.done_unaudited,
+    TaskStatus.failed,
+    TaskStatus.cancelled,
+}
+
+# P0 A3: только эти статусы означают «задача реально идёт». awaiting_attention / needs_rework /
+# approved / draft больше не блокируют Chat→Agent молчаливым return None.
+_RUNNING_TASK_STATUSES = {TaskStatus.in_progress, TaskStatus.under_audit}
+
+
+async def _telegram_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Personal Telegram data without a linked bot: answer with a card, never from memory."""
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry"):
+        return None
+    notice = telegram_gate.blocked_notice(content, get_settings())
+    if notice is None:
+        return None
+
+    def _store() -> tuple[Any, dict[str, Any], Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            user_msg = repo.append_message(
+                db, session, role="user", content=content, source_trust=SourceTrust.trusted
+            )
+            assistant = repo.append_message(
+                db,
+                session,
+                role="assistant",
+                content=notice["text"],
+                source_trust=SourceTrust.trusted,
+                content_json={
+                    "notice": notice["notice"],
+                    "action": "connect_telegram",
+                    "action_path": "/channels",
+                },
+            )
+            session.updated_at = datetime.now(UTC)
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = content.replace("\n", " ")[:60]
+            return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
+
+    user_msg, user_payload, assistant_msg, assistant_payload = run_with_db_retry(_store)
+    emit_message_created(user_msg, session_id, None)
+    emit_message_created(assistant_msg, session_id, None)
+    return {
+        "ok": True,
+        "mode": "telegram_not_connected",
+        "user": user_payload,
+        "assistant": assistant_payload,
+    }
+
+
+async def _secrets_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """SEC-6: секрет в сообщении маскируется и не уходит ни модели, ни в инструменты."""
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry") or not secretguard.contains_secret(content):
+        return None
+    masked = secretguard.mask_secrets(content)
+    from aria.core.clarifier import detect_language
+
+    text = secretguard.notice_text(detect_language(content))
+
+    def _store() -> tuple[Any, dict[str, Any], Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            user_msg = repo.append_message(
+                db, session, role="user", content=masked, source_trust=SourceTrust.trusted
+            )
+            assistant = repo.append_message(
+                db,
+                session,
+                role="assistant",
+                content=text,
+                source_trust=SourceTrust.trusted,
+                content_json={
+                    "notice": "secret_redacted",
+                    "action": "open_settings",
+                    "action_path": "/settings",
+                },
+            )
+            session.updated_at = datetime.now(UTC)
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = masked.replace("\n", " ")[:60]
+            return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
+
+    user_msg, user_payload, assistant_msg, assistant_payload = run_with_db_retry(_store)
+    emit_message_created(user_msg, session_id, None)
+    emit_message_created(assistant_msg, session_id, None)
+    return {
+        "ok": True,
+        "mode": "secret_redacted",
+        "notice": "secret_redacted",
+        "user": user_payload,
+        "assistant": assistant_payload,
+    }
+
+
+async def _adult_gate(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
+    """Этап 3а: включение/выключение 18+ фразой, возрастная карточка и жёсткие лимиты."""
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry"):
+        return None
+    command = adult_mode.detect_command(content)
+    with session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        state = adult_mode.get_state(db, session_id)
+        history = repo.list_messages(db, session_id, limit=8)
+        last_notice = None
+        for msg in reversed(history):
+            if msg.role == "assistant" and isinstance(msg.content_json, dict):
+                last_notice = msg.content_json.get("notice")
+                break
+    yes = content.lower().strip(".! ") in {"да", "yes", "ок", "ok", "подтверждаю", "мне есть 18 лет", "мне 18"}
+    needs_confirm = adult_mode.needs_confirmation()
+    previous_user = [msg.content for msg in history if msg.role == "user" and msg.content != content]
+    violation = content_limits.check_contextual(content, previous_user)
+    adult_request = adult_mode.is_adult_request(content)
+
+    reply: tuple[str, str] | None = None
+    if violation is not None:
+        # Жёсткие лимиты проверяются до предложения режима и до любого провайдера.
+        reply = ("blocked_limits", f"Этот запрос нарушает жёсткие лимиты: {violation.reason}.")
+    elif command == "off":
+        with session_scope() as db:
+            adult_mode.set_adult(db, False, session_id=session_id, scope="global", via="chat")
+        reply = ("adult_off", "Режим 18+ выключен.")
+    elif command == "on":
+        if needs_confirm and not state.get("adult_confirmed_at"):
+            reply = ("adult_confirm", "Мне есть 18 лет. Подтверди, чтобы включить режим 18+.")
+        else:
+            with session_scope() as db:
+                adult_mode.set_adult(db, True, session_id=session_id, scope="global", mark_confirmed=True, via="chat")
+            reply = ("adult_on", "Режим 18+ включён.")
+    elif last_notice == "adult_confirm" and yes:
+        with session_scope() as db:
+            adult_mode.set_adult(db, True, session_id=session_id, scope="global", mark_confirmed=True, via="chat")
+        reply = ("adult_on", "Режим 18+ включён.")
+    elif last_notice == "adult_prompt" and yes:
+        if needs_confirm:
+            # «Да» на предложение режима — ещё не подтверждение возраста.
+            reply = ("adult_confirm", "Мне есть 18 лет. Подтверди, чтобы включить режим 18+.")
+        else:
+            with session_scope() as db:
+                adult_mode.set_adult(db, True, session_id=session_id, scope="global", mark_confirmed=True, via="chat")
+            reply = ("adult_on", "Режим 18+ включён. Повтори запрос.")
+    elif adult_request:
+        if not state.get("adult"):
+            reply = ("adult_prompt", "Включить 18+? Да / Нет")
+        elif not adult_mode.available_providers(getattr(request.app.state, "router", None)):
+            reply = ("adult_no_provider", "Нет провайдера с флагом adult_ok: взрослый запрос не отправлен.")
+
+    if reply is None:
+        return None
+    notice, text = reply
+
+    def _store() -> tuple[Any, dict[str, Any], Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            user_msg = repo.append_message(
+                db, session, role="user", content=secretguard.mask_secrets(content), source_trust=SourceTrust.trusted
+            )
+            assistant = repo.append_message(
+                db, session, role="assistant", content=text, source_trust=SourceTrust.trusted,
+                content_json={"notice": notice, "action": "adult_mode", "adult": notice != "adult_off"},
+            )
+            session.updated_at = datetime.now(UTC)
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = content.replace("\n", " ")[:60]
+            return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
+
+    user_msg, user_payload, assistant_msg, assistant_payload = run_with_db_retry(_store)
+    emit_message_created(user_msg, session_id, None)
+    emit_message_created(assistant_msg, session_id, None)
+    return {"ok": True, "mode": notice, "notice": notice, "user": user_payload, "assistant": assistant_payload}
+
+
+async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any] | None:
+    """UX-2: один автоматический режим. Короткая болтовня отвечает из чата,
+    всё остальное сразу уходит в agent-loop с function calling — без эвристики
+    «нужен ли инструмент» и без карточки уточнений.
+
+    Возвращает ответ с ``mode="agent"`` (и ``task_id``), если сессия переключена,
+    иначе None — сообщение идёт обычным чат-путём.
+    """
+    from aria.core import clarifier
+
+    content = str(payload.get("content") or "").strip()
+    if not content or payload.get("retry"):
+        return None
+    # P0 attach: файл(ы) в сообщении всегда требуют инструментов (file_read/vision).
+    has_attachments = bool(payload.get("attachments"))
+    if has_attachments:
+        logger.info("chat→agent: attachments present, switching to Agent")
+    elif clarifier.is_small_talk(content):
+        logger.debug("chat→agent skipped: small talk")
+        return None
+    runner = getattr(request.app.state, "task_runner", None)
+    if runner is None:
+        return None
+    with session_scope() as db:
+        session = repo.get_session(db, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        task = repo.get_task(db, session.current_task_id) if session.current_task_id else None
+        assistant_msg = None
+        busy_task_id = None
+        if task is not None and task.status in _RUNNING_TASK_STATUSES:
+            busy_task_id = task.id
+            assistant_msg = repo.append_message(
+                db,
+                session,
+                role="assistant",
+                content=(
+                    f"Сейчас выполняется задача {str(task.id)[:8]}. "
+                    "Нажми Cancel task или дождись завершения — тогда повторю запрос в Agent."
+                ),
+            )
+            session.updated_at = datetime.now(UTC)
+            logger.info(
+                "chat→agent suppressed: session %s has running task %s (%s)",
+                session_id, task.id, task.status,
+            )
+        else:
+            if task is not None:
+                logger.info(
+                    "chat→agent: replacing non-running task %s (%s) in session %s",
+                    task.id, task.status, session_id,
+                )
+            task = repo.create_task(
+                db,
+                session,
+                role=runprofile.root_role(runprofile.get_profile(db, session.id)),
+                objective=content,
+                draft_tz_md=f"# {content[:80]}\n",
+            )
+            repo.set_task_status(db, task, TaskStatus.approved)
+            user_msg = repo.append_message(
+                db, session, role="user", content=content, source_trust=SourceTrust.trusted
+            )
+            session.updated_at = datetime.now(UTC)
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = content.replace("\n", " ")[:60]
+            task_id = task.id
+    if assistant_msg is not None:
+        emit_message_created(assistant_msg, session_id, busy_task_id)
+        return {
+            "ok": True,
+            "mode": "agent_busy",
+            "task_id": str(busy_task_id),
+            "message": assistant_msg.content,
+        }
+    emit_message_created(user_msg, session_id, task_id)
+    queued = bool(runner.submit(task_id, mode="agent", source="ui").get("queued"))
+    return {"ok": True, "mode": "agent", "task_id": str(task_id), "queued": queued}
 
 
 def _real_provider_ids(request: Request) -> list[str]:
@@ -67,6 +382,28 @@ def _real_provider_ids(request: Request) -> list[str]:
             if not p.provider_id.startswith("stub")
         }
     )
+
+
+def _system_prompt() -> str:
+    """L0/L1/L6: flags off -> exactly the pre-ticket prompt (DoD regression).
+
+    The parts are module-level constants, so the returned string is
+    byte-identical between calls while the flags and vault/preferences.md are
+    unchanged (prompt-cache PR-1). Preferences are appended last so the earlier
+    parts keep their exact positions.
+    """
+    settings = get_settings()
+    parts = [SYSTEM_PROMPT_BASE]
+    if bool(getattr(settings, "persona_prompt_enabled", True)) and PERSONA_TEXT:
+        parts.append(PERSONA_TEXT)
+    if bool(getattr(settings, "compliance_prompt_enabled", True)) and COMPLIANCE_TEXT:
+        parts.append(COMPLIANCE_TEXT)
+    from aria.memory.preferences import stable_block
+
+    preferences_block = stable_block()
+    if preferences_block:
+        parts.append(preferences_block)
+    return "\n\n".join(parts)
 
 
 def _build_prompt(history: list[tuple[str, str]], memory_block: str = "") -> list[ChatMessage]:
@@ -104,7 +441,7 @@ def _build_prompt(history: list[tuple[str, str]], memory_block: str = "") -> lis
     # Сводки компрессии и memory_block уходят отдельным system-сообщением перед последним
     # user-ходом: OpenAI-совместимые провайдеры (DeepSeek) кэшируют по префиксу, и правка
     # первого сообщения обнуляла кэш на весь запрос.
-    messages = [ChatMessage(role="system", content=SYSTEM_PROMPT)] + [
+    messages = [ChatMessage(role="system", content=_system_prompt())] + [
         ChatMessage(role=r, content=t) for r, t in head + kept
     ]
     return _attach_dynamic(messages, _dynamic_system_block(summaries, memory_block))
@@ -138,7 +475,7 @@ def _attach_dynamic(prompt: list[ChatMessage], dynamic: str) -> list[ChatMessage
         if prompt[i].role == "user":
             insert_at = i
             break
-    return prompt[:insert_at] + [ChatMessage(role="system", content=dynamic)] + prompt[insert_at:]
+    return [*prompt[:insert_at], ChatMessage(role="system", content=dynamic), *prompt[insert_at:]]
 
 
 def _dlp_mask(prompt: list[ChatMessage], session_id: uuid.UUID) -> tuple[list[ChatMessage], bool]:
@@ -260,15 +597,27 @@ async def chat_get_profile(session_id: uuid.UUID, _: str = Depends(require_runti
     return {"profile": profile or runprofile.builtin_profile(), "saved": bool(profile)}
 
 
+@router.put("/profile")
+async def chat_put_default_profile(
+    payload: dict[str, Any], request: Request, _: str = Depends(require_runtime_token)
+) -> dict[str, Any]:
+    """Explicit "use for new chats": only this endpoint changes the default profile."""
+    profile, notes = _validated_profile(payload, request)
+    with session_scope() as db:
+        runprofile.save_default_profile(db, profile)
+    return {"profile": profile, "notes": notes}
+
+
 @router.put("/sessions/{session_id}/profile")
 async def chat_put_profile(
     session_id: uuid.UUID, payload: dict[str, Any], request: Request, _: str = Depends(require_runtime_token)
 ) -> dict[str, Any]:
     profile, notes = _validated_profile(payload, request)
+    use_for_new = str(request.query_params.get("use_for_new") or "").lower() in ("1", "true", "yes")
     with session_scope() as db:
         if repo.get_session(db, session_id) is None:
             raise HTTPException(status_code=404, detail="session not found")
-        runprofile.save_profile(db, session_id, profile)
+        runprofile.save_profile(db, session_id, profile, use_for_new=use_for_new)
     return {"profile": profile, "notes": notes}
 
 
@@ -332,22 +681,194 @@ async def chat_messages(session_id: uuid.UUID, _: str = Depends(require_runtime_
         return [serialize_message(msg) for msg in repo.list_messages(db, session_id, limit=1000)]
 
 
+@router.get("/sessions/{session_id}/usage")
+async def chat_session_usage(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Стоимость сессии и контекст по llm_usage (E1/E2/E3).
+
+    ``session_cost`` — сумма известных cost_usd строк llm_usage сессии. Если часть
+    вызовов без цены, ``session_cost_complete=False`` и ``priced=False``, но
+    ``session_cost_partial=True``: частичную сумму показываем, а не скрываем (D-38).
+    """
+    with session_scope() as db:
+        if repo.get_session(db, session_id) is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        history = repo.list_messages_for_prompt(db, session_id)
+        context_tokens = compression.history_tokens(history)
+        profile = runprofile.get_profile(db, session_id) or runprofile.builtin_profile()
+        main_seat = profile.get("main") if isinstance(profile, dict) else None
+        provider_id = main_seat.get("model") if isinstance(main_seat, dict) else None  # здесь фактически provider_id
+        context_window: int | None = None
+        if provider_id:
+            windows = [
+                int(row.context_window)
+                for row in repo.list_provider_models(db, provider_id)
+                if row.context_window
+            ]
+            context_window = min(windows) if windows else None
+        usage_rows = list(
+            db.execute(select(m.LlmUsage).where(m.LlmUsage.session_id == session_id)).scalars()
+        )
+        costs = [row.cost_usd for row in usage_rows]
+        cache_rows = [(row.prompt_hit, row.prompt_miss) for row in usage_rows]
+        total_prompt_tokens = sum(int(row.prompt_total or 0) for row in usage_rows)
+        total_completion_tokens = sum(int(row.completion or 0) for row in usage_rows)
+        total_reasoning_tokens = sum(int(row.reasoning or 0) for row in usage_rows)
+        calls = len(usage_rows)
+        call_times = [row.created_at for row in usage_rows if row.created_at]
+        by_model: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in usage_rows:
+            key = (row.provider_id, row.model or "")
+            bucket = by_model.setdefault(
+                key,
+                {
+                    "provider_id": row.provider_id,
+                    "model": row.model,
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost_usd": 0.0,
+                    "priced": True,
+                },
+            )
+            bucket["calls"] += 1
+            bucket["prompt_tokens"] += int(row.prompt_total or 0)
+            bucket["completion_tokens"] += int(row.completion or 0)
+            if row.cost_usd is None:
+                bucket["priced"] = False
+            else:
+                bucket["cost_usd"] += float(row.cost_usd)
+        models_used = sorted(
+            by_model.values(), key=lambda item: (-item["calls"], item["provider_id"], item["model"] or "")
+        )
+        for bucket in models_used:
+            bucket["cost_usd"] = round(bucket["cost_usd"], 6) if bucket["cost_usd"] else None
+    known = [(h, mi) for h, mi in cache_rows if h is not None and mi is not None]
+    cache_hits = sum(int(h) for h, _mi in known)
+    cache_total = sum(int(h) + int(mi) for h, mi in known)
+    cache_hit_ratio = round(cache_hits / cache_total, 3) if cache_total > 0 else None
+    priced_messages = sum(1 for c in costs if c is not None)
+    unpriced_messages = len(costs) - priced_messages
+    session_cost_complete = bool(costs) and unpriced_messages == 0
+    session_cost_partial = priced_messages > 0 and unpriced_messages > 0
+    priced_total = sum(float(c) for c in costs if c is not None)
+    context_pct = round(context_tokens / context_window * 100, 1) if context_window else None
+    threshold = compression.compression_threshold(get_settings())
+    return {
+        "context_tokens": context_tokens,
+        "context_window": context_window,
+        "context_pct": context_pct,
+        "context_budget": threshold or None,
+        "session_cost": round(priced_total, 6) if priced_messages else None,
+        "session_cost_complete": session_cost_complete,
+        "session_cost_partial": session_cost_partial,
+        "priced": priced_messages > 0 and session_cost_complete,
+        "priced_messages": priced_messages,
+        "unpriced_messages": unpriced_messages,
+        "cache_hit_ratio": cache_hit_ratio,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_reasoning_tokens": total_reasoning_tokens,
+        "total_tokens": total_prompt_tokens + total_completion_tokens,
+        "calls": calls,
+        "first_call_at": min(call_times).isoformat() if call_times else None,
+        "last_call_at": max(call_times).isoformat() if call_times else None,
+        "by_model": models_used,
+        "message_count": len(history),
+    }
+
+
 @router.post("/sessions/{session_id}/send")
 async def chat_send(
     session_id: uuid.UUID,
     payload: dict[str, Any],
     request: Request,
     _: str = Depends(require_runtime_token),
-) -> dict[str, Any]:
+) -> Any:
     # chat_total: весь хендлер, от запроса до сохранённого ответа (4xx/5xx считаются как errors).
     # Не декоратор: при ``from __future__ import annotations`` FastAPI разбирает аннотации в globals обёртки.
     with timing.stage("chat_total"):
+        secrets = await _secrets_notice(session_id, payload)
+        if secrets is not None:
+            if payload.get("stream"):
+                async def _secrets_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": secrets})
+
+                return StreamingResponse(
+                    _secrets_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return secrets
+        adult = await _adult_gate(session_id, payload, request)
+        if adult is not None:
+            if payload.get("stream"):
+                async def _adult_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": adult})
+
+                return StreamingResponse(
+                    _adult_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return adult
+        telegram = await _telegram_notice(session_id, payload)
+        if telegram is not None:
+            if payload.get("stream"):
+                async def _telegram_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": telegram})
+
+                return StreamingResponse(
+                    _telegram_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return telegram
+        switched = await _auto_route_to_agent(session_id, payload, request)
+        if switched is not None:
+            if payload.get("stream"):
+                async def _switched_events() -> AsyncIterator[str]:
+                    yield _ndjson_line({"type": "done", "result": switched})
+
+                return StreamingResponse(
+                    _switched_events(),
+                    media_type="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return switched
+        if payload.get("stream"):
+            return await _chat_send_stream(session_id, payload, request)
         return await _chat_send(session_id, payload, request)
 
 
-async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+@router.post("/sessions/{session_id}/stop")
+async def chat_stop(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Прервать идущую генерацию ответа; сессия остаётся живой и принимает новое сообщение."""
+    entry = _ACTIVE_STREAMS.get(session_id)
+    if entry is None:
+        return {"ok": True, "stopped": False}
+    entry.stop_event.set()
+    return {"ok": True, "stopped": True}
+
+
+@dataclass
+class _Prepared:
+    user_payload: dict[str, Any]
+    prompt: list[ChatMessage]
+    chat_class: str
+    chat_fallback: tuple[str, ...]
+    chat_prefer: str | None
+    dlp_applied: bool
+    sensitive: bool = False
+    started_monotonic: float = 0.0
+    allowed_provider_ids: frozenset[str] | None = None
+
+
+async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> _Prepared:
+    """Запись user-сообщения, сжатие истории, память и сборка промпта — общая для стрима и не-стрима."""
     t_start = time.monotonic()
+    started_monotonic = _monotonic()
     content = str(payload.get("content") or "").strip()
+    content = secretguard.mask_secrets(content)
     retry = bool(payload.get("retry"))  # re-ask using the last stored user message (no duplicate)
     if not content and not retry:
         raise HTTPException(status_code=400, detail="content required")
@@ -356,36 +877,54 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
     if not _real_provider_ids(request):
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_HINT)
 
+    # E9: детект чувствительного — по СЫРОМУ тексту, до DLP-маски.
+    from aria.core.privacy import contains_sensitive
+
     # 1) store the user message, collect history (one short DB scope)
-    with session_scope() as db:
-        session = repo.get_session(db, session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        if retry:
-            stored = repo.list_messages(db, session_id, limit=1000)
-            if not stored or stored[-1].role != "user":
-                raise HTTPException(status_code=400, detail="nothing to retry")
-            user_msg = stored[-1]
-        else:
-            user_msg = repo.append_message(db, session, role="user", content=content, source_trust=SourceTrust.trusted)
-        session.updated_at = datetime.now(timezone.utc)  # message inserts don't touch the sessions row
-        if (session.title or "") in DEFAULT_TITLES:
-            session.title = (content or user_msg.content).replace("\n", " ")[:60]
-        user_payload = serialize_message(user_msg)
+    def _store_user_message() -> tuple[Any, dict[str, Any], bool]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            if retry:
+                stored = repo.list_messages(db, session_id, limit=1000)
+                if not stored or stored[-1].role != "user":
+                    raise HTTPException(status_code=400, detail="nothing to retry")
+                stored_user = stored[-1]
+            else:
+                stored_user = repo.append_message(
+                    db, session, role="user", content=content, source_trust=SourceTrust.trusted
+                )
+            session.updated_at = datetime.now(UTC)  # message inserts don't touch the sessions row
+            if (session.title or "") in DEFAULT_TITLES:
+                session.title = (content or stored_user.content).replace("\n", " ")[:60]
+            return (
+                stored_user,
+                serialize_message(stored_user),
+                contains_sensitive(content if not retry else (stored_user.content or "")),
+            )
+
+    user_msg, user_payload, sensitive = run_with_db_retry(_store_user_message)
+    timing.record("chat_store_user", (time.monotonic() - t_start) * 1000.0)
     if not retry:
         emit_message_created(user_msg, session_id, None)
 
     # 1a) CTX: сжать старую часть истории, если она выросла выше порога токенов.
     # Вне DB-scope: сетевой вызов суммаризатора не держит writer-lock; сбой сжатия чат не роняет.
+    t_compress = time.monotonic()
     try:
         await compression.maybe_compress(session_id, request.app.state.router)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("chat: compression failed, continuing with full history")
+    timing.record("chat_compress", (time.monotonic() - t_compress) * 1000.0)
+    t_history = time.monotonic()
     with session_scope() as db:
         history = [(msg.role, msg.content) for msg in repo.list_messages_for_prompt(db, session_id, limit=5000)]
+    timing.record("chat_history", (time.monotonic() - t_history) * 1000.0)
 
     # 1b) long-term memory (H3): «запомни: …» saves a fact; relevant notes go into the system prompt.
     # Outside the DB scope above: the memory store uses its own connection.
+    t_memory = time.monotonic()
     last_user_text = content or user_payload.get("content") or ""
     memory_block = ""
     if not retry:
@@ -393,61 +932,471 @@ async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Re
         if fact and memory_store.enabled():
             try:
                 memory_store.add("fact", fact, source="user", session_id=str(session_id))
-            except Exception:  # noqa: BLE001 — память не должна ронять чат
+            except Exception:  # память не должна ронять чат
                 logger.exception("chat: could not save memory")
     if memory_store.enabled():
         memory_block = memory_store.recall_block(last_user_text)
+    timing.record("chat_memory", (time.monotonic() - t_memory) * 1000.0)
+    # Automatic vault recall: the owner should not have to ask "check notes".
+    t_vault = time.monotonic()
+    try:
+        from aria.storage.obsidian_vault import relevant_block as _vault_block
+
+        vault_block = _vault_block(last_user_text)
+    except Exception:  # notes must not break chat
+        logger.exception("chat: vault recall failed")
+        vault_block = ""
+    timing.record("chat_vault", (time.monotonic() - t_vault) * 1000.0)
+    context_blocks = "\n\n".join(block for block in (memory_block, vault_block) if block)
+    from aria.core import recall_honesty
+
+    honesty = recall_honesty.missing_note(last_user_text, [memory_block, vault_block])
+    if honesty:
+        context_blocks = "\n\n".join(block for block in (context_blocks, honesty) if block)
 
     # 2) call the model outside any DB transaction
+    t_prompt = time.monotonic()
     with session_scope() as db:
         profile = runprofile.get_profile(db, session_id)
+        adult_enabled = adult_mode.is_enabled(db, session_id)
+    allowed_provider_ids: frozenset[str] | None = None
+    if adult_enabled and adult_mode.is_adult_request(last_user_text):
+        allowed_provider_ids = frozenset(
+            p.provider_id for p in adult_mode.available_providers(request.app.state.router)
+        )
+        if not allowed_provider_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="adult_no_provider: no provider with the adult_ok flag; the request was not sent.",
+            )
     chat_class, chat_fallback, chat_prefer = runprofile.chat_target(
         profile, request.app.state.router, CHAT_PROVIDER_CLASS, CHAT_FALLBACK_CLASSES
     )
-    prompt = _build_prompt(history, memory_block)
+    if allowed_provider_ids is not None:
+        # Пин на взрослого провайдера: незамаркированные остаются только в fallback-классах,
+        # их отфильтрует роутер по allowed_provider_ids.
+        chat_prefer = next(iter(allowed_provider_ids)) if chat_prefer not in allowed_provider_ids else chat_prefer
+    prompt = _build_prompt(history, context_blocks)
     hint = runprofile.thinking_hint(profile)
+    # Language follows the user's current message, never the UI locale.
+    from aria.core.clarifier import language_instruction
+
+    language_hint = language_instruction(last_user_text)
     # PR-1: thinking_hint больше не дописывается в messages[0] — он тоже ломал кэш.
-    prompt = _attach_dynamic(prompt, hint)
+    prompt = _attach_dynamic(prompt, "\n\n".join(part for part in (hint, language_hint) if part))
     # PR-7: DLP применяется к исходящему промпту и снимается с ответа. Только чат —
     # агентский цикл не трогаем: плейсхолдеры сломали бы пути и команды в tool calls.
     prompt, dlp_applied = _dlp_mask(prompt, session_id)
+    if adult_enabled and prompt and prompt[0].role == "system":
+        from aria.core import prompt_composer
+
+        prompt[0] = ChatMessage(role="system", content=prompt_composer.compose(prompt[0].content, adult=True))
+    timing.record("chat_prompt", (time.monotonic() - t_prompt) * 1000.0)
     # всё до вызова модели (запись сообщения, сжатие, память, сборка промпта): то, что пользователь ждёт зря
     timing.record("chat_prepare", (time.monotonic() - t_start) * 1000.0)
+    return _Prepared(
+        user_payload=user_payload,
+        prompt=prompt,
+        chat_class=chat_class,
+        chat_fallback=chat_fallback,
+        chat_prefer=chat_prefer,
+        sensitive=sensitive,
+        dlp_applied=dlp_applied,
+        started_monotonic=started_monotonic,
+        allowed_provider_ids=allowed_provider_ids,
+    )
+
+
+def _log_chat_timing(prepared: _Prepared, session_id: uuid.UUID, first_token_at: float | None = None) -> float:
+    """UX-1: одна строка на готовый ответ чата, включая стрим. Без текстов сообщений."""
+    now = _monotonic()
+    total_ms = max(0.0, (now - prepared.started_monotonic) * 1000.0)
+    first_ms = (
+        total_ms
+        if first_token_at is None
+        else max(0.0, (first_token_at - prepared.started_monotonic) * 1000.0)
+    )
+    logger.info(
+        "chat_timing first_token_ms=%.0f total_ms=%.0f session_id=%s",
+        first_ms,
+        total_ms,
+        str(session_id)[:8],
+    )
+    return total_ms
+
+
+async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> dict[str, Any]:
+    """Полный не-стрим ответ: route_chat + DLP-restore + проверки + запись ассистента."""
+    budget = NONSTREAM_SENSITIVE_BUDGET_SEC if prepared.sensitive else NONSTREAM_TOTAL_BUDGET_SEC
     try:
-        result = await request.app.state.router.route_chat(
-            chat_class,
-            prompt,
-            [],
-            timeout_sec=60,
-            resilient=True,
-            fallback_classes=chat_fallback,
-            prefer_provider_id=chat_prefer,
-            reject_empty=True,
+        result = await asyncio.wait_for(
+            request.app.state.router.route_chat(
+                prepared.chat_class,
+                prepared.prompt,
+                [],
+                timeout_sec=CHAT_CALL_TIMEOUT_SEC,
+                resilient=True,
+                fallback_classes=prepared.chat_fallback,
+                prefer_provider_id=prepared.chat_prefer,
+                reject_empty=True,
+                purpose="chat",
+                session_id=session_id,
+                sensitive=prepared.sensitive,
+                allowed_provider_ids=prepared.allowed_provider_ids,
+            ),
+            timeout=budget,
         )
-    except Exception as exc:  # noqa: BLE001 - mapped to a clear HTTP error below
+    except TimeoutError as exc:
+        logger.warning("chat: non-stream budget %.0fs exhausted", budget)
+        raise HTTPException(
+            status_code=504,
+            detail="The model did not answer in time. Try again.",
+        ) from exc
+    except Exception as exc:  # mapped to a clear HTTP error below
         logger.warning("chat: model call failed: %s", exc)
         raise _explain_llm_error(exc) from exc
     reply = (result.response.text or "").strip()
-    if dlp_applied and reply:
+    if prepared.dlp_applied and reply:
         reply = _dlp_restore(reply, session_id)
     if not reply:
         raise HTTPException(status_code=502, detail="The model returned an empty answer. Try again.")
     if result.provider_id.startswith("stub"):
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_HINT)
 
+    # 19.6a: usage из ответа провайдера — для /usage и стоимости сессии.
+    provider = request.app.state.router.find_provider(result.provider_id)
+    assistant_meta = {
+        "model": getattr(provider, "model", None),
+        "provider_id": result.provider_id,
+        "usage": dict(result.response.usage or {}),
+    }
+    # L0 §4: диагностика отказа — только строка в лог, без повторных вызовов и без текста.
+    if bool(getattr(get_settings(), "refusal_detection_enabled", True)):
+        from aria.core.refusal import (
+            finish_reason_from_response,
+            is_model_refusal,
+            log_refusal,
+        )
+
+        if is_model_refusal(
+            reply,
+            has_tool_calls=bool(getattr(result.response, "tool_calls", None)),
+            finish_reason=finish_reason_from_response(result.response),
+        ):
+            log_refusal(
+                session_id=session_id,
+                provider=result.provider_id,
+                model=getattr(provider, "model", None),
+            )
+
     # 3) store the assistant message
-    with timing.stage("chat_store"), session_scope() as db:
-        session = repo.get_session(db, session_id)
-        if session is None:  # deleted while the model was thinking
-            raise HTTPException(status_code=404, detail="session was deleted")
-        assistant_msg = repo.append_message(db, session, role="assistant", content=reply, source_trust=SourceTrust.trusted)
-        session.updated_at = datetime.now(timezone.utc)
-        assistant_payload = serialize_message(assistant_msg)
+    def _store_assistant() -> tuple[Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            if session is None:  # deleted while the model was thinking
+                raise HTTPException(status_code=404, detail="session was deleted")
+            stored = repo.append_message(
+                db,
+                session,
+                role="assistant",
+                content=reply,
+                source_trust=SourceTrust.trusted,
+                content_json=assistant_meta,
+            )
+            session.updated_at = datetime.now(UTC)
+            return stored, serialize_message(stored)
+
+    with timing.stage("chat_store"):
+        assistant_msg, assistant_payload = run_with_db_retry(_store_assistant)
     emit_message_created(assistant_msg, session_id, None)
+    _log_chat_timing(prepared, session_id)
     return {
-        "user": user_payload,
+        "user": prepared.user_payload,
         "assistant": assistant_payload,
         "provider_id": result.provider_id,
         "degraded": bool(result.degraded_to_free),
         "fallback": bool(result.fallback),
     }
+
+
+async def _chat_send(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    prepared = await _prepare_chat(session_id, payload, request)
+    return await _run_nonstream(session_id, request, prepared)
+
+
+def _ndjson_line(obj: dict[str, Any]) -> str:
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+def _stream_candidates(request: Request, prepared: _Prepared) -> list[LlmProvider]:
+    """PERF-1: stream failover order — preferred, then healthy class providers, then cooling ones."""
+    llm_router = getattr(request.app.state, "router", None)
+    if llm_router is None:
+        return []
+    seen: set[str] = set()
+    first: list[LlmProvider] = []
+    rest: list[LlmProvider] = []
+
+    allowed = getattr(prepared, "allowed_provider_ids", None)
+
+    def add(provider: LlmProvider | None, target: list[LlmProvider]) -> None:
+        if provider is None or provider.provider_id.startswith("stub"):
+            return
+        if allowed is not None and provider.provider_id not in allowed:
+            return
+        if provider.provider_id in seen:
+            return
+        seen.add(provider.provider_id)
+        target.append(provider)
+
+    if prepared.chat_prefer:
+        add(llm_router.find_provider(prepared.chat_prefer), first)
+    for cls in (prepared.chat_class, *prepared.chat_fallback):
+        for provider in llm_router.providers_by_class.get(cls, []):
+            add(provider, rest)
+    healthy = [p for p in rest if not llm_router.is_cooling(p)]
+    cooling = [p for p in rest if llm_router.is_cooling(p)]
+    return first + healthy + cooling
+
+
+def _pick_stream_provider(request: Request, prepared: _Prepared) -> LlmProvider | None:
+    """First stream candidate: preferred model, then a healthy provider of the class chain."""
+    candidates = _stream_candidates(request, prepared)
+    return candidates[0] if candidates else None
+
+
+async def _chat_send_stream(session_id: uuid.UUID, payload: dict[str, Any], request: Request) -> StreamingResponse:
+    prepared = await _prepare_chat(session_id, payload, request)
+    return StreamingResponse(
+        _stream_events(session_id, request, prepared),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Prepared) -> AsyncIterator[str]:
+    """NDJSON: {"type":"delta","text":"…"} … {"type":"done","result":{…}} / {"type":"error",…}.
+
+    Любой сбой стрима — не-стрим fallback через ``_run_nonstream``; тогда клиент получает только
+    ``done`` с полным ответом (частичные delta до этого отбрасываются фронтендом).
+
+    Stop (19.2): ``provider.stream()`` идёт в отдельной задаче; генератор гоняется с stop-событием
+    сессии и при Stop отменяет задачу, отдавая ``{"type":"stopped"}`` без сохранения ассистента.
+    """
+    candidates = _stream_candidates(request, prepared)
+    if not candidates or prepared.dlp_applied or prepared.sensitive:
+        result = await _run_nonstream(session_id, request, prepared)
+        yield _ndjson_line({"type": "done", "result": result})
+        return
+
+    stop_event = asyncio.Event()
+    reply_parts: list[str] = []
+    final_usage: dict = {}
+    first_token_at: float | None = None
+    stopped = False
+    provider: LlmProvider | None = None
+    stream_deadline = time.monotonic() + STREAM_TOTAL_BUDGET_SEC
+
+    async def fallback_lines() -> AsyncIterator[str]:
+        """Non-stream fallback inside an already-started stream: errors become NDJSON, not a reset."""
+        try:
+            result = await _run_nonstream(session_id, request, prepared)
+        except HTTPException as exc:
+            yield _ndjson_line({"type": "error", "status": exc.status_code, "message": str(exc.detail)})
+        except Exception:  # the stream is already open
+            logger.exception("chat: non-stream fallback failed")
+            yield _ndjson_line({"type": "error", "status": 502, "message": "The model call failed."})
+        else:
+            yield _ndjson_line({"type": "done", "result": result})
+
+    for candidate in candidates:
+        remaining = stream_deadline - time.monotonic()
+        if remaining <= 0:
+            logger.info("chat: stream budget exhausted before %s, using non-stream", candidate.provider_id)
+            break
+        if stop_event.is_set():
+            stopped = True
+            break
+        provider = candidate
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        entry = _ChatStream(stop_event=stop_event)
+        _ACTIVE_STREAMS[session_id] = entry
+
+        async def consume(target: LlmProvider = candidate, sink: asyncio.Queue = queue) -> None:
+            try:
+                async for chunk in target.stream(prepared.prompt, [], CHAT_STREAM_TIMEOUT_SEC):
+                    await sink.put(("chunk", chunk))
+                    if chunk.final:
+                        return
+                await sink.put(("end", None))
+            except Exception as exc:  # try the next provider, then non-stream
+                await sink.put(("error", exc))
+
+        entry.task = asyncio.create_task(consume())
+        attempt_failed = False
+        got_delta = False
+        try:
+            while True:
+                getter = asyncio.ensure_future(queue.get())
+                stopper = asyncio.ensure_future(stop_event.wait())
+                await asyncio.wait(
+                    {getter, stopper},
+                    timeout=max(0.001, remaining),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not getter.done() and not stopper.done():
+                    attempt_failed = True
+                    getter.cancel()
+                    break
+                if stopper.done():
+                    stopped = True
+                    getter.cancel()
+                    break
+                stopper.cancel()
+                kind, payload = getter.result()
+                if kind == "error":
+                    attempt_failed = True
+                    break
+                if kind == "end":
+                    break
+                chunk = payload
+                if chunk.text and not chunk.final:
+                    if first_token_at is None:
+                        first_token_at = _monotonic()
+                    got_delta = True
+                    reply_parts.append(chunk.text)
+                    yield _ndjson_line({"type": "delta", "text": chunk.text})
+                if chunk.final:
+                    final_usage = dict(chunk.usage or {})
+                    break
+        finally:
+            entry.task.cancel()
+            _ACTIVE_STREAMS.pop(session_id, None)
+
+        if stopped:
+            break
+        if attempt_failed:
+            try:
+                request.app.state.router.mark_failed(candidate, TIMEOUT_COOLDOWN_SEC)
+            except Exception:  # cooling is best-effort
+                pass
+            logger.warning("chat: stream failed on %s, trying the next provider", candidate.provider_id)
+            if got_delta:
+                # Частичный текст уже ушёл в UI; полный не-стрим ответ заменит его.
+                async for line in fallback_lines():
+                    yield line
+                return
+            continue
+        if "".join(reply_parts).strip():
+            break
+        try:
+            request.app.state.router.mark_failed(candidate, TIMEOUT_COOLDOWN_SEC)
+        except Exception:  # cooling is best-effort
+            pass
+        logger.warning("chat: %s produced an empty stream, trying the next provider", candidate.provider_id)
+
+    if stopped:
+        yield _ndjson_line({"type": "stopped"})
+        return
+
+    if not "".join(reply_parts).strip():
+        async for line in fallback_lines():
+            yield line
+        return
+
+    reply = "".join(reply_parts).strip()
+    if not reply or provider is None or provider.provider_id.startswith("stub"):
+        async for line in fallback_lines():
+            yield line
+        return
+
+    # L0 §4/T12: в стриме finish_reason недоступен; детекция по собранному тексту.
+    if bool(getattr(get_settings(), "refusal_detection_enabled", True)):
+        from aria.core.refusal import is_model_refusal, log_refusal
+
+        if is_model_refusal(reply):
+            log_refusal(
+                session_id=session_id,
+                provider=provider.provider_id,
+                model=getattr(provider, "model", None),
+            )
+
+    def _store_assistant() -> tuple[Any, dict[str, Any]]:
+        with session_scope() as db:
+            session = repo.get_session(db, session_id)
+            if session is None:  # deleted while the model was streaming
+                raise HTTPException(status_code=404, detail="session was deleted")
+            stored = repo.append_message(
+                db,
+                session,
+                role="assistant",
+                content=reply,
+                source_trust=SourceTrust.trusted,
+                content_json={
+                    "model": getattr(provider, "model", None),
+                    "provider_id": provider.provider_id,
+                    "usage": final_usage,
+                },
+            )
+            session.updated_at = datetime.now(UTC)
+            return stored, serialize_message(stored)
+
+    with timing.stage("chat_store"):
+        assistant_msg, assistant_payload = run_with_db_retry(_store_assistant)
+    total_ms = _log_chat_timing(prepared, session_id, first_token_at)
+    # E1/F-016: стрим идёт мимо route_chat — пишем строку ledger'а здесь, один раз.
+    # Строка usage.jsonl пишется даже без usage (видно, что вызов был), в БД — только с токенами.
+    from aria.llm import usage as llm_usage
+
+    llm_usage.record_usage(
+        provider_id=provider.provider_id,
+        model=getattr(provider, "model", None),
+        usage=final_usage,
+        purpose="chat",
+        session_id=session_id,
+        provider_class=getattr(provider, "provider_class", ""),
+        ms=total_ms,
+    )
+    emit_message_created(assistant_msg, session_id, None)
+    yield _ndjson_line(
+        {
+            "type": "done",
+            "result": {
+                "user": prepared.user_payload,
+                "assistant": assistant_payload,
+                "provider_id": provider.provider_id,
+                "degraded": False,
+                "fallback": False,
+            },
+        }
+    )
+
+
+@router.get("/modes")
+async def get_modes(request: Request, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    with session_scope() as db:
+        state = adult_mode.get_state(db)
+    return {
+        "adult": bool(state.get("adult")),
+        "adult_scope": state.get("adult_scope", "session"),
+        "adult_confirmed_at": state.get("adult_confirmed_at"),
+        "needs_confirmation": adult_mode.needs_confirmation(),
+        "providers": [p.provider_id for p in adult_mode.available_providers(getattr(request.app.state, "router", None))],
+    }
+
+
+@router.post("/modes")
+async def set_modes(payload: dict[str, Any], request: Request, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    enabled = bool(payload.get("adult"))
+    scope = str(payload.get("adult_scope") or "global")
+    if scope not in ("session", "global"):
+        raise HTTPException(status_code=400, detail="adult_scope must be session or global")
+    confirm = bool(payload.get("confirm"))
+    if enabled and adult_mode.needs_confirmation() and not confirm:
+        return {"ok": False, "needs_confirmation": True, "message": "Мне есть 18 лет"}
+    with session_scope() as db:
+        state = adult_mode.set_adult(
+            db, enabled, scope=scope, mark_confirmed=enabled and confirm, via="ui"
+        )
+    return {"ok": True, "adult": bool(state.get("adult")), "adult_scope": state.get("adult_scope"),
+            "adult_confirmed_at": state.get("adult_confirmed_at")}

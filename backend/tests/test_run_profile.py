@@ -13,7 +13,7 @@ from aria.core.audit import run_audit
 from aria.core.loop import execute_agent_loop
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import AuditVerdict, TaskStatus
+from aria.db.enums import AuditVerdict, TaskStatus, ToolStatus
 from aria.llm.providers.stub import StubProvider, final_answer
 from aria.llm.router import ProviderRouter
 from aria.routers import chat as chat_mod
@@ -68,6 +68,26 @@ def test_normalize_validates_and_applies_72_rule():
         raise AssertionError(f"{bad} was accepted")
 
 
+def test_legacy_audit_off_migrates_to_strict_and_explicit_off_is_kept():
+    """L4: 112/112 saved profiles had audit=off before an explicit choice existed.
+
+    A saved profile without the explicit flag is legacy: agent tasks audit strict.
+    An owner who re-saves audit=off marks the choice explicit and is not overridden.
+    """
+    legacy = {"style": "solo", "audit": "off", "thinking": "off", "main": {}, "workers": {}, "auditor": {}}
+    assert runprofile.audit_settings(legacy, router=None)[0] == "strict"
+    assert runprofile.migrate_profile(legacy)["audit"] == "strict"
+
+    explicit = {**legacy, "audit_explicit": True}
+    assert runprofile.audit_settings(explicit, router=None)[0] == "off"
+    assert runprofile.migrate_profile(explicit)["audit"] == "off"
+
+
+def test_a_user_save_marks_the_audit_choice_explicit():
+    prof, _notes = runprofile.normalize({"style": "solo", "audit": "off"}, router=None)
+    assert prof["audit"] == "off" and prof["audit_explicit"] is True
+
+
 def test_loop_uses_chosen_model_and_falls_back_when_missing():
     r, p = _router(("std-a", "standard_reasoning"), ("free-a", "free_tier_reasoning"))
     sid, tid = _session_task()
@@ -93,7 +113,7 @@ def test_workers_use_workers_seat_and_not_pricier_than_boss():
     # исполнение: даже если в сохранённом профиле исполнитель дороже (старые данные) — берётся модель босса
     bad = {"style": "boss", "main": {"model": "std-a"}, "workers": {"model": "prem-a"}}
     assert runprofile.resolve_for_task(bad, "subagent_execution", 1, r) == ("standard_reasoning", "std-a")
-    assert runprofile.root_role(prof) == "orchestrator" and runprofile.root_role({"style": "solo"}) == "general"
+    assert runprofile.root_role(prof) == "orchestrator" and runprofile.root_role({"style": "solo"}) == "worker"
 
 
 def test_audit_levels():
@@ -107,7 +127,22 @@ def test_audit_levels():
         for c in repo.list_tool_calls(db, t.id):
             repo.finish_tool_call(db, c, __import__("aria.db.enums", fromlist=["ToolStatus"]).ToolStatus.ok, output_json={"a": 1})
         light = asyncio.run(run_audit(db, s, t, r, level="light"))
-        assert light.verdict == AuditVerdict.pass_ and p["std-a"].calls == 0, "лёгкий аудит не зовёт модель"
+        assert light.verdict == AuditVerdict.pass_ and p["std-a"].calls == 1, "лёгкий аудит зовёт дешёвую модель"
+
+
+def test_audit_off_with_tool_calls_checks_facts_without_a_model():
+    """Профиль audit=off: tool-задача проверяется по фактам, модель не вызывается (AC-4)."""
+    r, p = _router(("std-a", "standard_reasoning"))
+    with session_scope() as db:
+        s = repo.create_session(db, "au-off-tools")
+        t = repo.create_task(db, s, role="general", objective="write a note")
+        call = repo.start_tool_call(db, s, t, "file_read", "general", "low", {})
+        repo.finish_tool_call(db, call, ToolStatus.ok, output_json={"a": 1})
+        report = asyncio.run(run_audit(db, s, t, r, level="off"))
+        assert report.verdict == AuditVerdict.unaudited
+        assert report.auditor_model == "structural-only"
+        assert report.plan_vs_fact["audit_tier"] == "structural"
+        assert p["std-a"].calls == 0, "audit=off не должен тратить модель"
 
 
 def _client(r):
@@ -130,8 +165,13 @@ def test_models_endpoint_and_profile_persistence_and_default():
     got = c.get(f"/chat/sessions/{sid}/profile").json()
     assert got["saved"] and got["profile"]["workers"] == {"model": "free-a"} and got["profile"]["audit"] == "light"
     # «после перезапуска»: профиль берётся из БД, новая сессия получает последний выбор
+    with session_scope() as db:
+        repo.set_agent_state(db, runprofile.DEFAULT_KEY, {}, source="test")
     sid2 = c.post("/chat/sessions", json={}).json()["session_id"]
-    assert c.get(f"/chat/sessions/{sid2}/profile").json()["profile"]["style"] == "boss"
+    assert c.get(f"/chat/sessions/{sid2}/profile").json()["profile"]["style"] == "solo"
+    assert c.put("/chat/profile", json=body).status_code == 200
+    sid3 = c.post("/chat/sessions", json={}).json()["session_id"]
+    assert c.get(f"/chat/sessions/{sid3}/profile").json()["profile"]["style"] == "boss"
     assert c.put(f"/chat/sessions/{sid}/profile", json={"style": "swarm"}).status_code == 400
     assert c.put(f"/chat/sessions/{sid}/profile", json={"main": {"model": "nope"}}).status_code == 400
 

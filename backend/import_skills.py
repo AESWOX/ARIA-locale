@@ -4,9 +4,9 @@
 import sys
 from pathlib import Path
 
-from aria.db.base import session_scope, init_db, run_migrations
-from aria.db.models import SkillMeta
+from aria.db.base import init_db, run_migrations, session_scope
 from aria.db.enums import SkillStatus
+from aria.db.models import SkillMeta
 
 
 def main(skills_dir: str) -> None:

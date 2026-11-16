@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Palette, Check, Type } from "lucide-react";
+import { Layers, Palette, Check, Type } from "lucide-react";
 import { Button } from "@vendor/ui/ui/components/button";
 import { ListItem } from "@vendor/ui/ui/components/list-item";
 import { BottomSheet } from "@vendor/ui/ui/components/bottom-sheet";
 import { Typography } from "@vendor/ui/ui/components/typography/index";
 import { useBelowBreakpoint } from "@vendor/ui/hooks/use-below-breakpoint";
-import { BUILTIN_THEMES, THEME_DEFAULT_FONT_ID, useTheme } from "@/themes";
-import type { DashboardTheme, FontChoice, ThemeListEntry } from "@/themes";
+import {
+  BUILTIN_THEMES,
+  SURFACE_MODES,
+  THEME_DEFAULT_FONT_ID,
+  readSurface,
+  readSurfaceImageFile,
+  saveSurface,
+  useTheme,
+} from "@/themes";
+import type { DashboardTheme, FontChoice, SurfaceMode, ThemeListEntry } from "@/themes";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 
@@ -109,6 +117,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
               fontId={fontId}
               setFont={setFont}
             />
+            <SurfaceSection />
           </div>
         </BottomSheet>
       )}
@@ -152,6 +161,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
               fontId={fontId}
               setFont={setFont}
             />
+            <SurfaceSection />
           </div>
         );
         return dropUp ? createPortal(dropdown, document.body) : dropdown;
@@ -166,53 +176,59 @@ function ThemeSwitcherOptions({
   setTheme,
   themeName,
 }: ThemeSwitcherOptionsProps) {
+  const { t } = useI18n();
+  const primaryNames = new Set(["black", "white", "gray"]);
+  const primary = availableThemes.filter((th) => primaryNames.has(th.name));
+  const optional = availableThemes.filter((th) => !primaryNames.has(th.name));
+
+  const renderTheme = (th: ThemeListEntry) => {
+    const isActive = th.name === themeName;
+    const paletteTheme = BUILTIN_THEMES[th.name] ?? th.definition;
+
+    return (
+      <ListItem
+        active={isActive}
+        aria-selected={isActive}
+        className="gap-3"
+        key={th.name}
+        onClick={() => {
+          setTheme(th.name);
+          close();
+        }}
+        role="option"
+      >
+        {paletteTheme ? <ThemeSwatch theme={paletteTheme} /> : <PlaceholderSwatch />}
+
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <Typography brand className="truncate text-display text-xs tracking-wide">
+            {th.label}
+          </Typography>
+          {th.description && (
+            <Typography className="truncate text-xs tracking-normal text-text-tertiary">
+              {th.description}
+            </Typography>
+          )}
+        </div>
+
+        <Check
+          className={cn(
+            "h-3 w-3 shrink-0 text-midground",
+            isActive ? "opacity-100" : "opacity-0",
+          )}
+        />
+      </ListItem>
+    );
+  };
+
   return (
     <>
-      {availableThemes.map((th) => {
-        const isActive = th.name === themeName;
-        const paletteTheme = BUILTIN_THEMES[th.name] ?? th.definition;
-
-        return (
-          <ListItem
-            active={isActive}
-            aria-selected={isActive}
-            className="gap-3"
-            key={th.name}
-            onClick={() => {
-              setTheme(th.name);
-              close();
-            }}
-            role="option"
-          >
-            {paletteTheme ? (
-              <ThemeSwatch theme={paletteTheme} />
-            ) : (
-              <PlaceholderSwatch />
-            )}
-
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <Typography
-                brand
-                className="truncate text-display text-xs tracking-wide"
-              >
-                {th.label}
-              </Typography>
-              {th.description && (
-                <Typography className="truncate text-xs tracking-normal text-text-tertiary">
-                  {th.description}
-                </Typography>
-              )}
-            </div>
-
-            <Check
-              className={cn(
-                "h-3 w-3 shrink-0 text-midground",
-                isActive ? "opacity-100" : "opacity-0",
-              )}
-            />
-          </ListItem>
-        );
-      })}
+      {primary.map(renderTheme)}
+      {optional.length > 0 && (
+        <div className="mt-1 border-t border-current/20 px-3 pb-1 pt-2 text-[10px] uppercase tracking-[0.12em] text-text-tertiary">
+          {t.theme?.optional ?? "Optional"}
+        </div>
+      )}
+      {optional.map(renderTheme)}
     </>
   );
 }
@@ -312,6 +328,142 @@ function FontSection({ fontChoices, fontId, setFont }: FontSectionProps) {
           </div>
         );
       })}
+    </>
+  );
+}
+
+/** UI-3 feedback: background surface belongs next to the theme and font
+ *  controls, not only inside Settings. Same localStorage state as the
+ *  Appearance card, applied immediately on click. */
+function SurfaceSection() {
+  const { t } = useI18n();
+  const copy = t.appearance;
+  const [surface, setSurface] = useState(() => readSurface());
+
+  const labels: Record<SurfaceMode, string> = {
+    theme: copy.modeTheme,
+    white: copy.modeWhite,
+    textured: copy.modeTextured,
+    custom: copy.modeCustom,
+    image: copy.modeImage,
+  };
+
+  const changeMode = (mode: SurfaceMode) => {
+    const next = { ...surface, mode };
+    setSurface(next);
+    saveSurface(next.mode, next.color, next.image, next.imageDim);
+  };
+
+  const changeColor = (color: string) => {
+    const next = { ...surface, color };
+    setSurface(next);
+    saveSurface(next.mode, next.color, next.image, next.imageDim);
+  };
+
+  const changeDim = (imageDim: number) => {
+    const next = { ...surface, imageDim };
+    setSurface(next);
+    saveSurface(next.mode, next.color, next.image, next.imageDim);
+  };
+
+  const changeImage = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const image = await readSurfaceImageFile(file);
+      const next = { ...surface, mode: "image" as const, image };
+      setSurface(next);
+      saveSurface(next.mode, next.color, next.image, next.imageDim);
+    } catch {
+      /* too large / unreadable: keep the previous background */
+    }
+  };
+
+  return (
+    <>
+      <div className="mt-1 border-t border-current/20 px-3 pb-1 pt-2">
+        <span className="inline-flex items-center gap-1.5">
+          <Layers className="h-3 w-3 text-text-tertiary" />
+          <Typography
+            brand
+            className="text-display text-xs tracking-[0.12em] text-text-tertiary"
+          >
+            {copy.background}
+          </Typography>
+        </span>
+      </div>
+
+      {SURFACE_MODES.map((mode) => {
+        const isActive = surface.mode === mode;
+        return (
+          <ListItem
+            active={isActive}
+            aria-selected={isActive}
+            className="gap-3"
+            key={mode}
+            onClick={() => changeMode(mode)}
+            role="option"
+          >
+            <span aria-hidden className="h-4 w-9 shrink-0" />
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <Typography className="truncate text-xs tracking-normal">
+                {labels[mode]}
+              </Typography>
+              {mode === "theme" && (
+                <Typography className="truncate text-xs tracking-normal text-text-tertiary">
+                  {copy.hint}
+                </Typography>
+              )}
+            </div>
+            <Check
+              className={cn(
+                "h-3 w-3 shrink-0 text-midground",
+                isActive ? "opacity-100" : "opacity-0",
+              )}
+            />
+          </ListItem>
+        );
+      })}
+
+      {surface.mode === "custom" && (
+        <label className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
+          <span>{copy.customColor}</span>
+          <input
+            type="color"
+            value={surface.color}
+            onChange={(e) => changeColor(e.target.value)}
+            aria-label={copy.customColor}
+          />
+        </label>
+      )}
+
+      {surface.mode === "image" && (
+        <>
+          <label className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
+            <span>{copy.imageFile}</span>
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              onChange={(e) => void changeImage(e.target.files?.[0])}
+              aria-label={copy.imageFile}
+            />
+          </label>
+          <label className="flex flex-col gap-1 px-3 py-1.5 text-xs">
+            <span className="flex items-center justify-between">
+              <span>{copy.imageDim}</span>
+              <span>{surface.imageDim}%</span>
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={surface.imageDim}
+              onChange={(e) => changeDim(Number(e.target.value))}
+              aria-label={copy.imageDim}
+            />
+          </label>
+        </>
+      )}
     </>
   );
 }

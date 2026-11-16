@@ -1,0 +1,13 @@
+<!doctype html><html><head><title>API reference — retries</title></head><body>
+<nav><a href="/docs">Docs</a><a href="/api">API</a><a href="/blog">Blog</a></nav>
+<div class="sidebar"><ul><li>Install</li><li>Quickstart</li><li>Reference</li><li>Changelog</li></ul></div>
+<main><h1>Retries</h1>
+<p>Wrap network calls in a retry loop with exponential backoff and a cap on attempts.</p>
+<pre>for attempt in range(3):
+    try:
+        return call()
+    except TimeoutError:
+        time.sleep(2 ** attempt)</pre>
+<p>Never retry non-idempotent requests without an idempotency key.</p></main>
+<footer>© 2026 Docs Inc.</footer>
+</body></html>

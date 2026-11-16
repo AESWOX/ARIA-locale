@@ -47,4 +47,3 @@ class NotifierError(Exception):
     Notifier failure НЕ является integrity-нарушением.
     При недоступности notifier задача всё равно переходит в failed.
     """
-    pass

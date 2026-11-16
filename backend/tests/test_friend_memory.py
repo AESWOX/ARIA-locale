@@ -1,8 +1,5 @@
 """test_friend_memory.py — verify friend_memory write point fires during session finalization."""
 
-import uuid
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine

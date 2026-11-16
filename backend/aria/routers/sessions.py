@@ -3,16 +3,15 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
-
-from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import func
-from sqlalchemy.orm import joinedload
 
 from aria.api.auth import require_runtime_token
+from aria.config import get_settings
 from aria.core import clarifier
 from aria.core.loop import execute_agent_loop
 from aria.db import models as m
@@ -20,19 +19,19 @@ from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import (
-    serialize_message,
     _safe_export_filename,
+    content_disposition,
     emit_message_created,
     emit_session_updated,
     emit_task_status,
     iso,
     render_session_export_markdown,
     serialize_attention,
-    serialize_session,
+    serialize_message,
+    serialize_task,
     session_snapshot_payload,
     utc_now,
 )
-from aria.config import get_settings
 
 logger = logging.getLogger("local_agent.sessions")
 
@@ -43,7 +42,7 @@ def _epoch_ms(dt: datetime | None) -> int | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1000)
 
 
@@ -113,6 +112,12 @@ async def list_sessions(
     page = sessions[offset : offset + limit]
     ids = [s.id for s in page]
     with session_scope() as db:
+        from aria.core import runprofile
+
+        model_by_session: dict = {}
+        for s in page:
+            main = (runprofile.get_profile(db, s.id) or {}).get("main") or {}
+            model_by_session[s.id] = main.get("model") or main.get("provider_id")
         msg_counts, tc_counts = _bulk_counts(db)
         msgs_by_session: dict = {}
         if ids:
@@ -124,10 +129,13 @@ async def list_sessions(
             )
             for row in rows:
                 msgs_by_session.setdefault(row.session_id, []).append(row)
-    items = [
-        _session_info(s, msg_counts.get(s.id, 0), tc_counts.get(s.id, 0), msgs_by_session.get(s.id, []))
-        for s in page
-    ]
+    items = []
+    for s in page:
+        info = _session_info(
+            s, msg_counts.get(s.id, 0), tc_counts.get(s.id, 0), msgs_by_session.get(s.id, [])
+        )
+        info["model"] = model_by_session.get(s.id)
+        items.append(info)
     return {"sessions": items, "total": total, "limit": limit, "offset": offset}
 
 
@@ -135,7 +143,7 @@ async def list_sessions(
 async def sessions_stats_alias(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     with session_scope() as db:
         sessions = repo.list_sessions(db, limit=None)
-        msg_counts, _ = _bulk_counts(db)
+        _msg_counts, _ = _bulk_counts(db)
         msg_total = db.query(func.count(m.Message.id)).scalar() or 0
     total = len(sessions)
     active_store = sum(1 for s in sessions if s.status.value == "active")
@@ -221,11 +229,11 @@ async def prune_sessions(payload: dict[str, Any], _: str = Depends(require_runti
     removed = 0
     with session_scope() as db:
         sessions = repo.list_sessions(db, limit=None)
-        msg_counts, _ = _bulk_counts(db)
+        _msg_counts, _ = _bulk_counts(db)
         for s in sessions:
             created = s.created_at
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
+                created = created.replace(tzinfo=UTC)
             if created >= cutoff:
                 continue
             if repo.delete_session(db, s.id):
@@ -336,6 +344,16 @@ async def get_session_run(session_id: uuid.UUID, _: str = Depends(require_runtim
             for item in repo.list_attention_items(db, only_pending=True)
             if item.session_id == session.id or (task is not None and item.task_id == task.id)
         ]
+        audit = None
+        if task is not None:
+            reports = repo.list_audit_reports(db, task.id)
+            if reports:
+                last = reports[-1]
+                audit = {
+                    "verdict": last.verdict.value if hasattr(last.verdict, "value") else str(last.verdict),
+                    "attempt_no": last.attempt_no,
+                    "model": last.auditor_model,
+                }
     return {
         "session_id": str(session_id),
         "task_id": str(task.id) if task is not None else None,
@@ -347,6 +365,7 @@ async def get_session_run(session_id: uuid.UUID, _: str = Depends(require_runtim
         # причина падения (provider_unavailable, runner_error, ...) — чтобы UI и смоук не гадали
         "error_code": error_code,
         "error_message": error_message,
+        "audit": audit,
     }
 
 
@@ -364,6 +383,35 @@ async def post_message(
         raise HTTPException(status_code=400, detail="mode must be one of ['agent', 'plan']")
     if not content:
         raise HTTPException(status_code=400, detail="content required")
+    # SEC-6 + S2/S11: секрет и Telegram-гейт — единый pre-check до маршрутизации,
+    # одинаковый для чата и agent-пути. Карточку формирует бэкенд, не модель.
+    from aria.routers.chat import _adult_gate, _secrets_notice, _telegram_notice
+
+    secret = await _secrets_notice(session_id, {"content": content})
+    if secret is not None:
+        return secret
+    adult = await _adult_gate(session_id, {"content": content}, request)
+    if adult is not None:
+        return adult
+    telegram = await _telegram_notice(session_id, {"content": content})
+    if telegram is not None:
+        return telegram
+    # 19.4b B1: приветствие/«ок»/«спасибо» — это ответ чата в любой вкладке:
+    # задача, план и карточки уточнений не создаются. Ответ на открытые вопросы
+    # («да», «ок» при awaiting_clarification) сюда не попадает — он идёт в TaskSpec.
+    with session_scope() as db:
+        early_session = repo.get_session(db, session_id)
+        if early_session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        current = (
+            repo.get_task(db, early_session.current_task_id) if early_session.current_task_id else None
+        )
+        awaiting_reply = current is not None and current.status == TaskStatus.awaiting_clarification
+    if role == "user" and not awaiting_reply and clarifier.is_small_talk(content):
+        from aria.routers.chat import _chat_send
+
+        answer = await _chat_send(session_id, {"content": content}, request)
+        return {"ok": True, "mode": "chat", "assistant": (answer or {}).get("assistant")}
     gate_task_id: uuid.UUID | None = None
     with session_scope() as db:
         session = repo.get_session(db, session_id)
@@ -403,9 +451,16 @@ async def post_message(
         emit_task_status(task)
 
     if gate_task_id is not None:
-        # Гейт вне DB-scope: внутри — сетевой вызов clarifier и сообщение с вопросами.
+        # Выходим из DB-scope: дальше идёт вызов модели через clarifier и запись в отдельном scope.
+        with session_scope() as db:
+            recent = repo.list_messages_for_prompt(db, session_id, limit=12)
+            gate_context = [(m.role, m.content) for m in recent if m.content]
         outcome = await clarifier.run_gate(
-            gate_task_id, content, router=getattr(request.app.state, "router", None)
+            gate_task_id,
+            content,
+            router=getattr(request.app.state, "router", None),
+            mode=mode,
+            context=gate_context,
         )
         with session_scope() as db:
             task = repo.get_task(db, gate_task_id)
@@ -419,22 +474,64 @@ async def post_message(
                 "questions": outcome.questions,
             }
 
+    # E3: дорогая задача не стартует без Approve (оценка p90 выше порога).
+    if task is not None and role == "user" and task.status == TaskStatus.approved and mode != "chat":
+        settings = get_settings()
+        threshold = float(getattr(settings, "budget_estimate_approval_usd", 0) or 0)
+        if threshold > 0:
+            from aria.core import approvals
+            from aria.llm import budget as budget_mod
+
+            estimate = budget_mod.estimate_task_cost("project_q")
+            if float(estimate["p90"]) > threshold:
+                with session_scope() as db:
+                    fresh = repo.get_task(db, task.id)
+                    if fresh is not None and fresh.status == TaskStatus.approved:
+                        pending = [
+                            item
+                            for item in repo.list_attention_items(db, only_pending=True)
+                            if item.task_id == fresh.id and (item.payload_json or {}).get("kind") == "estimate"
+                        ]
+                        if not pending:
+                            repo.set_task_status(db, fresh, TaskStatus.in_progress)
+                            approvals.request_budget_estimate_approval(
+                                db, repo.get_session(db, fresh.session_id), fresh, estimate, mode
+                            )
+                            repo.set_task_status(db, fresh, TaskStatus.awaiting_attention)
+                            # emit в открытой сессии (db=db): без db event_bus открывает вторую и ловит SQLite-lock.
+                            from aria.core.events import event_bus
+
+                            event_bus.emit(
+                                "task.status_changed",
+                                serialize_task(fresh) or {},
+                                session_id=fresh.session_id,
+                                task_id=fresh.id,
+                                db=db,
+                            )
+                        task_id = fresh.id
+                    else:
+                        task_id = None
+                if task_id is not None:
+                    return {
+                        "ok": True,
+                        "queued": False,
+                        "task_id": str(task_id),
+                        "status": "awaiting_attention",
+                        "questions": [],
+                        "attention_required": True,
+                        "estimate": estimate,
+                    }
+
     if task and role == "user" and task.status in (TaskStatus.approved, TaskStatus.in_progress):
         settings = get_settings()
-        execution_mode = "codex" if settings.codex_enabled else "real"
-        if execution_mode == "codex":
-            from aria.agents.codex_exec_bridge import run_codex_task
-
-            await run_codex_task(task.id)
-        else:
-            runner = getattr(request.app.state, "task_runner", None)
-            if runner is not None:
-                # Волна 1 (A10): агент больше не исполняется внутри HTTP-запроса.
-                # Результат приходит событиями WS (message.created, task.status_changed).
-                queued = runner.submit(task.id, mode=mode, source="ui")
-                return {"ok": True, "queued": bool(queued.get("queued")), "task_id": str(task.id), "mode": mode}
-            # Без раннера (юнит-тесты без lifespan) — прежний синхронный путь.
-            await execute_agent_loop(task.id, request.app.state.router, settings.agent_sandbox_root)
+        runner = getattr(request.app.state, "task_runner", None)
+        if runner is not None:
+            # Волна 1 (A10): агент больше не исполняется внутри HTTP-запроса.
+            # Результат приходит событиями WS (message.created, task.status_changed).
+            queued = runner.submit(task.id, mode=mode, source="ui")
+            return {"ok": True, "queued": bool(queued.get("queued")), "task_id": str(task.id), "mode": mode}
+        # Без раннера (юнит-тесты без lifespan) — прежний синхронный путь.
+        await execute_agent_loop(task.id, request.app.state.router, settings.agent_sandbox_root)
 
     return {"ok": True}
 
@@ -477,7 +574,7 @@ async def export_session_markdown(session_id: uuid.UUID, _: str = Depends(requir
         tool_calls = repo.list_tool_calls_by_session(db, session_id)
         audit_reports = repo.list_audit_reports_by_session(db, session_id)
     content = render_session_export_markdown(session, task, messages, tool_calls, audit_reports)
-    headers = {"Content-Disposition": f'attachment; filename="{_safe_export_filename(session.title, session_id)}"'}
+    headers = {"Content-Disposition": content_disposition(_safe_export_filename(session.title, session_id))}
     return PlainTextResponse(content=content, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
@@ -504,10 +601,26 @@ async def approve_attention(item_id: uuid.UUID, request: Request, _: str = Depen
     # A22: подтверждённая команда должна реально исполниться, а задача — продолжиться.
     # Возобновление идёт через очередь, не внутри HTTP-запроса (A10).
     resumed = False
-    if resolved.type in (AttentionType.high_risk_shell, AttentionType.mcp_tool_approval) and resolved.task_id is not None:
+    payload = resolved.payload_json if isinstance(resolved.payload_json, dict) else {}
+    is_estimate = (
+        resolved.type == AttentionType.budget_escalation and payload.get("kind") == "estimate"
+    )
+    if (
+        resolved.type in (AttentionType.high_risk_shell, AttentionType.mcp_tool_approval, AttentionType.preference_update)
+        or is_estimate
+    ) and resolved.task_id is not None:
         runner = getattr(request.app.state, "task_runner", None)
         if runner is not None:
-            queued = runner.submit(resolved.task_id, mode="agent", source="approval", approval_item_id=resolved.id)
+            if is_estimate:
+                # E3: задача ещё не стартовала — обычный submit в сохранённом режиме,
+                # без approval_item_id (он уводит в agent-ветку resume_after_approval).
+                queued = runner.submit(
+                    resolved.task_id,
+                    mode=str(payload.get("mode") or "agent"),
+                    source="approval",
+                )
+            else:
+                queued = runner.submit(resolved.task_id, mode="agent", source="approval", approval_item_id=resolved.id)
             resumed = bool(queued.get("queued"))
         else:
             logger.warning("approve %s: task runner is not running, task %s was not resumed", item_id, resolved.task_id)

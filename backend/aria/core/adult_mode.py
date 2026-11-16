@@ -1,0 +1,130 @@
+"""Режим 18+ (этап 3а): состояние, включение фразой и выбор провайдера.
+
+18+ — режим поверх любой роли, не отдельная роль. Жёсткие лимиты из
+``content_limits`` действуют всегда и этим модулем не отключаются.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from datetime import UTC, datetime
+
+from sqlalchemy.orm import Session as OrmSession
+
+from aria.config import get_settings
+from aria.db import repository as repo
+
+logger = logging.getLogger("local_agent.chat")
+
+MODE_KEY = "modes:default"
+
+
+def _session_key(session_id) -> str:
+    return f"modes:session:{session_id}"
+
+
+def _default_state() -> dict:
+    return {"adult": False, "adult_scope": "session", "adult_confirmed_at": None}
+
+
+def get_state(db: OrmSession, session_id=None) -> dict:
+    # 18+ — режим приложения, а не вкладки: новая сессия не должна начинать с
+    # выключенного режима, а бейдж и чат обязаны читать один и тот же ключ.
+    # session_id оставлен в сигнатуре для совместимости вызовов.
+    base = repo.get_agent_state(db, MODE_KEY) or {}
+    return {**_default_state(), **base}
+
+
+def is_enabled(db: OrmSession, session_id=None) -> bool:
+    return bool(get_state(db, session_id).get("adult"))
+
+
+def confirmed(state: dict | None = None) -> bool:
+    return bool((state or {}).get("adult_confirmed_at"))
+
+
+def needs_confirmation() -> bool:
+    """В публичной сборке первое включение требует «Мне есть 18 лет»."""
+    return not bool(getattr(get_settings(), "adult_default", False))
+
+
+def set_adult(
+    db: OrmSession,
+    enabled: bool,
+    *,
+    session_id=None,
+    scope: str = "session",
+    mark_confirmed: bool = False,
+    via: str = "api",
+) -> dict:
+    key = MODE_KEY
+    current = repo.get_agent_state(db, key) or _default_state()
+    current["adult"] = bool(enabled)
+    current["adult_scope"] = scope
+    if mark_confirmed:
+        current["adult_confirmed_at"] = datetime.now(UTC).isoformat()
+    if not enabled:
+        current["adult_confirmed_at"] = None
+    repo.set_agent_state(db, key, current, source="user")
+    logger.info("mode_changed adult=%s scope=%s via=%s", bool(enabled), scope, via)
+    try:
+        from aria.core.events import event_bus
+
+        event_bus.emit(
+            "modes.changed",
+            {"adult": bool(enabled), "scope": scope, "via": via},
+            session_id=session_id,
+            db=db,
+        )
+    except Exception:  # событие бейджа не должно ронять смену режима
+        logger.warning("mode_changed event failed", exc_info=True)
+    return current
+
+
+_ON = re.compile(r"(?i)(?:включи|вруби|enable)\s*(?:режим\s*)?18\+?|/adult\s+on|включи\s+взросл")
+_OFF = re.compile(r"(?i)(?:выключи|отключи|disable)\s*(?:режим\s*)?18\+?|/adult\s+off|выключи\s+взросл")
+
+_ADULT_WORDS = re.compile(
+    r"(?i)18\+|взросл(?:ый|ая|ое)\s+режим|эрот|порн|секс|обнаж|интим|nsfw|"
+    r"откровенн|explicit\s+sex|"
+    r"сиськ|жопк|попк|груд[ьи]|возбужд|оргазм|мастурб|минет|куннилин|"
+    r"трах|дроч|\bчлен\b|\bхуй\b|пизд|вагин|клитор|пошл|"
+    r"sexual\s+(?:scene|story|content)|erotic\s+(?:scene|story)"
+)
+
+
+def is_adult_request(text: str) -> bool:
+    """Взрослый ли запрос. Лимиты (несовершеннолетние и т.п.) тоже считаются adult-
+    запросом, чтобы такой текст никогда не ушёл на незамаркированного провайдера."""
+    from aria.core import content_limits
+
+    return bool(looks_adult(text) or content_limits.check(text) is not None)
+
+
+def detect_command(text: str) -> str | None:
+    value = text or ""
+    if _OFF.search(value):
+        return "off"
+    if _ON.search(value):
+        return "on"
+    return None
+
+
+def looks_adult(text: str) -> bool:
+    return bool(_ADULT_WORDS.search(text or ""))
+
+
+def available_providers(router) -> list:
+    """Провайдеры с флагом adult_ok; список можно расширить конфигом."""
+    if router is None:
+        return []
+    configured = {
+        item.strip() for item in str(getattr(get_settings(), "adult_provider_ids", "") or "").split(",")
+        if item.strip()
+    }
+    result = []
+    for group in getattr(router, "providers_by_class", {}).values():
+        for provider in group:
+            if getattr(provider, "adult_ok", False) or provider.provider_id in configured:
+                result.append(provider)
+    return result

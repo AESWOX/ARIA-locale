@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from aria.core import approvals, taskspec
-from aria.core.taskspec import MAX_CLARIFY_ROUNDS, TaskSpec, default_criterion, derive_spec
+from aria.core.taskspec import (
+    MAX_CLARIFY_ROUNDS,
+    TaskSpec,
+    default_criterion,
+    derive_spec,
+)
 from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import TaskStatus
@@ -128,6 +133,84 @@ def is_small_talk(content: str) -> bool:
     return bool(clauses) and all(_clause_is_small_talk(c) for c in clauses)
 
 
+_TOOL_URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|org|net|io|dev|ai|ru|co|app)\b", re.IGNORECASE
+)
+_TOOL_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|(?:^|\s)~/|(?:^|\s)/[\w.-]+)")
+
+
+# L3 (clarifier soft): явная цель и формат => 0 карточек; исследовательские задачи не блокируются.
+_FORMAT_RE = re.compile(
+    r"(?:"
+    r"заголов|title|"
+    r"таблиц|table|"
+    r"список\s+из\s+\d+|list\s+of\s+\d+|"
+    r"сохран\w*\s+(?:в|into)\s+файл|save\s+(?:it\s+)?(?:to|in)\s+(?:a\s+)?file|"
+    r"в\s+файл|in\s+a\s+file|"
+    r"в\s+формате|as\s+(?:a\s+)?(?:json|csv|markdown|table)|"
+    r"ответ\w*\s+(?:текстом|строкой)|"
+    r"(?:на|по|in)\s+(?:python|go|golang|rust|javascript|typescript|java|bash|powershell|c\+\+|react|vue|svelte|next\.?js|node|django|fastapi|flutter|kotlin|swift|c#|csharp|html|css)|"
+    r"\.(?:md|txt|json|csv|py|go|js|ts|tsx|html|ya?ml|sql|ps1)\b|"
+    r"\bjson\b|\bcsv\b|\bmarkdown\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_GOAL_VERB_RE = re.compile(
+    r"(?:^|[\s,.;:!?])(?:"
+    r"открой|открыть|собери|собрать|сделай|сделать|напиши|написать|создай|создать|"
+    r"проверь|проверить|прочитай|прочитать|покажи|показать|выведи|вывести|"
+    r"сохрани|сохранить|запусти|запустить|переведи|перевести|составь|составить|"
+    r"сформируй|посчитай|исправь|починить|сверстай|сверстать|верстай|верстать|"
+    r"open|find|fetch|build|create|write|read|"
+    r"check|run|save|make|list|summari[sz]e|generate|fix"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_RESEARCH_RE = re.compile(
+    r"(?:найди|найти|поищи|поиск|исследуй|исследовать|изучи|изучить|проанализируй|"
+    r"анализ|сравни|сравнить|обзор|"
+    r"\bfind\b|\bresearch\b|\bexplore\b|\bcompare\b|\binvestigate\b|\banaly[sz]e\b|\breview\b)",
+    re.IGNORECASE,
+)
+
+
+def explicit_goal_and_format(content: str) -> bool:
+    """L3: и действие, и ожидаемый формат названы явно — уточнять нечего (0 карточек)."""
+    text = content or ""
+    has_goal = bool(
+        _TOOL_URL_RE.search(text) or _TOOL_PATH_RE.search(text) or _GOAL_VERB_RE.search(text)
+    )
+    return has_goal and bool(_FORMAT_RE.search(text))
+
+
+def is_research_task(content: str) -> bool:
+    """L3: исследовательская задача не блокируется вопросами на этапе clarify."""
+    return bool(_RESEARCH_RE.search(content or ""))
+
+
+_CONTINUATION_RE = re.compile(
+    r"^\s*(?:а\s+)?(?:теперь|дальше|затем|потом|ещё|еще|также|и\s+ещё|и\s+еще|"
+    r"добавь|добавить|продолжи|продолжить|then|now|also|next|add|continue)\b",
+    re.IGNORECASE,
+)
+_PRONOUN_RE = re.compile(
+    r"\b(?:это|этот|эта|эти|его|её|ее|их|там|туда|него|неё|нее|them|it|that|those)\b",
+    re.IGNORECASE,
+)
+
+
+def continues_dialog(content: str, context: list[tuple[str, str]] | None) -> bool:
+    """Rule 0: a message that continues the dialog or points with a pronoun is not a new task."""
+    if not context:
+        return False
+    text = content or ""
+    if _CONTINUATION_RE.search(text):
+        return True
+    return bool(_PRONOUN_RE.search(text))
+
+
 def detect_language(content: str) -> str:
     """'uk' | 'ru' | 'en' по буквам запроса; без букв остаётся русский (прежнее поведение)."""
     text = content or ""
@@ -141,6 +224,21 @@ def detect_language(content: str) -> str:
 
 
 _LANG_NAME = {"ru": "русский", "uk": "украинский", "en": "английский (English)"}
+_LANGUAGE_NAMES = {"ru": "Russian", "uk": "Ukrainian", "en": "English"}
+
+
+def language_name(content: str) -> str:
+    """Human-readable language of the user's message, independent of UI locale."""
+    return _LANGUAGE_NAMES.get(detect_language(content), "English")
+
+
+def language_instruction(content: str) -> str:
+    """Directive used by Chat and Agent so the answer never follows the UI language."""
+    name = language_name(content)
+    return (
+        f"The user's current message is in {name}. Answer only in {name}, "
+        "regardless of the interface language."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -190,24 +288,50 @@ def _strip_fence(raw: str) -> str:
     return text.strip()
 
 
-async def _ask_model(router: ProviderRouter, content: str, spec: TaskSpec) -> dict:
-    """Один запрос к clarifier-роли. Любой сбой = пустой payload, а не падение задачи."""
+def _recent_context_text(context: list[tuple[str, str]] | None) -> str:
+    if not context:
+        return ""
+    lines: list[str] = []
+    for role, text in context[-8:]:
+        clean = " ".join(str(text or "").split())
+        if not clean:
+            continue
+        label = "assistant" if role == "assistant" else "user"
+        lines.append(f"{label}: {clean[:1800]}")
+    if not lines:
+        return ""
+    return "Последние сообщения сессии (не спрашивай то, что уже есть здесь):\n" + "\n".join(lines)
+
+
+async def _ask_model(
+    router: ProviderRouter,
+    content: str,
+    spec: TaskSpec,
+    *,
+    context: list[tuple[str, str]] | None = None,
+    session_id: object | None = None,
+    task_id: object | None = None,
+) -> dict:
+    """Один запрос к clarifier-модели. Возвращает payload, а не готовый TaskSpec."""
+    recent = _recent_context_text(context)
     messages = [
         ChatMessage(role="system", content=_prompt_text()),
         ChatMessage(
             role="user",
             content=(
-                f"Запрос владельца: {content}\n\n"
-                f"Язык запроса: {_LANG_NAME[detect_language(content)]}. Все вопросы, варианты ответа "
-                "(включая «Свой вариант»), цель, критерии и допущения пиши на этом же языке.\n\n"
-                f"Уже известный контракт (может быть пустым): {spec.model_dump_json()}\n"
-                f"Раунд уточнения: {spec.clarify_rounds}/{MAX_CLARIFY_ROUNDS}"
+                f"Запрос пользователя: {content}\n\n"
+                f"Отвечай на языке: {_LANG_NAME[detect_language(content)]}. Все вопросы, варианты и допущения "
+                "(включая <Свой вариант>), задавай на этом же языке; не переводи их на английский.\n\n"
+                f"Текущее состояние (может быть пустым): {spec.model_dump_json()}\n"
+                f"Раунд уточнений: {spec.clarify_rounds}/{MAX_CLARIFY_ROUNDS}\n\n"
+                f"{recent}"
             ),
         ),
     ]
     result = await router.route_chat(
         "standard_reasoning", messages, tools=[], allow_degrade=True,
         resilient=True, fallback_classes=("free_tier_reasoning", "premium_reasoning"),
+        purpose="clarifier", session_id=session_id, task_id=task_id,
     )
     import json
 
@@ -230,6 +354,10 @@ def question_id(text: str) -> str:
 
 MAX_QUESTIONS = 7
 MAX_OPTIONS = 5
+# L3: за один раунд задаём не больше двух вопросов (даже если модель вернула больше).
+MAX_QUESTIONS_PER_ROUND = 2
+EXPLICIT_ASSUMPTION = "Цель и формат заданы в запросе, уточнения не требуются."
+RESEARCH_ASSUMPTION = "Исследовательская задача не блокируется уточнениями на старте."
 
 
 def _clean_options(raw) -> list[str]:
@@ -347,7 +475,7 @@ def _merge_payload(spec: TaskSpec, payload: dict) -> list[str]:
             continue
         try:
             spec.acceptance_criteria.append(taskspec.AcceptanceCriterion(**raw))
-        except Exception:  # noqa: BLE001 — непроверяемый критерий от модели просто не берём
+        except Exception:  # непроверяемый критерий от модели просто не берём
             logger.info("clarifier: критерий отклонён как непроверяемый: %s", raw)
     for raw in payload.get("assumptions") or []:
         text = str(raw).strip()
@@ -366,6 +494,24 @@ def _dedupe(items: list[str]) -> list[str]:
     return out
 
 
+def _assumption_line(parts: list[str]) -> str:
+    """L3: принятые по умолчанию допущения — одной строкой «принял: …»."""
+    flat = "; ".join(_dedupe([str(p).strip().rstrip(".") for p in parts if str(p).strip()]))
+    return "принял: " + flat
+
+
+def _apply_assumptions(spec: TaskSpec, parts: list[str]) -> None:
+    """Дописывает новые допущения в единственную строку «принял: …»."""
+    if not parts:
+        return
+    line = _assumption_line(parts)
+    for i, existing in enumerate(spec.assumptions):
+        if existing.startswith("принял:"):
+            spec.assumptions[i] = f"{existing.rstrip('.')}; {line[len('принял: '):]}"
+            return
+    spec.assumptions = _dedupe([*list(spec.assumptions), line])
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Основной вход
 # ═══════════════════════════════════════════════════════════════════
@@ -377,7 +523,7 @@ def load_spec(db, task_id: uuid.UUID) -> TaskSpec | None:
         return None
     try:
         return TaskSpec(**dict(row.spec_json or {}))
-    except Exception:  # noqa: BLE001 — битая версия не должна ронять весь путь
+    except Exception:  # битая версия не должна ронять весь путь
         logger.warning("clarifier: TaskSpec задачи %s не читается, считаем отсутствующим", str(task_id)[:8])
         return None
 
@@ -430,6 +576,8 @@ async def run_gate(
     *,
     router: ProviderRouter | None = None,
     autonomous: bool = False,
+    mode: str = "",
+    context: list[tuple[str, str]] | None = None,
 ) -> ClarifyOutcome:
     """Прогоняет гейт уточнения и приводит задачу к одному из трёх состояний.
 
@@ -440,6 +588,9 @@ async def run_gate(
     """
     lang = detect_language(content)
     spec = _load_or_derive(task_id, content)
+    if mode:
+        # D-21: вкладка, из которой пришла задача, переживает раунд уточнения.
+        spec.mode = mode
     # PR-3: риск считаем и по запросу владельца, и по уточнённой clarifier цели:
     # модель могла переписать формулировку, и маркер риска остался бы только в исходном тексте.
     spec.high_risk = (
@@ -448,20 +599,40 @@ async def run_gate(
         or taskspec.is_high_risk(spec.goal or "")
     )
     rounds = int(spec.clarify_rounds or 0)
+    # An attachment is already concrete input: asking "what format?" after
+    # "what is on this image?" was the reported empty/duplicate question path.
+    has_attachments = "Attached files:" in (content or "")
+    explicit = (
+        explicit_goal_and_format(content)
+        or has_attachments
+        or continues_dialog(content, context)
+    )
+    research = not explicit and is_research_task(content)
 
     questions: list[dict] = []
     new_assumptions: list[str] = []
 
     if autonomous:
         new_assumptions.append(AUTONOMOUS_NOTE)
-    elif router is not None and rounds < MAX_CLARIFY_ROUNDS:
-        try:
-            payload = await _ask_model(router, content, spec)
-        except Exception as exc:  # noqa: BLE001 — clarifier недоступен, работаем детерминированно
-            logger.warning("clarifier недоступен (%s), гейт работает детерминированно", type(exc).__name__)
-            payload = {}
-        questions = _normalise_questions(payload.get("questions"))
+    elif rounds < MAX_CLARIFY_ROUNDS:
+        payload: dict = {}
+        if router is not None:
+            try:
+                payload = await _ask_model(router, content, spec, context=context, task_id=task_id)
+            except Exception as exc:  # clarifier недоступен, работаем детерминированно
+                logger.warning("clarifier недоступен (%s), гейт работает детерминированно", type(exc).__name__)
+                payload = {}
         new_assumptions += _merge_payload(spec, payload)
+        if explicit:
+            # L3: цель и формат названы явно — карточек нет, вопросы модели отбрасываем.
+            new_assumptions.append(EXPLICIT_ASSUMPTION)
+        elif research:
+            # L3: исследовательская задача стартует без блокирующих вопросов.
+            new_assumptions.append(RESEARCH_ASSUMPTION)
+        else:
+            questions = _normalise_questions(payload.get("questions"))[:MAX_QUESTIONS_PER_ROUND]
+            if router is None:
+                questions = _fallback_questions(lang)[:MAX_QUESTIONS_PER_ROUND]
 
     if not autonomous and rounds >= MAX_CLARIFY_ROUNDS:
         # Лимит исчерпан: вопросов владельцу больше не задаём (PR-3). Остаток
@@ -480,12 +651,14 @@ async def run_gate(
 
     blocking = [q for q in questions if q.get("blocking")]
 
-    if not autonomous and not blocking and rounds == 0:
-        # Решение владельца: вопросы задаются ВСЕГДА, даже если модель решила, что запрос ясен
-        # (или clarifier недоступен). Дальше раунды идут только по неснятым пробелам контракта.
-        blocking = _fallback_questions(lang)
-
-    if not autonomous and not blocking and not spec.acceptance_criteria and rounds < MAX_CLARIFY_ROUNDS:
+    if (
+        not autonomous
+        and not explicit
+        and not research
+        and not blocking
+        and not spec.acceptance_criteria
+        and rounds < MAX_CLARIFY_ROUNDS
+    ):
         # Контракт неполный, а модель вопросов не задала: спрашиваем детерминированно,
         # иначе задача ушла бы в исполнение без критериев приёмки (PR-6 проверять нечего).
         # После исчерпания лимита раундов вопросов владельцу больше не задаём: остаток
@@ -522,7 +695,8 @@ async def run_gate(
         new_assumptions.append("Критерий приёмки не задан: принят детерминированный критерий по умолчанию.")
     if len((spec.goal or "").strip()) < taskspec.MIN_GOAL_CHARS:
         spec.goal = (content or "").strip()[:400]
-    spec.assumptions = _dedupe(list(spec.assumptions) + new_assumptions)
+    spec.assumptions = _dedupe(list(spec.assumptions))
+    _apply_assumptions(spec, new_assumptions)
     spec.open_questions = []
 
     status = "approved"

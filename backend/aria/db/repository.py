@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session as OrmSession
 
+from aria import secretguard
 from aria.db import models as m
 from aria.db.enums import (
     ApprovalStatus,
@@ -37,7 +38,7 @@ APPROVAL_TTL_BY_TYPE = {
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ---------- sessions ----------
@@ -142,7 +143,6 @@ def list_child_tasks(db: OrmSession, parent_task_id: uuid.UUID) -> list[m.Task]:
 def get_task_tree(db: OrmSession, root_task_id: uuid.UUID, max_depth: int = 3) -> dict:
     """Рекурсивное дерево задач от корня до max_depth уровня.
     Возвращает вложенный dict {id, children: [...]} для UI-панели делегирования."""
-    from collections import defaultdict
 
     def _fetch_level(task_ids: list[uuid.UUID], depth: int) -> list[dict]:
         if depth > max_depth or not task_ids:
@@ -275,8 +275,8 @@ def append_message(db: OrmSession, session: m.Session, role: str, content: str, 
         session_id=session.id,
         seq_no=next_seq,
         role=role,
-        content=content,
-        content_json=content_json,
+        content=secretguard.mask_secrets(content),
+        content_json=secretguard.mask_obj(content_json),
         source_trust=source_trust,
     )
     db.add(message)
@@ -333,7 +333,7 @@ def start_tool_call(db: OrmSession, session: m.Session, task: m.Task | None, too
         role=role,
         risk_level=risk_level,
         status=ToolStatus.running,
-        input_json=input_json,
+        input_json=secretguard.mask_obj(input_json),
         source_trust_snapshot=source_trust_snapshot,
     )
     db.add(call)
@@ -351,11 +351,11 @@ def finish_tool_call(db: OrmSession, call: m.ToolCall, status: ToolStatus, outpu
     started = persisted.started_at
     finished = persisted.finished_at
     if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
+        started = started.replace(tzinfo=UTC)
     persisted.duration_ms = int((finished - started).total_seconds() * 1000)
-    persisted.output_json = output_json
+    persisted.output_json = secretguard.mask_obj(output_json)
     persisted.error_code = error_code
-    persisted.error_message = error_message
+    persisted.error_message = secretguard.mask_secrets(error_message) if error_message else error_message
     db.flush()
     _log_tool_call(persisted, status)
     return persisted
@@ -575,6 +575,7 @@ def create_scheduler_job(
     allowed_high_risk_patterns: list[str] | None = None,
     timeout_sec: int = 120,
     max_retries: int = 1,
+    urgent: bool = False,
 ) -> m.SchedulerJob:
     row = m.SchedulerJob(
         name=name,
@@ -586,6 +587,7 @@ def create_scheduler_job(
         allowed_high_risk_patterns=allowed_high_risk_patterns or [],
         timeout_sec=timeout_sec,
         max_retries=max_retries,
+        urgent=urgent,
     )
     db.add(row)
     db.flush()

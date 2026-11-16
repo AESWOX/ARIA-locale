@@ -12,22 +12,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 # Имена — строго из aria.tools.registry.TOOL_REGISTRY (тест D5/D6 в test_b5_tool_inventory.py).
 # Read-only тулы (idempotency_class=safe_read): повтор с тем же результатом = нет прогресса.
 IDEMPOTENT_TOOL_NAMES = frozenset({
     "read_note", "search_vault", "list_vault", "search_vault_tags", "list_decisions",
-    "file_read", "file_search", "file_grep", "web_search", "web_fetch", "vision_analyze", "notebook_query",
+    "file_read", "file_search", "file_grep", "web_search", "web_fetch", "telegram_channel", "vision_analyze", "notebook_query",
     "skill_lookup", "skill_read", "task_status", "memory_search", "friend_memory_read",
+    "make_plan", "tool_output_read", "file_extract", "audio_transcribe",
 })
 
 # Тулы, меняющие состояние: успешный вызов сбрасывает счётчики no-progress у read-only тулов
 # (состояние изменилось — повторное чтение законно), а их повтор не считается «чтением».
 MUTATING_TOOL_NAMES = frozenset({
     "file_write", "shell_execute", "write_note", "create_vault_branch", "log_decision",
-    "memory_save", "delegate_task",
+    "memory_save", "delegate_task", "set_mode",
 })
 
 
@@ -64,7 +66,7 @@ class ToolGuardrailDecision:
 class GuardrailConfig:
     """Thresholds for per-turn tool-call loop detection."""
     warnings_enabled: bool = True
-    hard_stop_enabled: bool = False
+    hard_stop_enabled: bool = True
     exact_failure_warn_after: int = 2
     exact_failure_block_after: int = 5
     same_tool_failure_warn_after: int = 3
@@ -85,7 +87,7 @@ def _detect_tool_failure(tool_name: str, result: dict | str | None) -> tuple[boo
 
     if isinstance(result, dict):
         if result.get("error"):
-            return True, f" [error]"
+            return True, " [error]"
         exit_code = result.get("exit_code")
         if exit_code is not None and exit_code != 0:
             return True, f" [exit {exit_code}]"
@@ -190,7 +192,7 @@ class ToolCallGuardrailController:
         self, tool_name: str, args: Mapping[str, Any] | None, result: dict | str | None
     ) -> ToolGuardrailDecision:
         """Record a tool result AFTER execution — updates failure/no-progress counters."""
-        is_failure, reason = _detect_tool_failure(tool_name, result)
+        is_failure, _reason = _detect_tool_failure(tool_name, result)
         signature = ToolCallSignature.from_call(tool_name, args or {})
 
         if is_failure:

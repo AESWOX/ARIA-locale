@@ -53,7 +53,7 @@ def preview_test_data() -> dict[str, Any]:
         from aria.mcp.manager import load_servers
 
         servers = [s.get("name") for s in load_servers() if is_test_server(s.get("name"))]
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return {"skills": skills, "sessions": len(sessions), "mcp_servers": servers}
 
@@ -78,7 +78,7 @@ def clean_test_data(*, backup: bool = True) -> dict[str, Any]:
     if backup and (plan["skills"] or plan["sessions"] or plan["mcp_servers"]):
         try:
             backup_path = backup_database()
-        except Exception:  # noqa: BLE001 - нет копии = не удаляем сессии (необратимо)
+        except Exception:  # нет копии = не удаляем сессии (необратимо)
             return {"skills": [], "sessions": 0, "mcp_servers": [], "backup": None,
                     "error": "backup failed, nothing was deleted"}
     skills_removed: list[str] = []
@@ -113,6 +113,6 @@ def clean_test_data(*, backup: bool = True) -> dict[str, Any]:
         if len(keep) != len(current):
             servers_removed = [s.get("name") for s in current if is_test_server(s.get("name"))]
             save_servers(keep)
-    except Exception:  # noqa: BLE001 - MCP-реестр не должен ломать чистку остального
+    except Exception:  # MCP-реестр не должен ломать чистку остального
         pass
     return {"skills": skills_removed, "sessions": sessions_removed, "mcp_servers": servers_removed, "backup": backup_path}

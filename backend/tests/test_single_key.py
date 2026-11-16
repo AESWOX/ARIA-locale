@@ -45,6 +45,17 @@ def deepseek_only(monkeypatch):
 
     async def fake_chat(self, messages, tools, timeout_sec):
         calls.append(self.provider_id)
+        prompt = str(messages[-1].content if messages else "")
+        if "Сожми" in prompt:
+            return LlmResponse(
+                text=(
+                    "Instructions: keep the rules\nTask: compress the dialogue\n"
+                    "Constraints: no new facts\nDecisions: keep the plan\n"
+                    "Verified facts: ok-from-" + self.provider_id + "\nEntities: none\n"
+                    "Open questions: none\nState: ready\n"
+                    '{"ok": true, "missing": []}'
+                )
+            )
         return LlmResponse(text="ok-from-" + self.provider_id)
 
     async def fake_connectivity(self, timeout_sec):
@@ -60,7 +71,21 @@ def deepseek_only(monkeypatch):
 def test_only_deepseek_classes_exist_with_one_key(deepseek_only):
     router, _ = deepseek_only
     present = {cls for cls, providers in router.providers_by_class.items() if providers}
-    assert present == {"standard_reasoning", "premium_reasoning"}
+    assert present == {"standard_reasoning", "premium_reasoning", "plan_flash_reasoning"}
+
+
+def test_plan_flash_reasoning_reuses_deepseek_key_without_second_pool(deepseek_only):
+    router, _ = deepseek_only
+    plan_providers = router.providers_by_class["plan_flash_reasoning"]
+    assert plan_providers, "plan_flash_reasoning должен быть зарегистрирован"
+    provider = plan_providers[0]
+    deepseek_keys = {
+        p.api_key
+        for p in router.providers_by_class["standard_reasoning"] + router.providers_by_class["premium_reasoning"]
+    }
+    assert provider.api_key in deepseek_keys, "plan_flash_reasoning должен использовать тот же DeepSeek-ключ"
+    assert provider.key_pool is None, "plan_flash_reasoning не должен создавать второй пул ключей"
+    assert provider.base_url == next(iter(router.providers_by_class["standard_reasoning"])).base_url
 
 
 @pytest.mark.parametrize("site", sorted(CALL_SITES))
@@ -84,7 +109,8 @@ async def test_a_class_without_fallback_would_fail_proving_the_matrix_is_meaning
 async def test_compression_uses_the_router_when_there_is_no_gemini_key(deepseek_only):
     router, calls = deepseek_only
     assert compression._get_compression_pool() is None
-    assert await compression._summarize_via_router(router, "[user] привет\n[assistant] привет") == "ok-from-deepseek-chat"
+    summary = await compression._summarize_via_router(router, "[user] привет\n[assistant] привет")
+    assert summary.startswith("Instructions:") and "ok-from-deepseek-chat" in summary
 
 
 async def test_maybe_compress_summarizes_through_router_without_gemini(deepseek_only, monkeypatch):

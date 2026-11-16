@@ -20,6 +20,8 @@ export const ru: Translations = {
     auditTitle: "Отчёт аудита",
     auditVerdict: "вердикт",
     auditCriteria: "критерии приёмки",
+    attentionWaiting: "Ждём вашего решения",
+    taskLabel: "Задача:",
   },
   common: {
     save: "Сохранить",
@@ -63,6 +65,14 @@ export const ru: Translations = {
     expand: "Развернуть",
     general: "Общие",
     messaging: "Мессенджеры",
+    agentShell: {
+      title: "Shell в Agent",
+      hint: "general остаётся read-only, пока тумблер выключен. При включении shell работает только внутри project root и всегда требует Approve.",
+      enabled: "Разрешить shell_execute в Agent",
+      projectRoot: "Корень проекта",
+      projectRootHint: "Абсолютный путь. Вне этой папки Agent-shell запрещён.",
+      saved: "Настройки Agent-shell сохранены",
+    },
     pluginLoadFailed:
       "Не удалось загрузить скрипт этого плагина. Проверьте вкладку «Сеть» (dashboard-plugins/…) и путь к плагинам на сервере.",
     pluginNotRegistered:
@@ -79,6 +89,8 @@ export const ru: Translations = {
     },
     activeSessionsLabel: "Активные сессии:",
     gatewayStatusLabel: "Статус шлюза:",
+    openChannels: "Открыть Channels",
+    attachFiles: "Прикрепить файлы",
     gatewayStrip: {
       failed: "Ошибка запуска",
       off: "Отключён",
@@ -160,6 +172,9 @@ export const ru: Translations = {
     confirmDeleteMessage:
       "Это безвозвратно удалит разговор и все его сообщения. Действие нельзя отменить.",
     sessionDeleted: "Сессия удалена",
+    exported: "Сессия экспортирована",
+    exportChat: "Экспорт чата",
+    deleteChat: "Удалить чат",
     failedToDelete: "Не удалось удалить сессию",
     deleteEmpty: "Удалить пустые",
     deleteEmptyConfirmTitle: "Удалить пустые сессии?",
@@ -501,6 +516,7 @@ export const ru: Translations = {
   theme: {
     title: "Тема",
     switchTheme: "Сменить тему",
+    optional: "Опционально",
   },
 
   achievements: {
@@ -771,4 +787,72 @@ export const ru: Translations = {
     logTruncated: "(показаны последние 100 KB — полный журнал в ",
     logAt: ")",
   },
+  chatMeta: {
+    sentAt: "Отправлено {time}",
+    tookSeconds: "обработка {seconds} с",
+  },
+  chatComposer: {
+    model: "Модель",
+    thinking: "Мышление",
+    advanced: "Advanced",
+    auto: "Авто (лучшая доступная)",
+    noKey: "нет ключа",
+    thinkingFast: "Быстро",
+    thinkingBalanced: "Баланс",
+    thinkingDeep: "Глубоко",
+    send: "Отправить",
+    stop: "Стоп",
+    newChatTab: "Новый чат",
+    closeTab: "Закрыть вкладку",
+    close: "Закрыть",
+    reset: "Сбросить",
+    placeholderChat: "Сообщение ARIA… (Enter — отправить, Shift+Enter — новая строка)",
+  },
+  chatPanel: {
+    files: "Файлы",
+    info: "Инфо",
+    openFiles: "Открыть Files",
+    openLogs: "Открыть папку логов",
+    touchedFiles: "Затронутые файлы",
+    attachments: "Вложения",
+  },
+  // UI-2: session inspector in chat.
+  chatInspector: {
+    context: "Контекст",
+    cost: "Стоимость",
+    cacheHit: "Попадание в кэш",
+    messages: "Сообщения",
+    window: "Окно",
+    budget: "Бюджет сжатия",
+    unpriced: "+{count} без цены",
+    noCalls: "Вызовов модели ещё нет",
+  },
+
+  // UI-3: appearance settings.
+  appearance: {
+    title: "Внешний вид",
+    theme: "Тема",
+    font: "Шрифт",
+    background: "Фон",
+    modeTheme: "Как в теме",
+    modeWhite: "Белый",
+    modeTextured: "Текстура",
+    modeCustom: "Свой цвет",
+    customColor: "Свой цвет",
+    hint: "Фон накладывается поверх темы; цвет текста берётся из неё.",
+    modeImage: "Изображение",
+    imageFile: "Фоновое изображение",
+    chooseImage: "Выбрать изображение",
+    removeImage: "Удалить",
+    imageSelected: "Изображение выбрано",
+    noImage: "Изображение не выбрано",
+    imageDim: "Затемнить изображение",
+    open: "Настройки темы",
+    textColor: "Цвет текста",
+    windowTextColor: "Цвет текста окна",
+    accentColor: "Акцент",
+    auto: "Авто",
+    reset: "Сбросить цвета",
+  },
+
 };

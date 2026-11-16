@@ -25,6 +25,7 @@ export interface Translations {
     planNoDeps: string; planNoneDeps: string; planWaves: string;
     waves: string; subtasks: string; noSubtasks: string;
     auditTitle: string; auditVerdict: string; auditCriteria: string;
+    attentionWaiting: string; taskLabel: string;
   };
 
   // ── Common ──
@@ -70,6 +71,15 @@ export interface Translations {
     expand: string;
     general: string;
     messaging: string;
+    /** Optional — Settings → Agent → Shell in Agent (falls back to English literals). */
+    agentShell?: {
+      title: string;
+      hint: string;
+      enabled: string;
+      projectRoot: string;
+      projectRootHint: string;
+      saved: string;
+    };
     // Optional: non-English locales fall back to the English literal in the
     // component until translated, matching the enriched-profiles keys.
     gateway?: string;
@@ -89,6 +99,8 @@ export interface Translations {
     };
     activeSessionsLabel: string;
     gatewayStatusLabel: string;
+    openChannels: string;
+    attachFiles: string;
     gatewayStrip: {
       failed: string;
       off: string;
@@ -177,6 +189,10 @@ export interface Translations {
     confirmDeleteTitle: string;
     confirmDeleteMessage: string;
     sessionDeleted: string;
+    /** Optional — toast after a successful JSON export. */
+    exported?: string;
+    exportChat?: string;
+    deleteChat?: string;
     failedToDelete: string;
     deleteEmpty: string;
     deleteEmptyConfirmTitle: string;
@@ -563,6 +579,8 @@ export interface Translations {
   theme: {
     title: string;
     switchTheme: string;
+    /** Optional-themes group label (locales fall back to English). */
+    optional?: string;
     /** Font-override section (optional — locales fall back to English). */
     fontTitle?: string;
     fontDefault?: string;
@@ -839,5 +857,75 @@ export interface Translations {
     back: string;
     next: string;
     done: string;
+  };
+
+  // UX-1: hover meta on chat messages (send time, processing time).
+  chatMeta: {
+    sentAt: string;
+    tookSeconds: string;
+  };
+  chatComposer: {
+    model: string;
+    thinking: string;
+    advanced: string;
+    auto: string;
+    noKey: string;
+    thinkingFast: string;
+    thinkingBalanced: string;
+    thinkingDeep: string;
+    send: string;
+    stop: string;
+    newChatTab: string;
+    closeTab: string;
+    close: string;
+    reset: string;
+    placeholderChat: string;
+  };
+  chatPanel: {
+    files: string;
+    info: string;
+    openFiles: string;
+    openLogs: string;
+    touchedFiles: string;
+    attachments: string;
+  };
+
+  // UI-2: session inspector in chat.
+  chatInspector: {
+    context: string;
+    cost: string;
+    cacheHit: string;
+    messages: string;
+    window: string;
+    budget: string;
+    unpriced: string;
+    noCalls: string;
+  };
+
+  // UI-3: Appearance card in Settings (theme, font, surface).
+  appearance: {
+    title: string;
+    theme: string;
+    font: string;
+    background: string;
+    modeTheme: string;
+    modeWhite: string;
+    modeTextured: string;
+    modeCustom: string;
+    modeImage: string;
+    imageFile: string;
+    chooseImage?: string;
+    removeImage?: string;
+    imageSelected?: string;
+    noImage?: string;
+    imageDim: string;
+    open: string;
+    textColor: string;
+    windowTextColor: string;
+    accentColor: string;
+    auto: string;
+    reset: string;
+    customColor: string;
+    hint: string;
   };
 }

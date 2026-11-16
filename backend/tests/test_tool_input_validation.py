@@ -141,6 +141,18 @@ def test_plan_mode_web_fetch_without_url_is_rejected_by_schema(tmp_path, monkeyp
     assert calls[0]["status"] == "error" and "invalid_arguments" in calls[0]["output_json"]["error"]
 
 
+def test_plan_mode_web_fetch_ambiguous_objective_is_rejected_by_schema(tmp_path, monkeypatch):
+    from aria.core import executor as ex
+
+    plan = [{"step_id": "33333333-3333-3333-3333-333333333333",
+             "objective": "сравни https://a.example.com/x и https://b.example.com/y",
+             "role": "research", "tool_ref": "web_fetch"}]
+    db, task, p = _stage3_env(plan, tmp_path, monkeypatch)
+    calls = asyncio.run(ex._stage3_execute(db, task, p, router=object()))
+    assert calls[0]["status"] == "error"
+    assert "invalid_arguments (web_fetch)" in calls[0]["output_json"]["error"]
+
+
 def test_skill_read_roundtrip_and_traversal(tmp_path, monkeypatch):
     from aria import paths
 

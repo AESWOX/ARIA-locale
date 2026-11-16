@@ -15,7 +15,6 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import pytest
 
 import aria.core.executor as exec_mod
 from aria.core.executor import _stage3_execute, _stage4_audit, _stage5_hooks

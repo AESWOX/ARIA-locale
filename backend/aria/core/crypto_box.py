@@ -53,7 +53,7 @@ def _load_key() -> bytes:
             return _cached_key
     except KeyUnavailableError:
         raise
-    except Exception:  # noqa: BLE001 — секрет-провайдер недоступен, пробуем файл
+    except Exception:  # секрет-провайдер недоступен, пробуем файл
         logger.warning("crypto_box: секрет-провайдер недоступен, пробую файл ключа")
     path = _key_path()
     try:
@@ -94,7 +94,7 @@ def _mac(key: bytes, nonce: bytes, body: bytes) -> bytes:
 
 
 def is_encrypted(value: object) -> bool:
-    return isinstance(value, str) and (value.startswith(PREFIX) or value.startswith(LEGACY_PREFIX))
+    return isinstance(value, str) and (value.startswith((PREFIX, LEGACY_PREFIX)))
 
 
 def encrypt(value: str) -> str:
@@ -129,7 +129,7 @@ def decrypt(value: object) -> str:
     if value.startswith(PREFIX):
         try:
             raw = base64.urlsafe_b64decode(value[len(PREFIX):].encode("ascii"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ValueError("crypto_box: повреждённое значение enc:v2:") from exc
         if len(raw) < _NONCE_BYTES + _MAC_BYTES:
             raise ValueError("crypto_box: повреждённое значение enc:v2: (слишком короткое)")
@@ -143,7 +143,7 @@ def decrypt(value: object) -> str:
         # Легаси раунда 1: CTR без MAC. Читаем для миграции; при недоступном ключе — ошибка.
         try:
             raw = base64.urlsafe_b64decode(value[len(LEGACY_PREFIX):].encode("ascii"))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return str(value)
         nonce, body = raw[:_NONCE_BYTES], raw[_NONCE_BYTES:]
         key = _load_key()

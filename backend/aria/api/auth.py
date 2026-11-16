@@ -12,7 +12,6 @@ from fastapi import Header, HTTPException
 
 from aria.config import get_settings
 
-
 RUNTIME_TOKEN_ENV = "LOCAL_AGENT_RUNTIME_TOKEN"
 DISABLE_BOOTSTRAP_WRITE_ENV = "LOCAL_AGENT_DISABLE_BOOTSTRAP_WRITE"
 
@@ -141,7 +140,9 @@ async def require_runtime_token(x_local_agent_token: str | None = Header(default
     """Shared runtime-token dependency for API routers (moved from aria.main)."""
     settings = get_settings()
     if settings.aria_dev_mode:
-        if x_local_agent_token is None and settings.http_host in ("127.0.0.1", "localhost", "0.0.0.0"):
+        # Only a loopback bind may skip the token: 0.0.0.0 exposes the API to the
+        # network, so dev mode must not turn the whole LAN into authenticated users.
+        if x_local_agent_token is None and settings.http_host in ("127.0.0.1", "localhost", "::1"):
             return ""
     if not token_store.verify_token(x_local_agent_token):
         raise HTTPException(status_code=401, detail="invalid runtime token")

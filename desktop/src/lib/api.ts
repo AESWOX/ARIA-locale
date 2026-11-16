@@ -457,10 +457,6 @@ export const api = {
     fetchJSON<SessionInfo>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
     ),
-  getSessionLatestDescendant: (id: string) =>
-    fetchJSON<SessionLatestDescendantResponse>(
-      `/api/sessions/${encodeURIComponent(id)}/latest-descendant`,
-    ),
   deleteSession: (id: string, profile = getManagementProfile()) =>
     fetchJSON<{ ok: boolean }>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
@@ -497,7 +493,7 @@ export const api = {
   getSessionStats: (profile = getManagementProfile()) =>
     fetchJSON<SessionStoreStats>(appendProfileParam("/api/sessions/stats", profile)),
   exportSessionUrl: (id: string, profile = getManagementProfile()) =>
-    appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/export`, profile),
+    appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/export.md`, profile),
   pruneSessions: (
     older_than_days: number,
     source?: string,
@@ -530,6 +526,14 @@ export const api = {
       method: "POST",
       body: form,
     });
+  },
+  importSkillsZip: (file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return fetchJSON<{ ok: boolean; imported: string[]; skipped: string[] }>(
+      "/api/skills/import",
+      { method: "POST", body: form },
+    );
   },
   createDirectory: (path: string) =>
     fetchJSON<ManagedFileWriteResponse>("/api/files/mkdir", {
@@ -568,6 +572,9 @@ export const api = {
     }),
   clearLogs: () =>
     fetchJSON<{ ok: boolean; cleared: boolean; removed_backups: number }>("/api/logs/clear", { method: "POST" }),
+  openLogsFolder: () =>
+    fetchJSON<{ ok: boolean; path: string }>("/api/logs/open-folder", { method: "POST" }),
+  diagnosticsUrl: () => "/api/logs/diagnostics",
   getAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),
@@ -631,7 +638,7 @@ export const api = {
     fetchJSON<CronJob[]>(`/api/cron/jobs?profile=${encodeURIComponent(profile)}`),
   getCronDeliveryTargets: () =>
     fetchJSON<{ targets: CronDeliveryTarget[] }>("/api/cron/delivery-targets"),
-  createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string; skills?: string[] }, profile = "default") =>
+  createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string; skills?: string[]; urgent?: boolean }, profile = "default") =>
     fetchJSON<CronJob>(`/api/cron/jobs?profile=${encodeURIComponent(profile)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -641,7 +648,7 @@ export const api = {
     fetchJSON<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}/pause?profile=${encodeURIComponent(profile)}`, { method: "POST" }),
   updateCronJob: (
     id: string,
-    updates: { prompt?: string; schedule?: string; name?: string; deliver?: string; skills?: string[] },
+    updates: { prompt?: string; schedule?: string; name?: string; deliver?: string; skills?: string[]; urgent?: boolean },
     profile = "default",
   ) =>
     fetchJSON<CronJob>(
@@ -799,6 +806,16 @@ export const api = {
     }),
   // ---- Chat (backend: routers/chat.py) ----
   chatStatus: () => fetchJSON<ChatStatus>("/api/chat/status"),
+  getModes: () =>
+    fetchJSON<{ adult: boolean; adult_scope: string; adult_confirmed_at: string | null; needs_confirmation: boolean; providers: string[] }>(
+      "/api/chat/modes",
+    ),
+  setModes: (body: { adult: boolean; adult_scope?: "session" | "global"; confirm?: boolean }) =>
+    fetchJSON<{ ok: boolean; adult?: boolean; needs_confirmation?: boolean; message?: string }>("/api/chat/modes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   chatSessions: () => fetchJSON<ChatSessionRow[]>("/api/chat/sessions"),
   chatCreate: (title?: string) =>
     fetchJSON<{ session_id: string; title: string }>("/api/chat/sessions", {
@@ -808,19 +825,105 @@ export const api = {
     }),
   chatMessages: (sessionId: string) =>
     fetchJSON<ChatMsg[]>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/messages`),
-  chatSend: (sessionId: string, body: { content?: string; retry?: boolean }) =>
+  chatSend: (sessionId: string, body: { content?: string; retry?: boolean; attachments?: string[] }) =>
     fetchJSON<ChatSendResult>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  /**
+   * Streaming variant of ``chatSend`` (backend: routers/chat.py NDJSON stream).
+   *
+   * Sends ``{..., stream: true}`` and reads the ``application/x-ndjson`` body
+   * line by line: each ``{"type":"delta","text":...}`` is forwarded to
+   * ``onDelta``, and the final ``{"type":"done","result":...}`` resolves with
+   * the same shape as ``chatSend``. Auth mirrors ``fetchJSON`` (runtime token +
+   * legacy session token); a non-2xx throws the same ``"<status>: <body>"``
+   * error so ``errMessage()`` can still extract the backend ``detail``.
+   */
+  chatSendStream: async (
+    sessionId: string,
+    body: { content?: string; retry?: boolean; attachments?: string[] },
+    onDelta?: (text: string) => void,
+  ): Promise<ChatSendResult> => {
+    const base = await resolveBase();
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (_runtimeToken && !headers.has("X-Local-Agent-Token")) {
+      headers.set("X-Local-Agent-Token", _runtimeToken);
+    }
+    const token = window.__ARIA_SESSION_TOKEN__;
+    if (token) setSessionHeader(headers, token);
+    const res = await fetch(`${base}/api/chat/sessions/${encodeURIComponent(sessionId)}/send`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify({ ...body, stream: true }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    if (!res.body) throw new Error("streaming response has no body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let result: ChatSendResult | null = null;
+    let stopped = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        let evt: { type?: string; text?: string; result?: ChatSendResult; message?: string };
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (evt.type === "delta" && evt.text) onDelta?.(evt.text);
+        else if (evt.type === "done" && evt.result) result = evt.result;
+        else if (evt.type === "error") throw new Error(evt.message || "stream error");
+        else if (evt.type === "stopped") stopped = true;
+      }
+      if (stopped) break;
+    }
+    if (stopped) return { stopped: true };
+    if (!result) throw new Error("stream ended without a done event");
+    return result;
+  },
+  chatUsage: (sessionId: string) =>
+    fetchJSON<ChatUsage>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/usage`),
+  chatStop: (sessionId: string) =>
+    fetchJSON<{ ok: boolean; stopped: boolean }>(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/stop`,
+      { method: "POST" },
+    ),
   chatModels: () => fetchJSON<ChatModels>("/api/chat/models"),
   chatDefaultProfile: () => fetchJSON<{ profile: RunProfile; saved: boolean }>("/api/chat/profile"),
-  chatSaveProfile: (sessionId: string, profile: RunProfile) =>
-    fetchJSON<{ profile: RunProfile; notes: string[] }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/profile`, {
+  chatSaveProfile: (sessionId: string, profile: RunProfile, useForNew = false) =>
+    fetchJSON<{ profile: RunProfile; notes: string[] }>(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/profile${useForNew ? "?use_for_new=true" : ""}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile),
+      },
+    ),
+  chatSaveDefaultProfile: (profile: RunProfile) =>
+    fetchJSON<{ profile: RunProfile; notes: string[] }>("/api/chat/profile", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(profile),
+    }),
+  telegramConnect: (token: string, channel: string) =>
+    fetchJSON<{ ok: boolean; channel: string; token_saved: boolean }>("/api/messaging/telegram/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, channel }),
     }),
   chatSessionProfile: (sessionId: string) =>
     fetchJSON<{ profile: RunProfile; saved: boolean }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/profile`),
@@ -982,20 +1085,6 @@ export const api = {
       },
     );
   },
-  startOAuthLogin: async (providerId: string) => {
-    const token = await getSessionToken();
-    return fetchJSON<OAuthStartResponse>(
-      `/api/providers/oauth/${encodeURIComponent(providerId)}/start`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [SESSION_HEADER]: token,
-        },
-        body: "{}",
-      },
-    );
-  },
   submitOAuthCode: async (providerId: string, sessionId: string, code: string) => {
     const token = await getSessionToken();
     return fetchJSON<OAuthSubmitResponse>(
@@ -1090,9 +1179,6 @@ export const api = {
   // Dashboard plugins
   getPlugins: () =>
     fetchJSON<PluginManifestResponse[]>("/api/dashboard/plugins"),
-  rescanPlugins: () =>
-    fetchJSON<{ ok: boolean; count: number }>("/api/dashboard/plugins/rescan"),
-
   getPluginsHub: () => fetchJSON<PluginsHubResponse>("/api/dashboard/plugins/hub"),
 
   installAgentPlugin: (body: AgentPluginInstallRequest) =>
@@ -1126,13 +1212,6 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  savePluginProviders: (body: PluginProvidersPutRequest) =>
-    fetchJSON<{ ok: boolean }>("/api/dashboard/plugin-providers", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-
   setPluginVisibility: (name: string, hidden: boolean) =>
     fetchJSON<{ ok: boolean; name: string; hidden: boolean }>(
       `/api/dashboard/plugins/${pluginPath(name)}/visibility`,
@@ -1159,6 +1238,14 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ font }),
+    }),
+  getDashboardPrefs: () =>
+    fetchJSON<DashboardPrefs>("/api/dashboard/prefs"),
+  saveDashboardPrefs: (patch: Partial<DashboardPrefs>) =>
+    fetchJSON<{ ok: boolean } & DashboardPrefs>("/api/dashboard/prefs", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
     }),
 
   // ── Admin: MCP servers ──────────────────────────────────────────────
@@ -1308,6 +1395,9 @@ export const api = {
   // ── Admin: Operations ───────────────────────────────────────────────
   runDoctor: () =>
     fetchJSON<ActionResponse>("/api/ops/doctor", { method: "POST" }),
+  toolchainStatus: () => fetchJSON<ToolchainStatus>("/api/toolchain/status"),
+  toolchainInstall: () =>
+    fetchJSON<ToolchainInstallResult>("/api/toolchain/install", { method: "POST" }),
   runSecurityAudit: () =>
     fetchJSON<ActionResponse>("/api/ops/security-audit", { method: "POST" }),
   runBackup: (output?: string) =>
@@ -1438,6 +1528,24 @@ export interface AuthMeResponse {
   org_id: string;
   provider: string;
   expires_at: number;
+}
+
+export interface ToolchainStatus {
+  runtime_dir: string;
+  python_path: string;
+  versions: Record<string, string | null>;
+  missing: string[];
+  installed: boolean;
+}
+
+export interface ToolchainInstallResult {
+  ok: boolean;
+  offline: boolean;
+  error?: string;
+  runtime_dir: string;
+  steps?: string[];
+  errors?: string[];
+  status?: ToolchainStatus;
 }
 
 export interface ActionResponse {
@@ -2054,6 +2162,10 @@ export interface AnalyticsDailyEntry {
   actual_cost: number;
   sessions: number;
   api_calls: number;
+  /** D-38: real spend from the llm_usage ledger (cost_usd), local day. */
+  ledger_cost_usd: number;
+  /** D-38: ledger rows without a price; they are not folded into zero. */
+  unpriced_calls: number;
 }
 
 export interface AnalyticsModelEntry {
@@ -2093,6 +2205,10 @@ export interface AnalyticsResponse {
     total_actual_cost: number;
     total_sessions: number;
     total_api_calls: number;
+    /** D-38: real spend from the llm_usage ledger (cost_usd). */
+    ledger_cost_usd: number;
+    /** D-38: ledger rows without a price. */
+    unpriced_calls: number;
   };
   skills: {
     summary: AnalyticsSkillsSummary;
@@ -2187,6 +2303,9 @@ export interface CronJob {
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_error?: string | null;
+  urgent?: boolean;
+  defer_until?: string | null;
+  deferred_note?: string | null;
 }
 
 export interface CronDeliveryTarget {
@@ -2251,11 +2370,28 @@ export interface ChatSessionRow {
   last_reply_at?: string | null;
 }
 
+export interface ChatMsgToolOutput {
+  tool_name?: string | null;
+  status?: string | null;
+  arguments?: Record<string, unknown> | null;
+  output?: Record<string, unknown> | null;
+  fold_ref?: string | null;
+  checkpoint_id?: string | null;
+}
+
 export interface ChatMsg {
   id: string;
   role: string;
   content: string;
   created_at: string | null;
+  /** UI: expandable process row for role="tool". */
+  tool_output?: ChatMsgToolOutput | null;
+  /** Notice card marker (e.g. telegram_not_connected) returned by the backend. */
+  content_json?: {
+    notice: string;
+    action?: string | null;
+    action_path?: string | null;
+  } | null;
 }
 
 export type RunMode = "agent" | "plan";
@@ -2265,6 +2401,9 @@ export interface RunPostResult {
   queued?: boolean;
   task_id?: string;
   mode?: RunMode;
+  /** E3: дорогая задача ждёт Approve, задача ещё не стартовала */
+  attention_required?: boolean;
+  estimate?: { p50: number; p90: number; n: number; source: string };
 }
 
 export interface RunAttentionItem {
@@ -2316,6 +2455,8 @@ export interface RunState {
   /** Why the task failed (provider_http_429, provider_unavailable, runner_error, ...); null otherwise. */
   error_code?: string | null;
   error_message?: string | null;
+  /** Latest audit report: verdict pass_ | needs_rework | fail_after_max_attempts | unaudited. */
+  audit?: { verdict: string; attempt_no: number; model: string } | null;
 }
 
 export interface ProfileSeat {
@@ -2338,10 +2479,56 @@ export interface ChatModels {
 }
 
 export interface ChatSendResult {
-  user: ChatMsg;
-  assistant: ChatMsg;
+  /** absent when the request was switched to Agent (19.4b B2) */
+  user?: ChatMsg;
+  assistant?: ChatMsg;
+  provider_id?: string;
+  degraded?: boolean;
+  /** set when the answer came from a fallback class after the preferred provider failed */
+  fallback?: boolean;
+  /** 19.4b B2: the chat request needed a tool and the session moved to Agent */
+  mode?: "chat" | "agent";
+  task_id?: string;
+  queued?: boolean;
+  /** 19.6: the user pressed Stop; no assistant message was stored */
+  stopped?: boolean;
+}
+
+/** UI-2: one row per provider/model in the session inspector. */
+export interface ChatUsageModel {
   provider_id: string;
-  degraded: boolean;
+  model: string | null;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number | null;
+  priced: boolean;
+}
+
+/** 19.6a/19.6 + UI-2: context, cost and aggregates of the open chat (GET /chat/sessions/{id}/usage). */
+export interface ChatUsage {
+  context_tokens: number;
+  context_window: number | null;
+  context_pct: number | null;
+  context_budget: number | null;
+  session_cost: number | null;
+  session_cost_complete: boolean;
+  /** D-38: some calls are priced, some are not — show the partial sum, not silence. */
+  session_cost_partial: boolean;
+  priced: boolean;
+  priced_messages: number;
+  unpriced_messages: number;
+  cache_hit_ratio: number | null;
+  /** UI-2: aggregates across all llm_usage rows of the session. */
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_reasoning_tokens: number;
+  total_tokens: number;
+  calls: number;
+  first_call_at: string | null;
+  last_call_at: string | null;
+  by_model: ChatUsageModel[];
+  message_count: number;
 }
 
 /** Encode each path segment but keep the "/" separators. */
@@ -2404,6 +2591,7 @@ export interface VaultCandidate {
   sources: string[];
   is_obsidian_vault: boolean;
   note_count: number;
+  note_count_capped?: boolean;
   last_modified: string | null;
   open_in_obsidian: boolean;
   current: boolean;
@@ -2622,23 +2810,6 @@ export interface OAuthProvidersResponse {
   providers: OAuthProvider[];
 }
 
-/** Discriminated union — the shape of /start depends on the flow. */
-export type OAuthStartResponse =
-  | {
-      session_id: string;
-      flow: "pkce";
-      auth_url: string;
-      expires_in: number;
-    }
-  | {
-      session_id: string;
-      flow: "device_code";
-      user_code: string;
-      verification_url: string;
-      expires_in: number;
-      poll_interval: number;
-    };
-
 export interface OAuthSubmitResponse {
   ok: boolean;
   status: "approved" | "error";
@@ -2671,6 +2842,22 @@ export interface DashboardThemesResponse {
 export interface DashboardFontResponse {
   /** Active font-override id, or "theme" when no override is set. */
   font: string;
+}
+
+export interface DashboardPrefs {
+  theme: string;
+  font: string;
+  surface_mode: "theme" | "white" | "textured" | "custom" | "image";
+  surface_color: string;
+  surface_image: string;
+  surface_dim: number;
+  open_tabs?: string[];
+  active_tab?: string | null;
+  overrides: {
+    textColor: string;
+    windowTextColor: string;
+    accentColor: string;
+  };
 }
 
 // ── Dashboard plugin types ─────────────────────────────────────────────

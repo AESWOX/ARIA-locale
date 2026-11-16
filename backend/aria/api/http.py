@@ -21,30 +21,35 @@ from aria.routers.sessions import (
 from aria.routers.storage import get_b2_buckets, get_b2_object_meta, list_b2_objects
 from aria.routers.system import get_health
 from aria.routers.tasks import cancel_task, get_audit_reports, start_task
-from aria.routers.vault import get_vault_note, get_vault_tree, put_vault_note, search_vault
+from aria.routers.vault import (
+    get_vault_note,
+    get_vault_tree,
+    put_vault_note,
+    search_vault,
+)
 
 __all__ = [
     "app",
-    "get_health",
-    "get_public_config",
-    "verify_pin",
-    "list_sessions",
+    "approve_attention",
+    "cancel_task",
     "create_session",
-    "get_session",
     "delete_session",
     "export_session_markdown",
-    "post_message",
-    "list_attention_items",
-    "get_vault_tree",
-    "get_vault_note",
-    "put_vault_note",
-    "search_vault",
-    "get_b2_buckets",
-    "list_b2_objects",
-    "get_b2_object_meta",
-    "start_task",
-    "cancel_task",
     "get_audit_reports",
-    "approve_attention",
+    "get_b2_buckets",
+    "get_b2_object_meta",
+    "get_health",
+    "get_public_config",
+    "get_session",
+    "get_vault_note",
+    "get_vault_tree",
+    "list_attention_items",
+    "list_b2_objects",
+    "list_sessions",
+    "post_message",
+    "put_vault_note",
     "reject_attention",
+    "search_vault",
+    "start_task",
+    "verify_pin",
 ]

@@ -14,8 +14,8 @@ import contextvars
 import logging
 import logging.handlers
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 current_task_id: contextvars.ContextVar[str] = contextvars.ContextVar("aria_task_id", default="")
 
@@ -58,7 +58,7 @@ def install_record_factory() -> None:
             short = tid[:8]
             try:
                 already = short in record.getMessage()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 already = False
             if not already:
                 tag = f" [task={short}]"

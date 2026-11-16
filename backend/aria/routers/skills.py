@@ -8,15 +8,16 @@ no results, so the SkillsPage renders and installs/uninstalls locally.
 """
 from __future__ import annotations
 
-from aria import paths
-
-import os
+import io
 import re
+import zipfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import yaml
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 from aria.db import models as m
 from aria.db import repository as repo
@@ -182,6 +183,7 @@ async def create_skill(
     content = body.get("content") or ""
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
+    _validate_skill_md(content, source=name)
     d = _skill_dir(name)
     d.mkdir(parents=True, exist_ok=True)
     md = d / "SKILL.md"
@@ -197,6 +199,160 @@ async def create_skill(
     return {"success": True, "message": f"created {name}", "path": str(md)}
 
 
+_MAX_ZIP_BYTES = 100 * 1024 * 1024
+_MAX_UNPACKED_BYTES = 256 * 1024 * 1024
+_MAX_ZIP_ENTRIES = 2000
+_SKILL_MD_MAX_BYTES = 200_000
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _scan_text(text: str, rel: str) -> list[dict[str, Any]]:
+    """Heuristic dangerous-pattern scan (same rules as GET /skills/hub/scan)."""
+    findings: list[dict[str, Any]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for severity, pattern in _SCAN_PATTERNS:
+            if re.search(pattern, line):
+                findings.append({
+                    "severity": severity,
+                    "category": "command-execution" if severity == "high" else "suspicious-shell",
+                    "file": rel,
+                    "line": lineno,
+                    "description": line.strip()[:160],
+                })
+    return findings
+
+
+def _validate_skill_md(content: str, *, source: str, require_frontmatter: bool = False) -> None:
+    """Size limit, YAML frontmatter and dangerous-pattern audit before writing to disk."""
+    if len(content.encode("utf-8")) > _SKILL_MD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"{source}: SKILL.md is larger than 200 KB")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail=f"{source}: SKILL.md is empty")
+    text = content.lstrip("\ufeff").strip()
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            raise HTTPException(status_code=400, detail=f"{source}: unterminated YAML frontmatter")
+        try:
+            meta = yaml.safe_load(parts[1])
+        except yaml.YAMLError as exc:
+            raise HTTPException(status_code=400, detail=f"{source}: invalid YAML frontmatter: {exc}") from exc
+        if not isinstance(meta, dict) or not str(meta.get("name") or "").strip():
+            raise HTTPException(status_code=400, detail=f"{source}: frontmatter must define 'name'")
+    elif require_frontmatter:
+        raise HTTPException(status_code=400, detail=f"{source}: SKILL.md must start with YAML frontmatter")
+    findings = _scan_text(content, "SKILL.md")
+    if any(item["severity"] == "high" for item in findings):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{source}: dangerous command-execution patterns in SKILL.md",
+        )
+
+
+def _safe_zip_path(name: str) -> bool:
+    """Reject absolute paths, drive letters and `..` segments (zip-slip)."""
+    normalized = name.replace("\\", "/")
+    if not normalized or normalized.startswith("/"):
+        return False
+    if len(normalized) > 1 and normalized[1] == ":":
+        return False
+    return all(part not in ("", ".", "..") for part in normalized.split("/"))
+
+
+def _import_skills_from_zip(data: bytes) -> tuple[list[str], list[str]]:
+    """Install every `<dir>/SKILL.md` bundle from the archive. Returns (imported, skipped)."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="not a zip archive") from exc
+    infos = archive.infolist()
+    if len(infos) > _MAX_ZIP_ENTRIES:
+        raise HTTPException(status_code=400, detail=f"zip has more than {_MAX_ZIP_ENTRIES} entries")
+    if sum(info.file_size for info in infos) > _MAX_UNPACKED_BYTES:
+        raise HTTPException(status_code=413, detail="unpacked size is larger than 256 MB")
+    for info in infos:
+        if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+            raise HTTPException(status_code=400, detail=f"symlink in zip: {info.filename}")
+        if not _safe_zip_path(info.filename):
+            raise HTTPException(status_code=400, detail=f"unsafe path in zip: {info.filename}")
+
+    bundles: dict[str, Path] = {}
+    for info in infos:
+        if info.is_dir():
+            continue
+        parts = Path(info.filename.replace("\\", "/")).parts
+        if len(parts) < 2 or parts[-1] != "SKILL.md" or not _SKILL_NAME_RE.match(parts[-2]):
+            continue
+        bundles.setdefault(parts[-2], Path(*parts[:-1]))
+
+    if not bundles:
+        raise HTTPException(status_code=400, detail="no SKILL.md found in the archive")
+
+    SKILLS_ROOT.mkdir(parents=True, exist_ok=True)
+    imported: list[str] = []
+    skipped: list[str] = []
+    with session_scope() as db:
+        for name, prefix in sorted(bundles.items()):
+            dest = SKILLS_ROOT / name
+            if dest.exists():
+                skipped.append(name)
+                continue
+            members: list[tuple[Path, bytes]] = []
+            for info in infos:
+                if info.is_dir():
+                    continue
+                rel_path = Path(info.filename.replace("\\", "/"))
+                try:
+                    sub = rel_path.relative_to(prefix)
+                except ValueError:
+                    continue
+                payload = archive.read(info)
+                if sub.name == "SKILL.md":
+                    _validate_skill_md(
+                        payload.decode("utf-8", "replace"),
+                        source=f"import:{name}",
+                        require_frontmatter=True,
+                    )
+                elif any(
+                    item["severity"] == "high"
+                    for item in _scan_text(payload.decode("utf-8", "ignore"), str(sub))
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"import:{name}: dangerous pattern in {sub}",
+                    )
+                members.append((sub, payload))
+            if not members:
+                skipped.append(name)
+                continue
+            for sub, payload in members:
+                target = dest / sub
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            repo.upsert_skill(
+                db,
+                name,
+                category="imported",
+                status=SkillStatus.active,
+                source_origin="import",
+            )
+            imported.append(name)
+    return imported, skipped
+
+
+@router.post("/skills/import")
+async def import_skills(
+    file: UploadFile = File(...),
+    _: str = Depends(require_runtime_token),
+) -> dict[str, Any]:
+    """Import skill bundles from a .zip: every folder with SKILL.md becomes a skill."""
+    data = await file.read(_MAX_ZIP_BYTES + 1)
+    if len(data) > _MAX_ZIP_BYTES:
+        raise HTTPException(status_code=413, detail="zip is larger than 100 MB")
+    imported, skipped = _import_skills_from_zip(data)
+    return {"ok": True, "imported": imported, "skipped": skipped}
+
+
 @router.put("/skills/content")
 async def update_skill_content(
     body: dict[str, Any],
@@ -206,6 +362,7 @@ async def update_skill_content(
     content = body.get("content")
     if not name or content is None:
         raise HTTPException(status_code=400, detail="name and content are required")
+    _validate_skill_md(content, source=name)
     d = _skill_dir(name)
     md = d / "SKILL.md"
     if not md.exists():

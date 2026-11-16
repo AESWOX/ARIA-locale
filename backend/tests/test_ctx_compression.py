@@ -9,7 +9,7 @@ from aria.config import get_settings
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import SourceTrust, TaskStatus
+from aria.db.enums import TaskStatus
 from aria.llm import compression
 from aria.routers.chat import SYSTEM_PROMPT, _build_prompt
 from tests.test_chat_api import FakeLlm, _cleanup, _client, _new_session
@@ -27,7 +27,12 @@ def ctx(monkeypatch):
 
     async def fake_summarize(block: str) -> str:
         calls.append(block)
-        return "SUMMARY-TEXT"
+        return (
+            "Instructions: keep\nTask: SUMMARY-TEXT\nConstraints: none\n"
+            "Decisions: none\nVerified facts: none\nEntities: none\n"
+            "Open questions: none\nState: compressed\n"
+            '{"ok": true, "missing": []}'
+        )
 
     monkeypatch.setattr(compression, "_summarize", fake_summarize)
     # Фикстура изображает настроенное Gemini-сжатие: без пула ключей сжатие уходит через роутер (test_single_key.py).

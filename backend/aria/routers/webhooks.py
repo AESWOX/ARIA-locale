@@ -18,7 +18,7 @@ import logging
 import re
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -114,7 +114,7 @@ async def webhooks_create(payload: dict[str, Any], _: str = Depends(require_runt
         "deliver_only": bool(payload.get("deliver_only", False)),
         "prompt": str(payload.get("prompt", "")),
         "skills": [str(s) for s in (payload.get("skills") or [])],
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "url": f"/webhooks/in/{name}",
         "enabled": True,
         "secret": secret,
@@ -151,7 +151,7 @@ def sign(secret: str, body: bytes) -> str:
 
 
 def _record(entry: dict[str, Any]) -> None:
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), **entry}
+    entry = {"ts": datetime.now(UTC).isoformat(), **entry}
     path = data_dir() / "webhook_deliveries.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
@@ -225,7 +225,7 @@ async def webhook_receive(name: str, request: Request):
                 await _send_telegram(text)
             else:
                 logger.info("webhook %s: %s", name, text[:800])
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _record({"name": name, "event": event, "result": "deliver_failed", "error": str(exc)[:200]})
             return JSONResponse({"ok": False, "detail": f"delivery failed: {exc}"}, status_code=502)
         _record({"name": name, "event": event, "result": "delivered", "deliver": sub.get("deliver")})

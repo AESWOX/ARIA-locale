@@ -97,6 +97,9 @@ class TaskSpec(BaseModel):
     clarifications: list[dict] = Field(default_factory=list)
     clarify_rounds: int = 0
     high_risk: bool = False
+    # 19.4b D-21: режим вкладки (agent/plan), выбранный при постановке задачи; переживает
+    # раунд уточнения, чтобы `/clarify` без mode не уводил задачу в plan.
+    mode: str = ""
 
     def sync_questions(self) -> None:
         """Синхронизирует зеркало open_questions с уточнённым списком вопросов."""

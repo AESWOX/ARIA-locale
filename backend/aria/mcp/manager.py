@@ -24,7 +24,13 @@ from typing import Any
 from aria import paths
 from aria.db.enums import IdempotencyClass, RiskLevel
 from aria.mcp import oauth
-from aria.mcp.client import HttpTransport, McpAuthRequired, McpClient, McpError, StdioTransport
+from aria.mcp.client import (
+    HttpTransport,
+    McpAuthRequired,
+    McpClient,
+    McpError,
+    StdioTransport,
+)
 from aria.tools.registry import TOOL_REGISTRY, ToolSpec
 
 logger = logging.getLogger("local_agent.mcp")
@@ -32,7 +38,7 @@ logger = logging.getLogger("local_agent.mcp")
 MAX_TEXT = 20000
 MAX_TOOL_NAME = 64
 CONNECT_TIMEOUT = 45.0
-MCP_ROLES: tuple[str, ...] = ("general", "orchestrator")
+MCP_ROLES: tuple[str, ...] = ("general", "orchestrator", "coder", "worker")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _CONN_FIELDS = ("url", "command", "args", "env", "headers")
 
@@ -109,11 +115,11 @@ def validate_server(payload: dict) -> dict:
 
 def make_tool_name(server: str, tool: str) -> str:
     """``mcp__<server>__<tool>``: допустимые символы, ≤64 (лимит провайдеров), уникально при усечении."""
-    clean = lambda s: re.sub(r"[^A-Za-z0-9_-]", "_", s)  # noqa: E731
+    clean = lambda s: re.sub(r"[^A-Za-z0-9_-]", "_", s)
     base = f"mcp__{clean(server)}__{clean(tool)}"
     if len(base) <= MAX_TOOL_NAME:
         return base
-    digest = hashlib.sha1(f"{server}\0{tool}".encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(f"{server}\0{tool}".encode()).hexdigest()[:8]
     return f"{base[: MAX_TOOL_NAME - 9]}_{digest}"
 
 
@@ -234,7 +240,7 @@ class McpManager:
         if client is not None:
             try:
                 await client.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("mcp '%s': close failed", name, exc_info=True)
 
     async def _drop_client_only(self, name: str) -> None:
@@ -244,7 +250,7 @@ class McpManager:
         if client is not None:
             try:
                 await client.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("mcp '%s': close failed", name, exc_info=True)
 
     async def disconnect(self, name: str) -> None:
@@ -281,7 +287,7 @@ class McpManager:
             tname = str(tool["name"])
             reg_name = make_tool_name(server, tname)
             if reg_name in taken or (reg_name in TOOL_REGISTRY and reg_name not in self._registered.get(server, [])):
-                digest = hashlib.sha1(f"{server}\0{tname}".encode("utf-8")).hexdigest()[:8]
+                digest = hashlib.sha1(f"{server}\0{tname}".encode()).hexdigest()[:8]
                 reg_name = f"{reg_name[: MAX_TOOL_NAME - 9]}_{digest}"
             taken[reg_name] = tname
             self._origins[reg_name] = (server, tname)
@@ -359,7 +365,7 @@ class McpManager:
                     continue
                 try:
                     await self._refresh_locked(name)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("mcp '%s' unavailable: %s", name, exc)
 
     def origin(self, registry_name: str) -> tuple[str, str] | None:
@@ -416,7 +422,7 @@ class McpManager:
         except McpAuthRequired as exc:
             self._challenges[name] = exc.www_authenticate
             return {"ok": False, "error": "authorization required: press Authorize", "auth_required": True, "tools": []}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return {"ok": False, "error": str(exc) or exc.__class__.__name__, "tools": []}
 
 

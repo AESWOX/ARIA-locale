@@ -14,20 +14,22 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
-    Enum as SAEnum,
+    Float,
     ForeignKey,
     Integer,
-    Float,
-    JSON,
     String,
     Text,
     UniqueConstraint,
     Uuid,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -49,7 +51,7 @@ def _uuid() -> uuid.UUID:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -73,8 +75,8 @@ class Session(Base):
     last_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    messages: Mapped[list["Message"]] = relationship(back_populates="session", foreign_keys="Message.session_id")
-    tasks: Mapped[list["Task"]] = relationship(back_populates="session", foreign_keys="Task.session_id")
+    messages: Mapped[list[Message]] = relationship(back_populates="session", foreign_keys="Message.session_id")
+    tasks: Mapped[list[Task]] = relationship(back_populates="session", foreign_keys="Task.session_id")
 
 
 class Task(Base):
@@ -102,12 +104,12 @@ class Task(Base):
     session: Mapped[Session] = relationship(back_populates="tasks", foreign_keys=[session_id])
     # §7.2: self-referential parent-children. children = one-to-many (remote side),
     # parent = many-to-one (locally fk'd). remote_side=Task.id только на parent.
-    children: Mapped[list["Task"]] = relationship(
+    children: Mapped[list[Task]] = relationship(
         back_populates="parent",
         foreign_keys=[parent_task_id],
         lazy="selectin",
     )
-    parent: Mapped["Task | None"] = relationship(
+    parent: Mapped[Task | None] = relationship(
         back_populates="children",
         foreign_keys=[parent_task_id],
         remote_side="Task.id",
@@ -285,6 +287,109 @@ class ProviderModel(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class LlmUsage(Base):
+    """E1: одна строка на успешный вызов модели — токены, назначение, цена (E2), tier."""
+
+    __tablename__ = "llm_usage"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    provider_id: Mapped[str] = mapped_column(String)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    purpose: Mapped[str] = mapped_column(String, default="other")
+    prompt_hit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_miss: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_total: Mapped[int] = mapped_column(Integer, default=0)
+    completion: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tier: Mapped[str] = mapped_column(String, default="n/a")
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class PageCache(Base):
+    """S3: кэш прочитанных страниц (URL -> текст, etag/last-modified, TTL)."""
+
+    __tablename__ = "page_cache"
+
+    url: Mapped[str] = mapped_column(String, primary_key=True)
+    etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String, nullable=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    date: Mapped[str] = mapped_column(String, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[int] = mapped_column(Integer, default=200)
+    content_type: Mapped[str] = mapped_column(String, default="text/html")
+    final_url: Mapped[str] = mapped_column(String, default="")
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class Lead(Base):
+    """J1: заказ/лид из недоверенных источников (весь текст untrusted, не исполняется)."""
+
+    __tablename__ = "leads"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    source: Mapped[str] = mapped_column(String, default="manual")
+    url: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    budget_text: Mapped[str | None] = mapped_column(String, nullable=True)
+    budget_usd_est: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String, nullable=True)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    language: Mapped[str | None] = mapped_column(String, nullable=True)
+    raw_hash: Mapped[str] = mapped_column(String, index=True)
+    status: Mapped[str] = mapped_column(String, default="new", index=True)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    effort_hours_est: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token_cost_est_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scam_flags: Mapped[list] = mapped_column(JSON, default=list)
+    sensitive: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class LeadEvent(Base):
+    __tablename__ = "lead_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    lead_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String, default="created")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class OrderLedger(Base):
+    """J6: деньги против токенов; FK RESTRICT действует на Postgres (SQLite pragma off)."""
+
+    __tablename__ = "order_ledger"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    lead_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leads.id", ondelete="RESTRICT"), index=True)
+    revenue_amount: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String)
+    platform_fee: Mapped[float] = mapped_column(Float, default=0.0)
+    fx_to_usd: Mapped[float] = mapped_column(Float, default=1.0)
+    llm_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    order_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class SearchCache(Base):
+    """S1: кэш результатов поиска (key = sha256 запроса и набора провайдеров)."""
+
+    __tablename__ = "search_cache"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class ProviderTierHint(Base):
     """Ручная подсказка по free/paid tier для провайдеров (§5.2 v8.0)."""
 
@@ -312,6 +417,9 @@ class SchedulerJob(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
     last_run_status: Mapped[str | None] = mapped_column(String, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # E8: срочность и отложенный запуск в окно off-peak.
+    urgent: Mapped[bool] = mapped_column(Boolean, default=False)
+    defer_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Event(Base):

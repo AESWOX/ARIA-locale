@@ -22,32 +22,39 @@ import asyncio
 import json
 import logging
 import uuid
+from pathlib import Path
 
 import httpx
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
-from aria.core import approvals, runprofile
+from aria.core import approvals, role_models, runprofile, toolhooks
 from aria.core.audit import run_audit
 from aria.core.events import event_bus
-from aria.llm import compression
+from aria.core.guardrails import ToolCallGuardrailController
 from aria.core.roles import get_role
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import AuditVerdict, SourceTrust, TaskStatus, ToolStatus
+from aria.db.enums import (
+    AttentionType,
+    AuditVerdict,
+    SourceTrust,
+    TaskStatus,
+    ToolStatus,
+)
+from aria.llm import compression
 from aria.llm.providers.base import ChatMessage
 from aria.llm.router import ProviderRouter, ProviderUnavailable, tried_suffix
 from aria.tools.registry import get_tool
-from aria.core import toolhooks
 from aria.tools.validators import (
     ToolValidationError,
     assert_role_allowed,
     classify_shell_command,
+    command_rejection_reason,
+    is_windows_command,
 )
-from aria.core.guardrails import ToolCallGuardrailController
 
 logger = logging.getLogger("local_agent.loop")
 
@@ -73,19 +80,24 @@ def _tool_schemas_for_role(tool_whitelist: tuple[str, ...]) -> list[dict]:
 
 
 def _load_persona() -> str:
-    """Load persona.md from the prompts directory."""
-    import os
-    p = os.path.join(os.path.dirname(__file__), "..", "prompts", "persona.md")
-    try:
-        with open(p, encoding="utf-8") as f:
-            return "\n" + f.read()
-    except FileNotFoundError:
-        logger.warning("persona.md not found at %s", p)
+    """Load persona.md from the prompts directory (L1: gated by PERSONA_PROMPT_ENABLED)."""
+    if not bool(getattr(get_settings(), "persona_prompt_enabled", True)):
         return ""
+    from aria.core.persona import PERSONA_TEXT
+
+    return ("\n" + PERSONA_TEXT) if PERSONA_TEXT else ""
 
 
 # A22: сколько символов результата тула показываем модели (остальное — в БД и UI).
 MAX_TOOL_RESULT_CHARS = 6000
+# Content tools return the answer itself, not a diagnostic payload. Truncating a
+# successful image/document description at 6k made the main model see only the
+# browser chrome and claim the rest was cut (live 04.11). These get a higher cap
+# and the plain `output.text`, without the JSON wrapper/escape overhead.
+MAX_TEXT_TOOL_RESULT_CHARS = 20000
+_PLAIN_TEXT_TOOLS = frozenset({"vision_analyze", "file_extract", "audio_transcribe"})
+FOLD_HEAD_CHARS = 1600
+FOLD_TAIL_CHARS = 700
 
 
 # A26: сколько раз подряд цикл подавляет немедленный повтор уже выполненного вызова, прежде чем завершить задачу.
@@ -111,6 +123,65 @@ def _is_immediate_repeat(history: list, tool_name: str, arguments: dict) -> bool
     )
 
 
+_SESSION_TOOL_REPEATS: dict[str, tuple[str, int]] = {}
+# P0 A4: только инструменты чтения. У delegate_task/shell своя retry-политика.
+_REPEAT_GUARDED_TOOLS = frozenset({"file_read", "file_search", "file_grep"})
+
+
+def _repeat_signature(tool_name: str, arguments: dict | None) -> str:
+    """P0 A4: basename и абсолютный путь одного файла должны считаться одним повтором."""
+    args = dict(arguments or {})
+    if tool_name in ("file_read", "file_search", "file_grep"):
+        raw = str(args.get("path") or args.get("glob") or "").replace("\\", "/").rstrip("/")
+        return f"{tool_name}:{(raw.split('/')[-1] if raw else '').lower()}"
+    try:
+        return f"{tool_name}:" + json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return f"{tool_name}:{args!r}"
+
+
+def _note_session_repeat(session_id, tool_name: str, arguments: dict | None, limit: int = 3) -> tuple[bool, int]:
+    """Счётчик повторов на СЕССИЮ: ловит и 5 отдельных сообщений «прочитай файл»."""
+    if tool_name not in _REPEAT_GUARDED_TOOLS:
+        return False, 0
+    sig = _repeat_signature(tool_name, arguments)
+    key = str(session_id)
+    prev, count = _SESSION_TOOL_REPEATS.get(key, ("", 0))
+    count = count + 1 if prev == sig else 1
+    _SESSION_TOOL_REPEATS[key] = (sig, count)
+    return count >= limit, count
+
+
+def _agent_shell_target(role_id: str, settings) -> tuple[bool, str | None]:
+    """P0 A2: shell в Agent только для general, только при тумблере, только в project root."""
+    if role_id != "general" or not bool(getattr(settings, "agent_shell_enabled", False)):
+        return False, None
+    root = str(getattr(settings, "agent_project_root", "") or "").strip()
+    return True, (root or None)
+
+
+def _fold_tool_output(sandbox_root: str, task_id, ref, output) -> dict:
+    """E6: длинный вывод пишем в sandbox/.tool_output/<task>/<ref>.txt и отдаём ref в контекст."""
+    try:
+        threshold = int(get_settings().tool_result_fold_chars)
+    except Exception:  # сбой диска не должен ронять вызов/транзакцию
+        threshold = 3000
+    try:
+        body = json.dumps(output, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        body = str(output)
+    if len(body) <= threshold:
+        return {}
+    try:
+        directory = Path(sandbox_root) / ".tool_output" / str(task_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{ref}.txt").write_text(body, encoding="utf-8")
+    except Exception:  # сбой диска не должен ронять вызов/транзакцию
+        logger.warning("folded tool output could not be stored, falling back to truncation", exc_info=True)
+        return {}
+    return {"fold_ref": str(ref), "folded_chars": len(body)}
+
+
 def _render_tool_result(msg: m.Message) -> str | None:
     """Текст результата тула для модели или None, если у сообщения нет результата.
 
@@ -123,11 +194,29 @@ def _render_tool_result(msg: m.Message) -> str | None:
         return None
     name = str(payload.get("tool_name") or "tool")
     status = str(payload.get("status") or "unknown")
-    try:
-        body = json.dumps(payload.get("output"), ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        body = str(payload.get("output"))
-    if len(body) > MAX_TOOL_RESULT_CHARS:
+    output = payload.get("output")
+    plain_text = output.get("text") if isinstance(output, dict) else None
+    if name in _PLAIN_TEXT_TOOLS and isinstance(plain_text, str) and plain_text.strip():
+        body = plain_text
+        if len(body) > MAX_TEXT_TOOL_RESULT_CHARS:
+            body = (
+                f"{body[:MAX_TEXT_TOOL_RESULT_CHARS]}"
+                f"...[truncated {len(body) - MAX_TEXT_TOOL_RESULT_CHARS} chars]"
+            )
+    else:
+        try:
+            body = json.dumps(output, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            body = str(output)
+    fold_ref = payload.get("fold_ref")
+    if name not in _PLAIN_TEXT_TOOLS and fold_ref and len(body) > FOLD_HEAD_CHARS + FOLD_TAIL_CHARS:
+        omitted = len(body) - FOLD_HEAD_CHARS - FOLD_TAIL_CHARS
+        body = (
+            f"{body[:FOLD_HEAD_CHARS]}\n...[свёрнуто: {omitted} символов пропущено, ref={fold_ref}, "
+            f"прочитать диапазон: tool_output_read(ref={fold_ref}, start={FOLD_HEAD_CHARS}, end={FOLD_HEAD_CHARS + omitted})]...\n"
+            f"{body[-FOLD_TAIL_CHARS:]}"
+        )
+    elif name not in _PLAIN_TEXT_TOOLS and len(body) > MAX_TOOL_RESULT_CHARS:
         body = f"{body[:MAX_TOOL_RESULT_CHARS]}...[truncated {len(body) - MAX_TOOL_RESULT_CHARS} chars]"
     args = payload.get("arguments")
     args_attr = ""
@@ -142,6 +231,48 @@ def _render_tool_result(msg: m.Message) -> str | None:
     return (
         f'<tool_result tool="{name}" status="{status}" source_trust="untrusted"{args_attr}>\n{body}\n</tool_result>{note}'
     )
+
+
+def _last_successful_tool_text(history: list[m.Message], tool_name: str) -> str | None:
+    """Return the text of the newest successful call of ``tool_name``.
+
+    The owner asked for an image description; if the main model then refuses to relay
+    the tool result, the tool's factual text must win over the refusal.
+    """
+    for message in reversed(history):
+        payload = message.content_json or {}
+        if payload.get("tool_name") != tool_name:
+            continue
+        if payload.get("status") != "ok":
+            continue
+        output = payload.get("output") or {}
+        text = output.get("text") if isinstance(output, dict) else None
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return None
+
+
+_VERBATIM_MARKERS = ("дословно", "verbatim", "word for word", "точь-в-точь", "слово в слово")
+
+
+def _asks_for_verbatim(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _VERBATIM_MARKERS)
+
+
+def _prefer_tool_text(final_text: str, tool_text: str | None, refused: bool) -> bool:
+    """True when a successful content tool's text should be the user-facing answer.
+
+    A refusal always yields to the tool's factual text. A summary also yields when
+    the tool returned a substantial description and the model's answer covers less
+    than half of it: in the live 04.11 case the model saw a 6k-truncated result,
+    said "the answer is cut", and invented a different JSON when asked verbatim.
+    """
+    if not tool_text:
+        return False
+    if refused:
+        return True
+    return len(tool_text) >= 1200 and len(final_text.strip()) < len(tool_text) * 0.5
 
 
 def _build_messages(role_prompt: str, history: list[m.Message]) -> list[ChatMessage]:
@@ -174,6 +305,50 @@ AGENT_FALLBACK_CLASSES = ("standard_reasoning", "free_tier_reasoning")
 MAX_DELEGATE_RETRIES = 2
 
 
+async def _append_once(task_id, marker: str, message: str) -> None:
+    """E7: предупреждение в чат один раз на задачу (в т.ч. после resume)."""
+    with session_scope() as db:
+        task = repo.get_task(db, task_id)
+        if task is None:
+            return
+        session = repo.get_session(db, task.session_id)
+        if session is None:
+            return
+        recent = list(
+            db.execute(
+                select(m.Message)
+                .where(m.Message.session_id == session.id)
+                .order_by(m.Message.seq_no.desc())
+                .limit(500)
+            ).scalars()
+        )
+        if any(str(msg.content or "").startswith(marker) for msg in recent):
+            return
+        repo.append_message(db, session, role="assistant", content=message)
+
+
+async def _abort_task(task_id, code: str, message: str) -> None:
+    """E7: остановить задачу с понятной причиной (step_limit|loop_detected|budget_exceeded)."""
+    with session_scope() as db:
+        task = repo.get_task(db, task_id)
+        if task is None:
+            return
+        session = repo.get_session(db, task.session_id)
+        if session is not None:
+            repo.append_message(db, session, role="assistant", content=message)
+        if task.status == TaskStatus.approved:
+            repo.set_task_status(db, task, TaskStatus.in_progress)
+        repo.set_task_status(db, task, TaskStatus.failed, error_code=code, error_message=message[:500])
+        event_bus.emit(
+            "task.status_changed",
+            {"status": "failed", "error": code, "message": message[:300]},
+            session_id=task.session_id,
+            task_id=task.id,
+            db=db,
+        )
+    logger.warning("task %s stopped by guard: %s", task_id, code)
+
+
 async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox_root: str) -> None:
     """Run the agent loop for a given task."""
     settings = get_settings()
@@ -192,6 +367,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
     await toolhooks.lifecycle("task_start", session_id=session.id, task_id=task_id, role=task.role)
 
+    agent_shell, agent_shell_root = _agent_shell_target(role.role_id, settings)
     tool_whitelist = role.tool_whitelist
     try:
         # H7: тулы подключённых MCP-серверов (только для ролей из MCP_ROLES); сбой сервера не ломает задачу.
@@ -200,32 +376,177 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         _mcp = _get_mcp()
         await _mcp.ensure_loaded()
         tool_whitelist = tuple(role.tool_whitelist) + _mcp.tool_names_for_role(role.role_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("MCP tools unavailable for task %s", task_id, exc_info=True)
+    if agent_shell:
+        # P0 A2: тумблер включён — добавляем shell РОЛИ general только на время этой задачи.
+        tool_whitelist = (*tuple(tool_whitelist), "shell_execute")
     tool_schemas = _tool_schemas_for_role(tool_whitelist)
+    allowed_provider_ids: frozenset[str] | None = None
     with session_scope() as db:
         _t = repo.get_task(db, task_id)
         profile = runprofile.get_profile(db, _t.session_id)
         delegation_depth = _t.delegation_depth or 0
-    role_prompt = f"Ты в роли {role.role_id}. {role.description}\nДоступные инструменты: {', '.join(tool_whitelist) or 'нет'}."
+        from aria.core import adult_mode, content_limits
+
+        adult_enabled = adult_mode.is_enabled(db, _t.session_id)
+        objective = _t.objective or ""
+        _history = repo.list_messages(db, _t.session_id, limit=10)
+        _previous_user = [msg.content for msg in _history if msg.role == "user" and msg.content != objective]
+        violation = content_limits.check_contextual(objective, _previous_user)
+        adult_request = adult_mode.is_adult_request(objective)
+        gate_text: str | None = None
+        gate_notice: str | None = None
+        if violation is not None:
+            gate_notice = "blocked_limits"
+            gate_text = f"Этот запрос нарушает жёсткие лимиты: {violation.reason}."
+        elif adult_request and not adult_enabled:
+            gate_notice = "adult_prompt"
+            gate_text = "Включить 18+? Да / Нет"
+        elif adult_request and adult_enabled:
+            allowed_provider_ids = frozenset(
+                p.provider_id for p in adult_mode.available_providers(router)
+            )
+            if not allowed_provider_ids:
+                gate_notice = "adult_no_provider"
+                gate_text = "Нет провайдера с флагом adult_ok: взрослый запрос не отправлен."
+        if gate_text is not None:
+            _session = repo.get_session(db, _t.session_id)
+            if _session is not None:
+                repo.append_message(
+                    db, _session, role="assistant", content=gate_text, source_trust=SourceTrust.trusted,
+                    content_json={"notice": gate_notice, "action": "adult_mode"},
+                )
+            repo.set_task_status(db, _t, TaskStatus.under_audit)
+            repo.set_task_status(db, _t, TaskStatus.done_unaudited)
+            event_bus.emit(
+                "task.status_changed",
+                {"status": TaskStatus.done_unaudited.value, "notice": gate_notice},
+                session_id=_t.session_id,
+                task_id=_t.id,
+                db=db,
+            )
+            logger.info("task %s gated: %s", task_id, gate_notice)
+            return
+    role_prompt = (
+        f"Ты в роли {role.role_id} в режиме Agent. {role.description}\n"
+        f"Доступные инструменты: {', '.join(tool_whitelist) or 'нет'}."
+    )
     role_prompt += (
         "\nЭто список инструментов ТВОЕЙ РОЛИ, а не всей системы: в реестре ARIA их больше, часть доступна только другим ролям "
         "(write/shell/delegate — у obsidian_keeper, coder, orchestrator). Не называй этот список «всеми инструментами системы». "
         "Число навыков, заметок, задач и т.п. называй только после реального вызова инструмента (skill_lookup возвращает total)."
     )
     role_prompt += _load_persona()
+    # Language follows the task objective, not the UI locale.
+    from aria.core.clarifier import language_instruction
+
+    role_prompt += "\n\n" + language_instruction(task.objective or "")
+    # L0 (TZ_COMPLIANCE_V2 §3): контракт после persona; флаг off — старое поведение.
+    if bool(getattr(settings, "compliance_prompt_enabled", True)):
+        from aria.core.compliance import COMPLIANCE_TEXT
+
+        if COMPLIANCE_TEXT:
+            role_prompt += "\n\n" + COMPLIANCE_TEXT
+    if adult_enabled:
+        from aria.core import prompt_composer
+
+        role_prompt += "\n\n" + prompt_composer.compose("", adult=True)
+    # L6: owner preferences (vault/preferences.md) — часть стабильного префикса.
+    from aria.memory.preferences import stable_block as _preferences_block
+
+    _preferences = _preferences_block()
+    if _preferences:
+        role_prompt += "\n\n" + _preferences
+    # Automatic memory/notes recall: the agent used to require an explicit
+    # memory_search/search_vault call, so chat questions about past notes were
+    # answered from nowhere (owner report 04.11).
+    _memory = ""
+    _vault = ""
+    try:
+        from aria.memory import store as _memory_store
+
+        _memory = _memory_store.recall_block(task.objective or "")
+        if _memory:
+            role_prompt += "\n\n" + _memory
+    except Exception:  # recall must not break the task
+        logger.warning("agent memory recall failed for task %s", task_id, exc_info=True)
+    try:
+        from aria.storage.obsidian_vault import relevant_block as _vault_block
+
+        _vault = _vault_block(task.objective or "")
+        if _vault:
+            role_prompt += "\n\n" + _vault
+    except Exception:  # notes must not break the task
+        logger.warning("agent vault recall failed for task %s", task_id, exc_info=True)
+    try:
+        from aria.core import recall_honesty
+
+        _honesty = recall_honesty.missing_note(task.objective or "", [_memory, _vault])
+        if _honesty:
+            role_prompt += "\n\n" + _honesty
+    except Exception:  # a note must not break the task
+        logger.warning("agent recall honesty note failed for task %s", task_id, exc_info=True)
     _hint = runprofile.thinking_hint(profile)
     if _hint:
         role_prompt += "\n\n" + _hint
 
     iterations = 0
-    final_verdict_needed = True
     guardrails = ToolCallGuardrailController()
     delegate_failures: dict[tuple[str, str], int] = {}
     repeat_suppressed = 0
+    # E7: потолок вызовов модели и жёсткий бюджет задачи.
+    call_limit = int(
+        settings.agent_max_llm_calls_subagent if delegation_depth > 0 else settings.agent_max_llm_calls
+    )
+    if call_limit <= 0:
+        call_limit = 10 ** 9
+    max_iterations = max(int(settings.loop_max_iterations), call_limit) + 1
+    hard_budget = float(getattr(settings, "budget_task_hard_usd", 0) or 0)
+    budget_warned = False
+    step_warned = False
+    step_warn_at = max(1, int(call_limit * 0.8))
 
-    while iterations < settings.loop_max_iterations:
+    while iterations < max_iterations:
         iterations += 1
+        if iterations > call_limit:
+            await _abort_task(
+                task_id,
+                "step_limit",
+                f"Остановлено: исчерпан лимит {call_limit} вызовов модели на задачу. Итог не гарантирован.",
+            )
+            return
+        if iterations >= step_warn_at and not step_warned:
+            step_warned = True
+            await _append_once(
+                task_id,
+                "Внимание: использовано",
+                f"Внимание: использовано {iterations} из {call_limit} вызовов модели "
+                f"(80% лимита шагов).",
+            )
+        if hard_budget > 0:
+            from aria.llm import budget as budget_mod
+
+            spend = budget_mod.task_spend(task_id)
+            if spend >= hard_budget:
+                await _abort_task(
+                    task_id,
+                    "budget_exceeded",
+                    f"Остановлено: задача потратила ${spend:.4f} при жёстком лимите ${hard_budget:.2f}.",
+                )
+                return
+            if spend >= hard_budget * 0.8 and not budget_warned:
+                budget_warned = True
+                with session_scope() as db:
+                    task = repo.get_task(db, task_id)
+                    session = repo.get_session(db, task.session_id)
+                    if session is not None:
+                        repo.append_message(
+                            db,
+                            session,
+                            role="assistant",
+                            content=f"Внимание: задача потратила ${spend:.4f} (80% лимита ${hard_budget:.2f}).",
+                        )
 
         with session_scope() as db:
             task = repo.get_task(db, task_id)
@@ -246,12 +567,20 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             messages = _build_messages(role_prompt, history)
 
         try:
-            model_class, preferred_model = runprofile.resolve_for_task(profile, role.default_model_policy, delegation_depth, router)
+            role_class, role_model = role_models.resolve_role_model(
+                role.role_id, role.default_model_policy, router
+            )
+            model_class, preferred_model = runprofile.resolve_for_task(profile, role_class, delegation_depth, router)
+            if profile is None and role_model:
+                preferred_model = role_model
             # resilient: повтор 5xx и переход на запасной класс/провайдера (как в чате, A20). Без этого один
             # 503/429 от Gemini сразу ронял всю задачу (живой смоук 11.10: агентские стадии падали за 1.7 с).
             routing = await router.route_chat(
                 model_class, messages, tool_schemas, allow_degrade=True, prefer_provider_id=preferred_model,
                 resilient=True, fallback_classes=AGENT_FALLBACK_CLASSES,
+                purpose="subagent" if delegation_depth > 0 else "agent",
+                session_id=session.id, task_id=task.id,
+                allowed_provider_ids=allowed_provider_ids,
             )
         except (ProviderUnavailable, httpx.HTTPStatusError) as exc:
             if isinstance(exc, httpx.HTTPStatusError):
@@ -271,14 +600,48 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
         response = routing.response
 
+        # L0 §4: диагностика отказа — строка в лог, без повторов и без текста.
+        refused = False
+        if bool(getattr(settings, "refusal_detection_enabled", True)):
+            from aria.core.refusal import (
+                finish_reason_from_response,
+                is_model_refusal,
+                log_refusal,
+            )
+
+            refused = is_model_refusal(
+                response.text,
+                has_tool_calls=bool(response.tool_calls),
+                finish_reason=finish_reason_from_response(response),
+            )
+            if refused:
+                _refusal_provider = router.find_provider(routing.provider_id)
+                log_refusal(
+                    session_id=task.session_id,
+                    task_id=task_id,
+                    provider=routing.provider_id,
+                    model=getattr(_refusal_provider, "model", None),
+                )
+
         if not response.tool_calls:
+            final_text = response.text or ""
+            vision_text = _last_successful_tool_text(history, "vision_analyze")
+            last_user_text = next(
+                (str(msg.content or "") for msg in reversed(history) if msg.role == "user"), ""
+            )
+            if _asks_for_verbatim(last_user_text) and vision_text:
+                # "Дай дословно" is a request for the tool output, not a retelling.
+                final_text = vision_text
+            elif _prefer_tool_text(final_text, vision_text, refused):
+                final_text = vision_text
             with session_scope() as db:
                 session = repo.get_session(db, task.session_id)
-                repo.append_message(db, session, role="assistant", content=response.text or "")
+                repo.append_message(db, session, role="assistant", content=final_text)
             break
 
         approval_ctx = None
         _parent_paused = False
+        session_repeat_abort: str | None = None
         delegate_batch: list[dict] = []  # B5-D1: delegate_task из одного ответа исполняются пачкой, параллельно
         for call in response.tool_calls:
             with session_scope() as db:
@@ -289,6 +652,23 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     spec = get_tool(call.tool_name)
                 except (ToolValidationError, KeyError) as exc:
                     repo.append_message(db, session, role="tool", content=f"blocked_policy: {exc}")
+                    continue
+
+                # P0 A4: повтор одного и того же файла ловим и между отдельными сообщениями
+                # (basename == абсолютный путь), иначе 5× «прочитай BIG_TEST.txt» не стопорились.
+                # Корневые задачи делят сессию (5 сообщений = 5 задач), а параллельные
+                # субагенты — нет: у каждого свой task_id, иначе ложный loop_detected.
+                repeat_scope = session.id if not delegation_depth else f"{session.id}:{task_id}"
+                repeated, rep_count = _note_session_repeat(repeat_scope, call.tool_name, call.arguments)
+                if repeated:
+                    session_repeat_abort = (
+                        f"Остановлено: {call.tool_name} повторяется с теми же аргументами "
+                        f"{rep_count} раз(а) подряд. Нужен другой подход."
+                    )
+                    repo.append_message(
+                        db, session, role="tool",
+                        content=f"{call.tool_name} -> repeat_blocked: {session_repeat_abort}",
+                    )
                     continue
 
                 if _is_immediate_repeat(history, call.tool_name, call.arguments):
@@ -323,8 +703,81 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     approval_ctx = (session.id, task.id, str(item.id), f"{call.tool_name} {json.dumps(call.arguments, ensure_ascii=False, default=str)[:300]}")
                     break  # пауза до Approve; остальные tool calls ответа отбрасываются
 
+                if call.tool_name == "memory_save" and str((call.arguments or {}).get("layer") or "") == "preference":
+                    # L6: правка vault/preferences.md — только после Approve владельца.
+                    item = approvals.request_preference_update_approval(db, session, task, dict(call.arguments or {}))
+                    event_bus.emit(
+                        "attention_item.created",
+                        {"id": str(item.id), "type": item.type.value, "title": item.title},
+                        session_id=session.id,
+                        task_id=task.id,
+                        db=db,
+                    )
+                    event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                    approval_ctx = (
+                        session.id, task.id, str(item.id),
+                        f"memory_save preference: {str(call.arguments.get('content'))[:120]}",
+                    )
+                    break  # пауза до Approve; остальные tool calls ответа отбрасываются
+
+                # Этап 3: политика auto/approve/deny до исполнения.
+                from aria.core import action_policy
+
+                trust = getattr(session.source_trust_aggregate, "value", session.source_trust_aggregate)
+                policy = action_policy.decide(
+                    call.tool_name,
+                    call.arguments,
+                    sandbox_root=sandbox_root,
+                    untrusted=str(trust) == SourceTrust.untrusted.value,
+                )
+                if policy.action == "deny":
+                    logger.info("task %s: %s denied by policy (%s)", task_id, call.tool_name, policy.code)
+                    repo.append_message(
+                        db, session, role="tool",
+                        content=f"{call.tool_name} -> denied: {policy.reason}",
+                        content_json={
+                            "tool_name": call.tool_name, "arguments": dict(call.arguments or {}),
+                            "status": "denied", "output": {"error": policy.reason, "code": policy.code},
+                        },
+                    )
+                    continue
+                if policy.action == "approve":
+                    item = approvals.request_tool_approval(
+                        db, session, task, call.tool_name, dict(call.arguments or {}),
+                        summary=policy.summary or call.tool_name,
+                        reason=policy.reason,
+                        type_=(AttentionType.untrusted_context_override
+                               if policy.code == "untrusted_context" else AttentionType.mcp_tool_approval),
+                    )
+                    event_bus.emit(
+                        "attention_item.created",
+                        {"id": str(item.id), "type": item.type.value, "title": item.title},
+                        session_id=session.id,
+                        task_id=task.id,
+                        db=db,
+                    )
+                    event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                    approval_ctx = (session.id, task.id, str(item.id), policy.summary or call.tool_name)
+                    break
+
                 if call.tool_name == "shell_execute":
                     command = call.arguments.get("command", "")
+                    if not is_windows_command(command):
+                        reason = command_rejection_reason(command)
+                        logger.warning(
+                            "tool shell_execute rejected task=%s reason=%s command=%s",
+                            task.id, reason, command[:200],
+                        )
+                        repo.append_message(
+                            db, session, role="tool",
+                            content=(
+                                f"shell_execute -> rejected: {reason}. "
+                                "Windows: используй cmd/PowerShell-команды (dir, type, git status, python), "
+                                "не POSIX (ls, cat, find, grep)."
+                            ),
+                        )
+                        continue
+                    # Рельсы: allowlisted-команда внутри проекта идёт сама; остальное — Approve.
                     if classify_shell_command(command) != "allow":
                         item = approvals.check_command_and_maybe_request_approval(db, session, task, command)
                         event_bus.emit(
@@ -433,15 +886,21 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     )
                 continue
 
-            output, status, error_code, error_message = await _execute_tool(spec, call.arguments, sandbox_root)
+            output, status, error_code, error_message = await _execute_tool(
+                spec, call.arguments, sandbox_root, router=router, task_id=task_id,
+                shell_root=agent_shell_root, agent_shell=agent_shell,
+            )
 
             # После tool call — guardrail recording для loop detection
             guardrails.after_call(spec.tool_name, call.arguments, output)
 
+            tool_payload = {"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value, "checkpoint_id": checkpoint_id}
+            # fold вне транзакции: дисковое I/O вне writer-lock SQLite
+            tool_payload.update(_fold_tool_output(sandbox_root, task.id, str(tool_call_row.id), output))
             with session_scope() as db:
                 repo.finish_tool_call(db, tool_call_row, status, output_json=output, error_code=error_code, error_message=error_message)
                 session = repo.get_session(db, task.session_id)
-                repo.append_message(db, session, role="tool", content_json={"tool_name": spec.tool_name, "arguments": dict(call.arguments or {}), "output": output, "status": status.value}, content=f"{spec.tool_name} -> {status.value}")
+                repo.append_message(db, session, role="tool", content_json=tool_payload, content=f"{spec.tool_name} -> {status.value}")
                 event_bus.emit(
                     "tool_call.updated",
                     {"id": str(tool_call_row.id), "tool_name": spec.tool_name, "status": status.value},
@@ -459,6 +918,10 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     "on_error", session_id=task.session_id, task_id=task_id,
                     tool=spec.tool_name, code=error_code, message=error_message,
                 )
+
+        if session_repeat_abort is not None:
+            await _abort_task(task_id, "loop_detected", session_repeat_abort)
+            return
 
         if delegate_batch:
             if await _run_delegate_batch(
@@ -478,8 +941,12 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             return  # пауза до резолюции attention item (loop продолжит resume_after_approval)
 
         if repeat_suppressed >= MAX_REPEAT_SUPPRESSED:
-            logger.warning("task %s: model keeps repeating an executed call; finishing the task", task_id)
-            break
+            await _abort_task(
+                task_id,
+                "loop_detected",
+                "Остановлено: модель повторяет один и тот же вызов с теми же аргументами. Нужен другой подход.",
+            )
+            return
 
     await finalize_task(task_id, router)
 
@@ -539,31 +1006,43 @@ async def _run_delegate_batch(
     return parent_paused
 
 
-async def _execute_tool(spec, arguments: dict, sandbox_root: str, *, approved: bool = False):
-    settings = get_settings()
+async def _execute_tool(
+    spec, arguments: dict, sandbox_root: str, *, approved: bool = False,
+    router=None, task_id=None, shell_root: str | None = None, agent_shell: bool = False,
+):
     # Аргументы приходят от модели: сверяем с input_schema ДО handler'а. Ошибка уходит модели понятным
     # текстом (какой аргумент и что не так), а не «KeyError: 'path'» и не молчаливым «ok» на пустой вызов.
+    from aria import secretguard
     from aria.tools.validators import validate_tool_input
+
+    # SEC-6: секрет из модели/вывода не попадает в аргументы shell и других инструментов.
+    arguments = secretguard.mask_obj(arguments)
     arg_errors = validate_tool_input(spec.input_schema, arguments)
     if arg_errors:
         return None, ToolStatus.error, "invalid_arguments", f"{spec.tool_name}: " + "; ".join(arg_errors)
     try:
         import asyncio
 
+        extra: dict = {"approved": True} if approved else {}
+        if spec.tool_name == "shell_execute":
+            extra["shell_root"] = shell_root
+            extra["agent_shell"] = agent_shell
         output = await asyncio.wait_for(
             spec.handler(
                 input_json=arguments, timeout_sec=spec.timeout_sec, sandbox_root=sandbox_root,
-                **({"approved": True} if approved else {}),
+                router=router, task_id=task_id,
+                **extra,
             ),
             timeout=spec.timeout_sec,
         )
+        output = secretguard.mask_obj(output)
         if isinstance(output, dict) and output.get("status") == "approval_required":
             # Команда НЕ исполнялась — это не «ok» (иначе аудит считает действие выполненным).
             return output, ToolStatus.blocked_policy, "approval_required", output.get("error")
         return output, ToolStatus.ok, None, None
     except TimeoutError:
         return None, ToolStatus.timeout, "tool_timeout", f"{spec.tool_name} exceeded {spec.timeout_sec}s"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return None, ToolStatus.error, "tool_error", str(exc)
 
 
@@ -624,7 +1103,7 @@ async def _finalize_task_inner(task_id: uuid.UUID, router: ProviderRouter) -> tu
             if getattr(report, "verdict", None) == AuditVerdict.needs_info:
                 try:
                     repo.set_task_status(db, task, TaskStatus.awaiting_clarification)
-                except Exception:  # noqa: BLE001 — переход мог быть уже совершён
+                except Exception:  # переход мог быть уже совершён
                     logger.info("needs_info: статус задачи %s уже изменён", str(task.id)[:8])
                 try:
                     session_row = repo.get_session(db, task.session_id)
@@ -635,9 +1114,9 @@ async def _finalize_task_inner(task_id: uuid.UUID, router: ProviderRouter) -> tu
                                     + "; ".join(list(getattr(report, 'missing_requirements', []) or [])[:5])
                                     or "Аудит запросил уточнение контракта (needs_info).",
                         )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("needs_info: не удалось записать сообщение в чат")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("audit crashed for task %s", task_id)
             repo.set_task_status(db, task, TaskStatus.failed, error_code="audit_crash", error_message=str(exc))
             event_bus.emit("task.status_changed", {"status": "failed"}, session_id=session.id, task_id=task.id, db=db)
@@ -684,7 +1163,7 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
             from aria.mcp.manager import get_manager as _mcp_mgr
 
             await _mcp_mgr().ensure_loaded()  # после перезапуска тулы MCP ещё не зарегистрированы
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("MCP not available while resuming task %s", task_id, exc_info=True)
 
     with session_scope() as db:
@@ -715,7 +1194,12 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
                     content=f"{tool_name} (approved) -> error: tool is no longer available",
                 )
         sess_id = task.session_id
+        task_role = task.role
 
+    settings = get_settings()
+    agent_shell, agent_shell_root = _agent_shell_target(task_role, settings)
+
+    _cp: str | None = None
     if already_run:
         logger.info("approval %s was already executed; continuing without re-running it", attention_item.id)
     elif tool_call_row is not None:
@@ -727,16 +1211,22 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
                 {"hook_blocked": True, "reason": hook_decision.reason}, ToolStatus.blocked_policy, "hook_blocked", hook_decision.reason,
             )
         else:
-            output, status, error_code, error_message = await _execute_tool(spec, arguments, sandbox_root, approved=True)
+            output, status, error_code, error_message = await _execute_tool(
+                spec, arguments, sandbox_root, approved=True, router=router, task_id=task_id,
+                shell_root=agent_shell_root, agent_shell=agent_shell,
+            )
             await toolhooks.post_tool(
                 tool_name, arguments, output, status.value,
                 session_id=sess_id, task_id=task_id, sandbox_root=sandbox_root,
             )
 
+        approved_payload = {"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value, "checkpoint_id": _cp}
+        # fold вне транзакции: дисковое I/O вне writer-lock SQLite
+        approved_payload.update(_fold_tool_output(sandbox_root, task_id, str(tool_call_row.id), output))
         with session_scope() as db:
             repo.finish_tool_call(db, tool_call_row, status, output_json=output, error_code=error_code, error_message=error_message)
             session = repo.get_session(db, sess_id)
-            repo.append_message(db, session, role="tool", content_json={"tool_name": tool_name, "arguments": arguments, "output": output, "status": status.value}, content=f"{tool_name} (approved) -> {status.value}")
+            repo.append_message(db, session, role="tool", content_json=approved_payload, content=f"{tool_name} (approved) -> {status.value}")
             event_bus.emit("tool_call.updated", {"id": str(tool_call_row.id), "status": status.value}, session_id=session.id, task_id=task_id, db=db)
 
     await execute_agent_loop(task_id, router, sandbox_root)

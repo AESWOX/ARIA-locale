@@ -110,7 +110,7 @@ def make_urlopen(pages: dict):
     """Подмена urllib.request.urlopen: ключ — подстрока URL, значение — HTML (str) или исключение."""
     calls: list[str] = []
 
-    def fake(req, timeout=None):
+    def fake(req, timeout=None, **kwargs):
         url = req.full_url if hasattr(req, "full_url") else str(req)
         calls.append(url)
         for key, val in pages.items():
@@ -186,7 +186,8 @@ class TestWebSearch:
         out = await web.web_search({"query": "zzzqqq"})
         assert out["results"] == [] and out["note"] == "no results found" and not out.get("error")
 
-    async def test_unrecognized_page_is_saved_for_debugging_and_capped(self, urlopen_pages):
+    async def test_unrecognized_page_is_saved_for_debugging_and_capped(self, urlopen_pages, monkeypatch):
+        monkeypatch.setenv("ARIA_DEBUG_SEARCH", "1")
         from aria import paths
         # Мелкая нестабильность набора (П.2 ТЗ): каталог debug общий на весь прогон и
         # туда пишут соседние тесты класса, поэтому saved[0] мог оказаться чужим файлом
@@ -335,10 +336,13 @@ class TestWebFetchExtraction:
         out = await web.web_fetch({"url": "https://example.com/file"})
         assert "unsupported content type" in out["error"] and "content" not in out
 
-    async def test_rejects_compressed_responses(self, opener):
+    async def test_decodes_compressed_responses(self, opener):
         install, _ = opener
-        install(FakeResp(b"\x1f\x8b....", extra={"Content-Encoding": "gzip"}))
-        assert "content-encoding" in (await web.web_fetch({"url": "https://example.com/"}))["error"]
+        import gzip
+
+        install(FakeResp(gzip.compress(b"<p>hello gzip</p>"), extra={"Content-Encoding": "gzip"}))
+        out = await web.web_fetch({"url": "https://example.com/"})
+        assert "error" not in out and "hello gzip" in out["content"]
 
     async def test_http_and_network_errors_are_clean_answers(self, opener):
         install, _ = opener
@@ -359,9 +363,9 @@ class TestWebFetchExtraction:
     async def test_junk_arguments(self, opener):
         install, calls = opener
         install(FakeResp(b"<p>hi</p>"))
-        assert (await web.web_fetch({}))["error"] == "empty url"
-        assert (await web.web_fetch({"url": 123}))["error"] == "empty url"
-        assert (await web.web_fetch({"url": "   "}))["error"] == "empty url"
+        for bad in ({}, {"url": 123}, {"url": "   "}):
+            err = (await web.web_fetch(bad))["error"]
+            assert "url" in err and "http" in err and "повтори" in err, err
         assert not calls
         out = await web.web_fetch({"url": "https://example.com/", "max_chars": "many"})
         assert out["content"] == "hi"

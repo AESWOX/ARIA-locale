@@ -140,7 +140,7 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
   justify-content: space-between;
   background: var(--background-base);
   border-bottom: 1px solid color-mix(in srgb, var(--midground-base) 14%, transparent);
-  color: var(--midground-base);
+  color: var(--window-text-color, var(--midground-base));
   user-select: none;
   -webkit-user-select: none;
 }
@@ -318,5 +318,77 @@ code { font-size: 0.875rem; }
 }
 :root[style*="--theme-asset-bg:"] .theme-default-filler {
   display: none;
+}
+
+/* UI-3: user-selected surface layer on top of the active theme. These use
+   !important because ThemeProvider writes the palette as inline styles and
+   the surface must survive every theme switch. */
+:root[data-surface="white"] {
+  --foreground-base: #ffffff !important;
+  --foreground: color-mix(in srgb, #ffffff 100%, transparent) !important;
+  --foreground-alpha: 1 !important;
+  --warm-glow: rgba(255, 189, 56, 0.12) !important;
+}
+
+:root[data-surface="textured"] {
+  --surface-texture: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--midground-base) 22%, transparent) 1px,
+    transparent 1.5px
+  );
+  --surface-texture-size: 24px 24px;
+}
+
+:root[data-surface="custom"] {
+  --background-base: var(--surface-custom-bg, #101418) !important;
+  --background: color-mix(in srgb, var(--surface-custom-bg, #101418) 100%, transparent) !important;
+}
+
+:root[data-surface="image"] {
+  --surface-image-size: cover;
+  --surface-blend: normal;
+}
+
+/* Vendor globals paint every <code> block with --midground and reuse the same
+   token for ::selection. That reads as a constant glow on code (owner report
+   04.11). Keep code neutral; give selection a calm readable contrast. */
+code {
+  background: transparent;
+}
+
+code,
+pre,
+kbd,
+samp {
+  /* Vendor globals paint code with the page background colour (text-background),
+     which is black on the Black theme. Code must always use readable foreground.
+     F-003: `--foreground` is LENS_0 alpha 0 (invisible); use the solid base.
+     Unlayered on purpose: Tailwind v4 utilities live in @layer utilities and
+     lose to any unlayered rule, so a class like text-foreground-base alone
+     cannot fix an invisible <pre>/<code>. */
+  color: var(--foreground-base);
+}
+
+/* F-003 hardening: the chat answer body must never depend on a color-mix()
+   token that can resolve to transparent (midground alpha, theme switch,
+   surface image). Solid base = readable on every bundled theme. */
+.aria-rich-text,
+.aria-rich-text p,
+.aria-rich-text li,
+.aria-rich-text h1,
+.aria-rich-text h2,
+.aria-rich-text h3,
+.aria-rich-text h4,
+.aria-rich-text strong,
+.aria-rich-text em {
+  color: var(--foreground-base);
+}
+.aria-rich-text a {
+  color: var(--midground-base);
+}
+
+*::selection {
+  background: color-mix(in srgb, var(--midground-base) 42%, transparent);
+  color: var(--background-base);
 }
 

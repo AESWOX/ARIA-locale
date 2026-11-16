@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import {
   Package,
   Search,
@@ -225,6 +225,24 @@ export default function SkillsPage() {
         .getSkills(selectedProfile || undefined)
         .then(setSkills)
         .catch(() => {});
+    },
+    [selectedProfile, showToast],
+  );
+
+  /* ---- Zip import: every folder with SKILL.md becomes a skill ---- */
+  const importRef = useRef<HTMLInputElement>(null);
+  const handleImportZip = useCallback(
+    async (file: File) => {
+      try {
+        const res = await api.importSkillsZip(file);
+        setSkills(await api.getSkills(selectedProfile || undefined));
+        const text = res.imported.length
+          ? `Imported: ${res.imported.join(", ")}`
+          : `Nothing imported${res.skipped.length ? ` (already installed: ${res.skipped.join(", ")})` : ""}`;
+        showToast(text, res.imported.length ? "success" : "error");
+      } catch (e) {
+        showToast(`Import failed: ${e}`, "error");
+      }
     },
     [selectedProfile, showToast],
   );
@@ -492,6 +510,24 @@ export default function SkillsPage() {
                         .replace("{count}", String(activeSkills.length))
                         .replace("{s}", activeSkills.length !== 1 ? "s" : "")}
                     </Badge>
+                    <Button
+                      size="sm"
+                      outlined
+                      onClick={() => importRef.current?.click()}
+                    >
+                      Import .zip
+                    </Button>
+                    <input
+                      ref={importRef}
+                      type="file"
+                      accept=".zip,application/zip"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void handleImportZip(file);
+                        event.target.value = "";
+                      }}
+                    />
                     <Button
                       size="sm"
                       outlined

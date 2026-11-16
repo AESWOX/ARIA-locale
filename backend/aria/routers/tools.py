@@ -8,16 +8,14 @@ persist to ``data/toolsets.json``; env var presence is read live from
 """
 from __future__ import annotations
 
-from aria import paths
-
 import json
 import os
 import threading
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 from aria.routers import actions as actions_module
 

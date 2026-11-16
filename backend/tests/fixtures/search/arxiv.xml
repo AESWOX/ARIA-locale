@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>arXiv Query</title>
+  <entry>
+    <id>http://arxiv.org/abs/2610.00001v1</id>
+    <published>2026-10-30T00:00:00Z</published>
+    <title>A study of &lt;b&gt;diffusion&lt;/b&gt; models</title>
+    <summary>We investigate &lt;b&gt;diffusion&lt;/b&gt; models and show results.</summary>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2610.00002v1</id>
+    <published>2026-10-29T00:00:00Z</published>
+    <title>Second paper</title>
+    <summary>Abstract two.</summary>
+  </entry>
+</feed>

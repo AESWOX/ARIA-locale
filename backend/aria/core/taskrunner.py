@@ -28,8 +28,9 @@ from aria.core.events import event_bus
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.logsetup import reset_task as reset_task_log_context, set_task as set_task_log_context
 from aria.db.enums import TaskStatus
+from aria.logsetup import reset_task as reset_task_log_context
+from aria.logsetup import set_task as set_task_log_context
 
 logger = logging.getLogger("local_agent.taskrunner")
 
@@ -121,7 +122,7 @@ def _record_episode(task_id: uuid.UUID, mode: str) -> None:
             session_id=session_id,
             task_id=str(task_id),
         )
-    except Exception:  # noqa: BLE001 — память не должна ломать завершение задачи
+    except Exception:  # память не должна ломать завершение задачи
         logger.exception("could not record task episode")
 
 def _unexecuted_approvals(task_ids: list[uuid.UUID]) -> dict[uuid.UUID, uuid.UUID]:
@@ -195,7 +196,10 @@ class TaskRunner:
         ram = available_ram_mb()
         if ram is not None and ram < _LOW_RAM_MB:
             workers = 1
+            self._workers_reason = f"мало свободной RAM: {ram} MB < {_LOW_RAM_MB} MB — 1 воркер"
             logger.warning("only %s MB RAM free — TaskRunner runs 1 worker", ram)
+        else:
+            self._workers_reason = f"runner_max_workers={self._max_workers}"
         for i in range(workers):
             self._workers.append(asyncio.create_task(self._worker_loop(i), name=f"taskrunner-{i}"))
         logger.info("TaskRunner started: %d worker(s), max_workers=%d", workers, self._max_workers)
@@ -302,6 +306,9 @@ class TaskRunner:
         return len(pending)
 
     def status(self) -> dict[str, Any]:
+        from aria.core import delegate as _delegate
+
+        limit, limit_reason = _delegate.parallel_limit()
         return {
             "started": self._started,
             "max_workers": self._max_workers,
@@ -309,6 +316,11 @@ class TaskRunner:
             "queue": self._queue.qsize(),
             "running": sorted(self._running.keys()),
             "available_ram_mb": available_ram_mb(),
+            # 19.5 Q-6: почему параллелизм снижен (воркеры и рой субагентов).
+            "workers_reason": getattr(self, "_workers_reason", "not started"),
+            "parallel_limit": limit,
+            "parallel_limit_reason": limit_reason,
+            "swarm_enabled": bool(getattr(get_settings(), "swarm_enabled", True)),
         }
 
     @property
@@ -416,7 +428,7 @@ class TaskRunner:
                     repo.set_task_status(db, task, TaskStatus.cancelled)
             event_bus.emit("task.cancelled", {"task_id": key}, session_id=None, task_id=job.task_id)
             raise
-        except Exception as exc:  # noqa: BLE001 — граница задачи: падение одной не рушит воркер
+        except Exception as exc:  # граница задачи: падение одной не рушит воркер
             logger.exception("task %s failed in runner", key[:8])
             code = "provider_unavailable" if type(exc).__name__ == "ProviderUnavailable" else "runner_error"
             with session_scope() as db:

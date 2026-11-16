@@ -1,7 +1,6 @@
 """Tests for notebook integration — config, client degradation, tool registration."""
 from __future__ import annotations
 
-import pytest
 from aria.config import get_settings
 from aria.integrations.notebooklm.client import NotebookClient
 from aria.integrations.notebooklm.tool import notebook_query

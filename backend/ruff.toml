@@ -1,0 +1,22 @@
+# Lint gate for backend code. Dev-only: ruff is not a runtime dependency.
+target-version = "py311"
+
+# Project root: keeps first-party import detection identical whether ruff is
+# invoked as `ruff check aria` (CI) or `ruff check .` (local).
+src = ["."]
+
+# Tests are fixtures-heavy (semicolons, module-level imports inside test bodies).
+# scripts/alembic/hooks are dev tooling outside the shipped backend package.
+extend-exclude = ["tests", "scripts", "alembic", "hooks"]
+
+[lint]
+# Blocking set: real errors plus mechanically safe modernisation (pyupgrade),
+# import order and dead suppressions. Style-only families (E4/E7, SIM, FURB)
+# stay out: they churn the diff without finding bugs.
+select = ["E9", "F", "W605", "PLE2502", "PLE2515", "I", "UP", "RUF", "PIE"]
+
+# RUF001-003 flag Cyrillic letters in strings as ambiguous Unicode; the product
+# text is Russian, so these are noise by construction.
+# UP042 (str+Enum -> StrEnum) changes the base class of enums persisted in the DB
+# and serialised through the API; that is a behavioural change, not a lint fix.
+ignore = ["RUF001", "RUF002", "RUF003", "UP042"]

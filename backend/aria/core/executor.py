@@ -14,33 +14,44 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
+from aria.config import get_settings
+from aria.core.delegate import run_bounded
 from aria.core.integrity import IntegrityFlag, run_integrity_audit
 from aria.core.locking import file_lock
-from aria.core.delegate import run_bounded
-from aria.core.notifiers.protocol import Notifier, NotifierError
+from aria.core.notifiers.protocol import Notifier
 from aria.core.plan_validator import (
     MAX_REPLAN_ATTEMPTS,
-    PlanStep,
+    WebFetchUrlAmbiguous,
     check_oracle_naebal,
     effective_dependencies,
+    resolve_web_fetch_url,
+    step_tool_input,
     topological_waves,
     validate_plan,
+    validate_plan_paths,
 )
 from aria.core.secretscanner import ScanResult, assert_no_secrets, scan_changed_files
 from aria.db.base import release_write_lock
-from aria.db.enums import PLAN_PHASES, AuditVerdict, IntegrityVerdict, PlanStatus, TaskStatus
-from aria.db.models import IntegrityEvent, Task, TaskPlan, ToolCall
-from aria.storage.obsidian_vault import search_vault, vault_root, write_note_atomic
-from aria.config import get_settings
+from aria.db.enums import (
+    PLAN_PHASES,
+    AuditVerdict,
+    IntegrityVerdict,
+    PlanStatus,
+    TaskStatus,
+)
+from aria.db.models import IntegrityEvent, Task, TaskPlan
 from aria.llm.providers.base import ChatMessage
 from aria.llm.router import ProviderRouter, ProviderUnavailable
+from aria.storage.obsidian_vault import search_vault, vault_root, write_note_atomic
+from aria.tools.validators import command_rejection_reason, is_windows_command
 
 # Transient DB errors that should be retried
 _TRANSIENT_DB_ERRORS = (
@@ -186,7 +197,7 @@ def _append_plan_history(plan: TaskPlan) -> list[dict]:
     entry = {
         "version": plan.version,
         "plan_json": plan.plan_json,
-        "changed_at": datetime.now(timezone.utc).isoformat(),
+        "changed_at": datetime.now(UTC).isoformat(),
     }
     history.append(entry)
     # Retention: shift oldest if over limit
@@ -249,7 +260,7 @@ def _generate_delivery_note(
     Returns:
         str: полный .md контент заметки.
     """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     step_count = len(plan.plan_json or [])
 
     # Build step summary
@@ -390,6 +401,14 @@ async def _run_task_impl(
     if blocked_cmds:
         return await _fail_approval_required(session, task, task_plan, blocked_cmds)
 
+    # R6: детерминированная ошибка шага → падение сразу, без ЗАБЫЛ-replan.
+    det = _deterministic_step_error(tool_calls_raw)
+    if det:
+        code, message = det
+        _transition(session, task, TaskStatus.failed, error_code=code, error_message=message[:500])
+        session.flush()
+        return {"status": "failed", "plan_id": str(task_plan.id), "integrity_flags": [], "note_path": None}
+
     # ── Stage 4: Audit ────────────────────────────────────────────
     logger.info("Stage 4: Audit for task %s", task_id[:8])
     _set_phase(session, task, "audit")
@@ -524,6 +543,9 @@ async def _run_task_impl(
 # ═══════════════════════════════════════════════════════════════════
 
 
+PLAN_LLM_TIMEOUT_SEC = 30  # B3: потолок на Oracle-планирование — при таймауте откат на flash (thinking=high)
+
+
 async def _stage2_plan(
     session: OrmSession,
     task: Task,
@@ -543,8 +565,6 @@ async def _stage2_plan(
     Returns:
         (TaskPlan, oracle_naebal_flags).
     """
-    task_id = str(task.id)
-
     # PR-4 (COMPILE): контракт задачи -> постановка для Oracle. Плана без критериев
     # приёмки не бывает, когда TaskSpec их содержит.
     from aria.core import clarifier as _clarifier
@@ -576,21 +596,23 @@ async def _stage2_plan(
                 oracle_prompt_path = Path(__file__).parent.parent / "prompts" / "oracle.md"
                 oracle_system = oracle_prompt_path.read_text(encoding="utf-8") if oracle_prompt_path.exists() else "Ты oracle — генератор плана."
 
+                user_content = _compiler.compile_task_input(spec, vault_context) if spec is not None else f"Objective: {task.objective}"
+                if feedback:
+                    user_content += f"\n\nОбратная связь от аудита (переделай план с учётом этого):\n{feedback}"
+                if last_error:
+                    user_content += f"\n\nПредыдущий план отклонён валидацией, исправь:\n{last_error}"
                 messages = [
                     ChatMessage(role="system", content=oracle_system),
-                    ChatMessage(
-                        role="user",
-                        content=(
-                            (_compiler.compile_task_input(spec, vault_context) if spec is not None else f"Objective: {task.objective}")
-                            + (f"\n\nОбратная связь от аудита (переделай план с учётом этого):\n{feedback}" if feedback else "")
-                        ),
-                    ),
+                    ChatMessage(role="user", content=user_content),
                 ]
                 release_write_lock(session)  # BUG-5: план на reasoning-модели идёт ~100 с, писатель не держим
                 result = await router.route_chat(
                     "premium_reasoning", messages, tools=[],
                     allow_degrade=True, db=session,
-                    resilient=True, fallback_classes=("standard_reasoning", "free_tier_reasoning"),
+                    resilient=True,
+                    fallback_classes=("plan_flash_reasoning", "standard_reasoning", "free_tier_reasoning"),
+                    timeout_sec=PLAN_LLM_TIMEOUT_SEC,
+                    purpose="plan", session_id=task.session_id, task_id=task.id,
                 )
                 raw = result.response.text.strip()
                 # Парсим JSON из ответа
@@ -607,7 +629,11 @@ async def _stage2_plan(
                     "no LLM provider configured — Oracle plan cannot be generated"
                 )
 
-            plan_steps = validate_plan(plan_steps, criteria_ids=criteria_ids)
+            validated = validate_plan(plan_steps, criteria_ids=criteria_ids)
+            # R4: пути файловых шагов против sandbox (пропускается, если root не задан).
+            sandbox_root = str((Path(__file__).parent.parent.parent / get_settings().agent_sandbox_root).resolve())
+            validate_plan_paths(plan_steps, sandbox_root)
+            plan_steps = validated
             break
         except (ValueError, json.JSONDecodeError, KeyError) as e:
             last_error = str(e)
@@ -656,6 +682,91 @@ def _failed_step_payload(step: dict, exc: BaseException) -> dict:
     }
 
 
+def _failed_dependency_indices(
+    index: int, deps: list[set[int]], results: dict[int, dict]
+) -> list[int]:
+    """D-22: индексы зависимостей, которые уже завершились не ok (или пропущены)."""
+    blocked: list[int] = []
+    for dep in sorted(deps[index] if index < len(deps) else set()):
+        outcome = results.get(dep)
+        if outcome is None:
+            # Зависимости ещё нет в результатах (kill-switch/нестандартный план) — не блокируем.
+            continue
+        if outcome.get("status") != "ok":
+            blocked.append(dep)
+    return blocked
+
+
+def _skipped_step_payload(
+    step: dict, blocked_by: list[int], steps: list[dict], results: dict[int, dict]
+) -> dict:
+    """Payload пропущенного узла: причина — невыполненные зависимости."""
+    step_id = str(step.get("step_id", ""))
+    parts: list[str] = []
+    for dep in blocked_by:
+        other = steps[dep] if 0 <= dep < len(steps) else {}
+        status = str((results.get(dep) or {}).get("status") or "?")
+        parts.append(f"{other.get('step_id') or dep} «{other.get('objective') or ''}» -> {status}")
+    reason = "шаг не выполнен: не выполнены зависимости: " + "; ".join(parts)
+    return {
+        "id": f"tc-{step_id[:8]}" if step_id else "tc-skipped",
+        "tool_name": step.get("tool_ref") or step.get("skill_ref") or "unknown",
+        "input_json": {"objective": step.get("objective", "")},
+        "output_json": {
+            "skipped": True,
+            "reason": reason,
+            "blocked_by": [
+                str((steps[d] if 0 <= d < len(steps) else {}).get("step_id") or d) for d in blocked_by
+            ],
+        },
+        "status": "skipped",
+    }
+
+
+def _persist_skipped_call(task_id: Any, step: dict, payload: dict) -> str:
+    """19.4d: записывает ToolCall со статусом skipped в отдельном коротком scope.
+
+    Свой scope нужен, чтобы не держать writer-lock волны и не блокировать
+    параллельные узлы. Сбой записи не роняет прогон.
+    """
+    from aria.db import repository as repo
+    from aria.db.base import session_scope
+    from aria.db.enums import ToolStatus
+
+    fallback_id = str(payload.get("id") or "tc-skipped")
+    try:
+        with session_scope() as db:
+            task = repo.get_task(db, task_id)
+            agent_session = (
+                repo.get_session(db, task.session_id) if task is not None and task.session_id else None
+            )
+            if task is None or agent_session is None:
+                return fallback_id
+            call = repo.start_tool_call(
+                db=db,
+                session=agent_session,
+                task=task,
+                tool_name=str(payload.get("tool_name") or "unknown"),
+                role=str(step.get("role") or "general"),
+                risk_level="low",
+                input_json=payload.get("input_json") or {},
+                attempt_no=1,
+            )
+            output_json = payload.get("output_json") or {}
+            repo.finish_tool_call(
+                db=db,
+                call=call,
+                status=ToolStatus.skipped,
+                output_json=output_json,
+                error_code="dependency_failed",
+                error_message=str(output_json.get("reason") or "")[:400],
+            )
+            return str(call.id)
+    except Exception:  # пропуск не должен ронять волну
+        logger.exception("Stage 3: не удалось записать skipped ToolCall")
+        return fallback_id
+
+
 def _execute_parallelism() -> int:
     """Сколько узлов плана исполнять одновременно (PR-5).
 
@@ -664,7 +775,12 @@ def _execute_parallelism() -> int:
     дешевле выполнить последовательно, чем попасть в swap или быть убитым OOM.
     """
     settings = get_settings()
-    limit = max(1, min(int(settings.runner_max_workers), int(settings.delegate_max_parallel)))
+    if not bool(getattr(settings, "swarm_enabled", True)):
+        logger.warning("swarm_enabled=False — параллелизм EXECUTE снижен до 1 узла")
+        return 1
+    from aria.core.delegate import SWARM_CAP
+
+    limit = max(1, min(int(settings.runner_max_workers), int(settings.delegate_max_parallel), SWARM_CAP))
     try:
         import psutil
 
@@ -675,7 +791,7 @@ def _execute_parallelism() -> int:
                 free_gb, EXECUTE_MIN_FREE_RAM_GB,
             )
             return 1
-    except Exception:  # noqa: BLE001 — нет psutil/нет данных: работаем по конфигу, а не падаем
+    except Exception:  # нет psutil/нет данных: работаем по конфигу, а не падаем
         logger.debug("psutil недоступен — лимит параллелизма EXECUTE берётся из настроек")
     return limit
 
@@ -754,7 +870,7 @@ def _dialog_context(session: OrmSession, task: Task) -> str:
         parts.append(f"Запрос пользователя:\n{_clip(task.objective, STEP_CONTEXT_DEP_CHARS)}")
     try:
         spec = _clarifier.load_spec(session, task.id)
-    except Exception:  # noqa: BLE001 — контекст не должен ронять исполнение
+    except Exception:  # контекст не должен ронять исполнение
         spec = None
     if spec is not None and (spec.goal or "").strip():
         parts.append("Контракт задачи:\n" + _clip(spec.to_markdown(), STEP_CONTEXT_DEP_CHARS))
@@ -848,6 +964,7 @@ async def _execute_step_isolated(
 
     spec = None
     handler_input: dict = {}
+    checkpoint_id: str | None = None
     try:
         if tool_ref == "llm_task":
             # Шаг, который сам по себе является LLM-задачей (не registry tool)
@@ -867,6 +984,7 @@ async def _execute_step_isolated(
                 "subagent_execution", messages, tools=[],
                 allow_degrade=True, db=None,
                 resilient=True, fallback_classes=("free_tier_reasoning", "standard_reasoning"),
+                purpose="subagent", session_id=session_id, task_id=task_id,
             )
             spec = type("Spec", (), {"tool_name": "llm_task", "risk_level": type("R", (), {"value": "medium"})()})()
             handler_input = {"objective": objective, "role": role}
@@ -894,6 +1012,12 @@ async def _execute_step_isolated(
                 handler_input = {"path": step.get("path", f"generated/{tc_id}.txt"), "content": content}
             elif tool_ref == "shell_execute":
                 command = await _llm_generate_command(router, None, role, objective, context=context)
+                if not is_windows_command(command):
+                    # R3(b): команда невыполнима на этой машине — не запускать и не
+                    # показывать Approve (повтор с теми же входными данными не поможет).
+                    raise ValueError(
+                        f"{command_rejection_reason(command)}: команда невыполнима на этой машине: {command!r}"
+                    )
                 handler_input = {"command": command}
             elif tool_ref == "file_read":
                 handler_input = {"path": step.get("path", ".")}
@@ -902,13 +1026,29 @@ async def _execute_step_isolated(
             elif tool_ref == "web_search":
                 handler_input = {"query": step.get("query", objective), "max_results": step.get("max_results", 5)}
             elif tool_ref == "web_fetch":
-                handler_input = {"url": step.get("url", ""), "max_chars": step.get("max_chars", 8000)}
+                try:
+                    resolved_url = resolve_web_fetch_url(step)
+                except WebFetchUrlAmbiguous as e:
+                    raise ValueError(f"invalid_arguments (web_fetch): {e}")
+                if not resolved_url:
+                    raise ValueError(
+                        f"invalid_arguments (web_fetch): url не указан ни в поле url, ни в input, "
+                        f"ни в objective (шаг {step_id[:8] or index})"
+                    )
+                handler_input = {"url": resolved_url, "max_chars": step.get("max_chars", 8000)}
             else:
-                # Остальные registry-инструменты — input прямо из шага
-                handler_input = step.get("input") or step.get("input_json") or {}
-                if not handler_input:
-                    raise ValueError(f"tool_ref={tool_ref} требует step.input/input_json")
+                # D-24: аргументы могут лежать в input/input_json или корнем шага.
+                handler_input = step_tool_input(step, spec)
 
+            # SEC-6: секрет не подставляется в аргументы инструмента и не уходит в хуки/логи.
+            from aria import secretguard
+
+            handler_input = secretguard.mask_obj(handler_input)
+            from aria.core.action_policy import decide as _decide_action
+
+            policy = _decide_action(tool_ref, handler_input, sandbox_root=str(sandbox_root or "."))
+            if policy.action == "deny":
+                raise ValueError(f"denied: {policy.reason}")
             # Тот же барьер аргументов, что в loop._execute_tool: Plan-режим ходит в handler напрямую,
             # и без этого пустой url/path/glob давал бы «успех» или невнятный KeyError.
             arg_errors = validate_tool_input(spec.input_schema, handler_input)
@@ -930,12 +1070,13 @@ async def _execute_step_isolated(
             if tool_ref == "file_read" and isinstance(output_json, dict) and output_json.get("exists") is False:
                 # Чтение несуществующего файла раньше шло как успех (exists=false), и зависимые шаги работали по пустоте.
                 output_json = {"error": f"file not found: {handler_input.get('path')}"}
+            output_json = secretguard.mask_obj(output_json)
             await toolhooks.post_tool(
                 spec.tool_name, handler_input, output_json,
                 "error" if isinstance(output_json, dict) and output_json.get("error") else "ok",
                 session_id=session_id, task_id=task_id, sandbox_root=sandbox_root, checkpoint_id=checkpoint_id,
             )
-    except Exception as e:  # noqa: BLE001 — узел плана не роняет волну целиком
+    except Exception as e:  # узел плана не роняет волну целиком
         logger.warning("Stage 3: шаг %s упал: %s", step_id[:8] if step_id else "?", e)
         return {
             "id": tc_id,
@@ -979,6 +1120,7 @@ async def _execute_step_isolated(
         "input_json": handler_input,
         "output_json": output_json,
         "status": "ok" if status_ok else "error",
+        "checkpoint_id": checkpoint_id,
     }
 
 
@@ -1042,6 +1184,17 @@ async def _stage3_execute(
     base_context = _dialog_context(session, task)
     results: dict[int, dict] = {}
     tool_calls_raw: list[dict] = []
+
+    def _record_outcome(idx: int, outcome: dict) -> None:
+        results[idx] = outcome
+        if outcome.get("status") == "ok":
+            steps[idx]["status"] = "done"
+            # tool_call_ids — ТОЛЬКО при ok, чтобы ЗАБЫЛ-детектор срабатывал на failure/skip
+            steps[idx]["tool_call_ids"] = [outcome["id"]]
+        else:
+            steps[idx]["status"] = "skipped" if outcome.get("status") == "skipped" else "failed"
+            steps[idx].pop("tool_call_ids", None)
+
     for wave_no, wave in enumerate(waves, start=1):
         session.commit()  # PR-5: writer-lock отпущен перед параллельной волной
         for group in _serialize_by_write_scope(steps, wave):
@@ -1050,7 +1203,25 @@ async def _stage3_execute(
                 wave_no, len(waves), group, min(limit, len(group)),
             )
             reuse_map = reuse or {}
-            run_idx = [i for i in group if _step_signature(steps[i]) not in reuse_map]
+            # D-22: пропуск проверяется ДО reuse-map — кэш не должен маскировать
+            # упавшую зависимость.
+            skip_reasons: dict[int, list[int]] = {}
+            run_idx: list[int] = []
+            for idx in group:
+                blocked = _failed_dependency_indices(idx, deps, results)
+                if blocked:
+                    skip_reasons[idx] = blocked
+                elif _step_signature(steps[idx]) not in reuse_map:
+                    run_idx.append(idx)
+            # Пропущенные узлы пишут ToolCall сразу в своём scope — до await run_bounded.
+            for idx, blocked in skip_reasons.items():
+                outcome = _skipped_step_payload(steps[idx], blocked, steps, results)
+                outcome["id"] = _persist_skipped_call(task.id, steps[idx], outcome)
+                _record_outcome(idx, outcome)
+                logger.warning(
+                    "Stage 3: шаг %s пропущен — не выполнены зависимости %s",
+                    str(steps[idx].get("step_id"))[:8], blocked,
+                )
             factories = [
                 (lambda i=idx: _execute_step_isolated(
                     steps[i], index=i, task_id=task.id, sandbox_root=sandbox_root, router=router,
@@ -1059,24 +1230,22 @@ async def _stage3_execute(
                 for idx in run_idx
             ]
             outcomes = await run_bounded(factories, limit=min(limit, len(run_idx))) if factories else []
-            pairs = list(zip(run_idx, outcomes))
-            # шаги, уже выполненные в прошлой итерации, не гоняем заново (см. _reusable_calls)
-            pairs += [(i, reuse_map[_step_signature(steps[i])]) for i in group if i not in run_idx]
-            for idx, outcome in pairs:
+            for idx, outcome in zip(run_idx, outcomes):
                 if isinstance(outcome, BaseException):
                     logger.warning(
                         "Stage 3: узел %s завершился исключением: %s",
                         steps[idx].get("step_id"), outcome,
                     )
                     outcome = _failed_step_payload(steps[idx], outcome)
-                tool_calls_raw.append(outcome)
-                results[idx] = outcome
-                steps[idx]["status"] = "done" if outcome.get("status") == "ok" else "failed"
-                # tool_call_ids — ТОЛЬКО при ok, чтобы ЗАБЫЛ-детектор срабатывал на failure
-                if outcome.get("status") == "ok":
-                    steps[idx]["tool_call_ids"] = [outcome["id"]]
-                else:
-                    steps[idx].pop("tool_call_ids", None)
+                _record_outcome(idx, outcome)
+            # шаги, уже выполненные в прошлой итерации, не гоняем заново (см. _reusable_calls)
+            for idx in group:
+                if idx in skip_reasons or idx in run_idx:
+                    continue
+                _record_outcome(idx, reuse_map[_step_signature(steps[idx])])
+
+    # Порядок вызовов — как порядок шагов плана (волны и reuse его перемешивали).
+    tool_calls_raw = [results[i] for i in range(len(steps)) if i in results]
 
     # Сохраняем обновлённый план
     task_plan.plan_json = steps
@@ -1140,15 +1309,58 @@ def build_result_message(task: Task, files: list[tuple[str, str]], spec: Any | N
     return "\n".join(lines)
 
 
+def _is_transient_db_error(exc: Exception) -> bool:
+    return any(t in str(exc).lower() for t in _TRANSIENT_DB_ERRORS)
+
+
+def _deliver_assistant_message(task_id, session_id, content: str) -> None:
+    """Доставляет assistant-сообщение и событие ``message.created`` отдельной транзакцией.
+
+    L4: единственные ``database is locked`` в логах — INSERT INTO events при доставке
+    результата/отказа (backend.log 2755, 3062, 3564). Своя транзакция нужна потому, что
+    после неудачного flush вызывающая сессия уже в ``PendingRollback``: повтор в ней
+    невозможен, а откат потерял бы переход статуса. Поэтому вызывающий сначала commit'ит
+    статус, а доставка ретраится на свежем соединении.
+    """
+    from aria.core.events import event_bus
+    from aria.db import repository as repo
+    from aria.db.base import session_scope
+    from aria.http_utils import serialize_message
+
+    last_exc: Exception | None = None
+    for attempt in range(MAX_DB_RETRIES):
+        try:
+            with session_scope() as db:
+                agent_session = repo.get_session(db, session_id)
+                if agent_session is None:
+                    return
+                msg = repo.append_message(db, agent_session, role="assistant", content=content)
+                db.flush()
+                event_bus.emit(
+                    "message.created", serialize_message(msg),
+                    session_id=session_id, task_id=task_id, db=db,
+                )
+            return
+        except Exception as exc:  # доставка не должна ломать задачу
+            if not _is_transient_db_error(exc):
+                logger.warning("Message for task %s not posted: %s", str(task_id)[:8], exc)
+                return
+            last_exc = exc
+            if attempt < MAX_DB_RETRIES - 1:
+                time.sleep(_DB_RETRY_DELAY_SEC[min(attempt, len(_DB_RETRY_DELAY_SEC) - 1)])
+    logger.error(
+        "Message for task %s not posted after %d retries: %s",
+        str(task_id), MAX_DB_RETRIES, last_exc,
+    )
+
+
 def _post_result_message(session: OrmSession, task: Task, task_plan: TaskPlan,
                          tool_calls: list[dict], note_path: str | None) -> None:
     """Кладёт результат в чат сессии. Сбой доставки в чат не должен ронять уже выполненную задачу."""
     try:
         from aria.config import get_settings
         from aria.core import clarifier as _clarifier
-        from aria.core.events import event_bus
         from aria.db import repository as repo
-        from aria.http_utils import serialize_message
 
         agent_session = repo.get_session(session, task.session_id)
         if agent_session is None:
@@ -1157,12 +1369,14 @@ def _post_result_message(session: OrmSession, task: Task, task_plan: TaskPlan,
         reports = repo.list_audit_reports(session, task.id)
         criteria = dict((reports[-1].plan_vs_fact or {}).get("criteria_status") or {}) if reports else {}
         files = _result_files(tool_calls, get_settings().agent_sandbox_root)
-        msg = repo.append_message(session, agent_session, role="assistant",
-                                  content=build_result_message(task, files, spec, criteria, note_path))
-        session.flush()
-        event_bus.emit("message.created", serialize_message(msg), session_id=task.session_id, task_id=task.id)
-    except Exception as exc:  # noqa: BLE001
+        content = build_result_message(task, files, spec, criteria, note_path)
+        # Статус done фиксируем до независимой записи сообщения: при сбое доставки
+        # задача остаётся выполненной (L4: backend.log 3564).
+        session.commit()
+    except Exception as exc:
         logger.warning("Result message for task %s not posted: %s", str(task.id)[:8], exc)
+        return
+    _deliver_assistant_message(task.id, task.session_id, content)
 
 
 _FAILURE_TITLES = {
@@ -1195,11 +1409,13 @@ def build_failure_message(task: Task, remarks: list[str]) -> str:
 
 
 def _post_failure_message(session: OrmSession, task: Task) -> None:
-    """Сообщение об отказе в чат: раньше failed-задача оставляла пустой экран и ни одной строки в логе."""
+    """Сообщение об отказе в чат: раньше failed-задача оставляла пустой экран и ни одной строки в логе.
+
+    R7/L4: вызывающая сессия сначала commit'ит переход в failed, затем доставка идёт
+    свежей транзакцией с ретраями на ``database is locked`` (см. ``_deliver_assistant_message``).
+    """
     try:
-        from aria.core.events import event_bus
         from aria.db import repository as repo
-        from aria.http_utils import serialize_message
 
         agent_session = repo.get_session(session, task.session_id)
         if agent_session is None:
@@ -1212,11 +1428,42 @@ def _post_failure_message(session: OrmSession, task: Task) -> None:
                 text = str(item).strip()
                 if text:
                     remarks.append(text[:300])
-        msg = repo.append_message(session, agent_session, role="assistant", content=build_failure_message(task, remarks[:4]))
-        session.flush()
-        event_bus.emit("message.created", serialize_message(msg), session_id=task.session_id, task_id=task.id)
-    except Exception as exc:  # noqa: BLE001 - сбой доставки сообщения не должен ломать переход статуса
+        content = build_failure_message(task, remarks[:4])
+        session.commit()  # статус failed не должен зависеть от доставки сообщения
+    except Exception as exc:  # сбой доставки не должен ломать переход статуса
         logger.warning("Failure message for task %s not posted: %s", str(task.id)[:8], exc)
+        return
+    _deliver_assistant_message(task.id, task.session_id, content)
+
+
+_DETERMINISTIC_STEP_ERRORS: list[tuple[str, str]] = [
+    ("invalid_arguments", "invalid_arguments"),
+    ("unix_only_command", "unix_only_command"),
+    ("command_not_found_in_path", "command_not_found_in_path"),
+    ("hook_blocked", "hook_blocked"),
+    ("no LLM provider configured", "provider_unavailable"),
+]
+
+
+def _deterministic_step_error(tool_calls: list[dict]) -> tuple[str, str] | None:
+    """R6: детерминированная ошибка шага → (code, message), иначе None.
+
+    Повтор с теми же входными данными не меняет результат, поэтому такие ошибки
+    падают сразу, без ЗАБЫЛ-replan. ``unknown tool_ref`` сюда НЕ входит: replan
+    оправдан (Oracle может выбрать другой инструмент).
+    """
+    for c in tool_calls:
+        o = c.get("output_json")
+        if isinstance(o, dict) and o.get("status") == "approval_required":
+            return "approval_required", "approval_required: нужно подтверждение владельца"
+        if c.get("status") != "error":
+            continue
+        o = c.get("output_json") if isinstance(c.get("output_json"), dict) else {}
+        err = str(o.get("error") or "")
+        for prefix, code in _DETERMINISTIC_STEP_ERRORS:
+            if err.startswith(prefix):
+                return code, err
+    return None
 
 
 def _approval_blocked_commands(tool_calls: list[dict]) -> list[str]:
@@ -1304,6 +1551,7 @@ async def _llm_generate_content(
         "subagent_execution", messages, tools=[],
         allow_degrade=True, db=session,
         resilient=True, fallback_classes=("free_tier_reasoning", "standard_reasoning"),
+        purpose="other",
     )
     return result.response.text or ""
 
@@ -1332,6 +1580,7 @@ async def _llm_generate_command(
         "subagent_execution", messages, tools=[],
         allow_degrade=True, db=session,
         resilient=True, fallback_classes=("free_tier_reasoning", "standard_reasoning"),
+        purpose="other",
     )
     return result.response.text.strip().strip("`").strip() or "echo 'no command generated'"
 
@@ -1356,8 +1605,11 @@ async def _stage4_audit(
     from aria.core.audit import run_audit
     from aria.db import repository as repo
 
+    # 19.4d D-22: пропущенные шаги не участвуют в НАЕБАЛ (у skipped file_write нет хешей,
+    # и детектор дал бы ложный НАЕБАЛ). ЗАБЫЛ считается по tool_call_ids и сохраняется.
+    integrity_calls = [c for c in tool_calls_raw if c.get("status") != "skipped"]
     flags = run_integrity_audit(
-        tool_calls=tool_calls_raw,
+        tool_calls=integrity_calls,
         plan_json=task_plan.plan_json,
     )
 
@@ -1388,7 +1640,7 @@ async def _stage4_audit(
                     criteria=[c.model_dump(mode="json") for c in spec.acceptance_criteria] if spec else None,
                     assumptions=list(spec.assumptions) if spec else None,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Correctness audit crashed — integrity verdict stands")
                 task_plan.integrity_verdict = IntegrityVerdict.pass_.value
                 return flags
@@ -1455,7 +1707,9 @@ async def _stage7_delivery(
     task_spec = _clarifier.load_spec(session, task.id)
 
     # PR-6: статусы критериев берём из последнего отчёта аудита (его пишет _stage4_audit).
-    from aria.db import repository as repo  # раньше не был импортирован: Stage 7 падал NameError на ЛЮБОЙ задаче
+    from aria.db import (
+        repository as repo,  # раньше не был импортирован: Stage 7 падал NameError на ЛЮБОЙ задаче
+    )
 
     reports = repo.list_audit_reports(session, task.id)
     criteria_status = {}

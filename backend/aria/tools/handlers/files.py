@@ -146,6 +146,9 @@ async def file_write(input_json: dict, sandbox_root: str) -> dict:
 async def file_search(input_json: dict, sandbox_root: str) -> dict:
     root = Path(sandbox_root).resolve()
     norm = _check_glob(input_json.get("glob", "**/*"), root)
+    # Голый шаблон без пути (`*`, `*test*`) ищет по всему проекту, а не только в корне.
+    if "/" not in norm and not norm.startswith("**"):
+        norm = "**/" + norm
     include_all = bool(input_json.get("include_ignored"))
     matches: list[str] = []
     for p in root.glob(norm):
@@ -162,24 +165,39 @@ async def file_search(input_json: dict, sandbox_root: str) -> dict:
 
 
 async def file_grep(input_json: dict, sandbox_root: str) -> dict:
-    """Поиск текста (или regex) по содержимому файлов. Ответ: path, line, text."""
+    """Поиск текста (или regex) по содержимому файлов. Ответ: root, path, line, text.
+
+    ``root`` — фактический корень поиска. Если запрошенный ``path`` вне этого
+    корня, инструмент честно отвечает «недоступен», а не сканирует корень молча
+    (F-001: агент выдавал файлы проекта ARIA за чужую папку).
+    """
     root = Path(sandbox_root).resolve()
     pattern = str(input_json.get("pattern") or "")
     if not pattern:
-        return {"error": "pattern is empty"}
+        return {"error": "pattern is empty", "root": str(root)}
     use_regex = bool(input_json.get("regex"))
     flags = 0 if input_json.get("case_sensitive") else re.IGNORECASE
     try:
         rx = re.compile(pattern if use_regex else re.escape(pattern), flags)
     except re.error as exc:
-        return {"error": f"invalid regex: {exc}"}
+        return {"error": f"invalid regex: {exc}", "root": str(root)}
     glob = _check_glob(input_json.get("glob") or "**/*", root)
     limit = min(max(_as_int(input_json.get("max_results"), 100) or 100, 1), MAX_GREP_RESULTS)
     ctx = min(max(_as_int(input_json.get("context"), 0) or 0, 0), 5)
     sub = input_json.get("path")
-    base = _resolve_within(root, sub) if sub else root
+    if sub:
+        try:
+            base = _resolve_within(root, str(sub))
+        except PathEscapeError:
+            return {
+                "error": f"path is outside the readable root: {sub} (root={root})",
+                "root": str(root),
+                "files_scanned": 0,
+            }
+    else:
+        base = root
     if not base.is_dir():
-        return {"error": f"path is not a directory: {sub}"}
+        return {"error": f"path is not a directory: {sub}", "root": str(root)}
 
     matches: list[dict] = []
     files_scanned = 0
@@ -215,4 +233,36 @@ async def file_grep(input_json: dict, sandbox_root: str) -> dict:
                 break
         if truncated:
             break
-    return {"matches": matches, "truncated": truncated, "files_scanned": files_scanned}
+    return {"matches": matches, "truncated": truncated, "files_scanned": files_scanned, "root": str(root)}
+
+
+MAX_TOOL_OUTPUT_READ = 4000
+_REF_RE = re.compile(r"^[0-9a-fA-F-]{8,36}$")
+
+
+async def tool_output_read(input_json: dict, sandbox_root: str | None = None, task_id=None, **_ctx) -> dict:
+    """E6: чтение полного вывода инструмента из sandbox/.tool_output/<task_id>/<ref>.txt (только чтение)."""
+    ref = str(input_json.get("ref") or "")
+    if not _REF_RE.fullmatch(ref):
+        return {"error": "invalid ref"}
+    if task_id is None:
+        return {"error": "no task context"}
+    root = (Path(sandbox_root or ".").resolve() / ".tool_output" / str(task_id))
+    target = (root / f"{ref}.txt").resolve()
+    if not target.is_relative_to(root):
+        return {"error": "ref outside .tool_output"}
+    if not target.exists():
+        return {"error": "output not found"}
+    text = read_text_auto(target)
+    start = max(_as_int(input_json.get("start")) or 0, 0)
+    end = _as_int(input_json.get("end"))
+    limit = MAX_TOOL_OUTPUT_READ if end is None else min(max(end - start, 1), MAX_TOOL_OUTPUT_READ)
+    chunk = text[start:start + limit]
+    return {
+        "ref": ref,
+        "start": start,
+        "end": start + len(chunk),
+        "total": len(text),
+        "content": chunk,
+        "truncated": start + len(chunk) < len(text),
+    }

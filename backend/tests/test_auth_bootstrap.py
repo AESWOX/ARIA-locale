@@ -2,7 +2,6 @@ import json
 import os
 import tempfile
 import unittest
-from functools import lru_cache
 
 from aria import config as config_module
 from aria.api.auth import RuntimeTokenStore

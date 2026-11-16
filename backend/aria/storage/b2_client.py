@@ -45,7 +45,7 @@ class BackblazeB2Client:
 
     async def _authorize(self) -> B2Authorization:
         key_id, app_key = self._require_credentials()
-        raw = f"{key_id}:{app_key}".encode("utf-8")
+        raw = f"{key_id}:{app_key}".encode()
         token = base64.b64encode(raw).decode("ascii")
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(self.authorize_url, headers={"Authorization": f"Basic {token}"})

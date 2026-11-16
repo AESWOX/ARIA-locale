@@ -7,7 +7,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { BUILTIN_THEMES, defaultTheme } from "./presets";
+import { BUILTIN_THEMES, blackTheme } from "./presets";
+import { applyThemeOverrides, readThemeOverrides, saveThemeOverrides } from "./overrides";
+import { readSurface, saveSurface } from "./surface";
 import {
   FONT_CHOICES,
   THEME_DEFAULT_FONT_ID,
@@ -400,6 +402,12 @@ function applyTheme(theme: DashboardTheme) {
   // Re-assert the font override last: theme application just rewrote
   // --theme-font-sans/-display, so an active override has to win again.
   applyFontOverride(_ACTIVE_FONT_OVERRIDE);
+  // User color overrides (text/window text/accent) also survive theme switches.
+  applyThemeOverrides(
+    readThemeOverrides(),
+    theme.palette.midground.hex,
+    theme.palette.warmGlow,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +461,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       return (
         BUILTIN_THEMES[name] ??
         userThemeDefs[name] ??
-        defaultTheme
+        blackTheme
       );
     },
     [userThemeDefs],
@@ -538,6 +546,65 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Hydrate the durable UI prefs (surface, image, dim, color overrides) once.
+  // Theme/font have their own server endpoints; this fills the gap that made
+  // the background and custom colors vanish after an app restart.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getDashboardPrefs()
+      .then((prefs) => {
+        if (cancelled || !prefs) return;
+        // First run after the upgrade: the server file has defaults while the
+        // old install only had localStorage. Keep the user's local look and
+        // migrate it instead of wiping the background on first launch.
+        const local = readSurface();
+        const localOverrides = readThemeOverrides();
+        const serverSurfaceIsDefault =
+          prefs.surface_mode === "theme" &&
+          !prefs.surface_image &&
+          prefs.surface_dim === 0 &&
+          prefs.surface_color === "#101418";
+        const useLocalSurface =
+          serverSurfaceIsDefault && (local.mode !== "theme" || !!local.image);
+        const surface = useLocalSurface ? local : {
+          mode: prefs.surface_mode,
+          color: prefs.surface_color,
+          image: prefs.surface_image,
+          imageDim: prefs.surface_dim,
+        };
+        const serverOverridesAreEmpty =
+          !prefs.overrides.textColor &&
+          !prefs.overrides.windowTextColor &&
+          !prefs.overrides.accentColor;
+        const localOverridesUsed =
+          !!localOverrides.textColor || !!localOverrides.windowTextColor || !!localOverrides.accentColor;
+        const overrides = serverOverridesAreEmpty && localOverridesUsed ? localOverrides : prefs.overrides;
+        saveSurface(surface.mode, surface.color, surface.image, surface.imageDim);
+        saveThemeOverrides(overrides);
+        const active = resolveTheme(themeName);
+        applyThemeOverrides(overrides, active.palette.midground.hex, active.palette.warmGlow);
+        if (useLocalSurface || (serverOverridesAreEmpty && localOverridesUsed)) {
+          void api
+            .saveDashboardPrefs({
+              surface_mode: surface.mode,
+              surface_color: surface.color,
+              surface_image: surface.image,
+              surface_dim: surface.imageDim,
+              overrides,
+            })
+            .catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        /* backend unavailable: localStorage remains the fallback */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const setTheme = useCallback(
     (name: string) => {
       // Accept any name the server told us exists OR any built-in.
@@ -586,8 +653,8 @@ export function useTheme(): ThemeContextValue {
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  theme: defaultTheme,
-  themeName: "default",
+  theme: blackTheme,
+  themeName: "black",
   availableThemes: Object.values(BUILTIN_THEMES).map((t) => ({
     name: t.name,
     label: t.label,

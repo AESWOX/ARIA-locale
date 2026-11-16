@@ -23,6 +23,16 @@ def test_bearer_and_provider_keys_are_masked():
     assert "supersecret1" not in redact("GET /x?api_key=supersecret1&a=1")
 
 
+def test_uppercase_env_style_credentials_are_masked():
+    line = (
+        "B2_APPLICATION_KEY=verysecret123 B2_KEY_ID=keyid456 "
+        "LOCAL_AGENT_UI_PIN=987654"
+    )
+    out = redact(line)
+    for value in ("verysecret123", "keyid456", "987654"):
+        assert value not in out
+
+
 def test_ordinary_text_is_untouched():
     text = "Stage 3: волна 1/2, группа [0] — до 3 узлов параллельно (task 3a5f4292)"
     assert redact(text) == text

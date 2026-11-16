@@ -10,7 +10,6 @@ premium/standard reasoning, простые подзадачи и sub-agents — 
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import re
 import time
@@ -20,10 +19,10 @@ import httpx
 from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
+from aria.core import timing
 from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import ProviderStatus
-from aria.core import timing
 from aria.llm.key_pool import NoAvailableKeys
 from aria.llm.providers.base import ChatMessage, LlmProvider, LlmResponse
 
@@ -49,7 +48,7 @@ def _finish_hint(response) -> str:
     """' (finish_reason=length)' из сырого ответа, если он есть: по нему видно, почему content пустой."""
     try:
         reason = response.raw["choices"][0].get("finish_reason")
-    except Exception:  # noqa: BLE001 - сырой ответ может быть любым
+    except Exception:  # сырой ответ может быть любым
         return ""
     return f" (finish_reason={reason})" if reason else ""
 
@@ -71,6 +70,8 @@ ACCOUNT_COOLDOWN_SEC = 600.0
 # Любой другой отказ провайдера (400/401/413/422..., битый ответ): идём дальше по цепочке, а провайдера на
 # две минуты уводим в конец очереди: если он не тянет эту модель/схему тулов, не тратим на него первый запрос.
 OTHER_ERROR_COOLDOWN_SEC = 120.0
+OVERSIZE_COOLDOWN_SEC = 300.0
+GROQ_OVERSIZE_TPM = 7000
 # Предохранитель: после 429 / исчерпанных 5xx / нет ключей / таймаута провайдер уходит в КОНЕЦ очереди на короткое
 # время (порядок, а не отказ: единственного провайдера всё равно пробуем). Без этого каждый запрос заново платил
 # за заведомо провальную попытку: 2 повтора после 503 с паузой или до 60 с на таймаут.
@@ -80,8 +81,10 @@ TIMEOUT_COOLDOWN_SEC = 60.0
 NO_KEYS_COOLDOWN_SEC = 60.0          # если пул ключей не сообщил, когда освободится первый
 NO_KEYS_COOLDOWN_MIN_SEC = 15.0
 NO_KEYS_COOLDOWN_MAX_SEC = 300.0
-RETRY_ATTEMPTS_PER_PROVIDER = 2      # same provider, on 5xx only
-RETRY_BACKOFF_SEC = 1.0              # 1s, then 2s
+RETRY_ATTEMPTS_PER_PROVIDER = 1      # PERF-1: one call per provider, then fail over
+RETRY_BACKOFF_SEC = 1.0              # kept for callers that pass their own backoff
+BREAKER_THRESHOLD = 3                # consecutive failed calls -> open the circuit
+BREAKER_COOLDOWN_SEC = 300.0         # open circuit: skip the provider for 5 minutes
 
 
 def log_cache_usage(provider_id: str, response) -> dict[str, int | None]:
@@ -123,6 +126,8 @@ class ProviderRouter:
     providers_by_class: dict[str, list[LlmProvider]] = field(default_factory=dict)
     # provider_id -> момент (по self.clock), до которого провайдер откладывается в конец очереди
     cooldown_until: dict[str, float] = field(default_factory=dict)
+    # PERF-1: consecutive failed calls per provider; the breaker opens at BREAKER_THRESHOLD.
+    fail_streak: dict[str, int] = field(default_factory=dict)
     clock: callable = time.monotonic
     # П.5.2 ТЗ: семафоры по классам провайдеров (квоты Gemini free-tier / Groq).
     semaphores: dict[str, object] = field(default_factory=dict)
@@ -135,6 +140,25 @@ class ProviderRouter:
         until = self.clock() + seconds
         if until > self.cooldown_until.get(provider.provider_id, 0.0):
             self.cooldown_until[provider.provider_id] = until
+
+    def _on_failure(self, provider: LlmProvider) -> None:
+        """PERF-1 circuit breaker: three failed calls in a row open the circuit for 5 minutes."""
+        streak = self.fail_streak.get(provider.provider_id, 0) + 1
+        self.fail_streak[provider.provider_id] = streak
+        if streak >= BREAKER_THRESHOLD:
+            self._cool(provider, BREAKER_COOLDOWN_SEC)
+
+    def _on_success(self, provider: LlmProvider) -> None:
+        self.fail_streak.pop(provider.provider_id, None)
+        self.cooldown_until.pop(provider.provider_id, None)
+
+    def is_cooling(self, provider: LlmProvider) -> bool:
+        return self._cooling(provider)
+
+    def mark_failed(self, provider: LlmProvider, seconds: float) -> None:
+        """A stream call failed before the router saw it: count it and cool the provider."""
+        self._on_failure(provider)
+        self._cool(provider, seconds)
 
     @staticmethod
     def _no_keys_cooldown(provider: LlmProvider) -> float:
@@ -180,14 +204,54 @@ class ProviderRouter:
 
     # ---------- connectivity / selection (§12.3, §12.5) ----------
 
-    async def _pick_available(self, provider_class: str, db: OrmSession | None = None) -> LlmProvider | None:
+    @staticmethod
+    def _estimate_prompt_tokens(messages: list[ChatMessage], tools: list[dict]) -> int:
+        chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+        return chars // 4 + 8 * len(tools) + 16
+
+    def _oversize_for_provider(self, provider: LlmProvider, messages: list[ChatMessage], tools: list[dict]) -> bool:
+        """Free-tier модели режут запросы по TPM; не тратим HTTP-ход и не шлём контент зря."""
+        limit = getattr(provider, "max_tpm", None)
+        if not limit and provider.provider_id.startswith("groq"):
+            limit = GROQ_OVERSIZE_TPM
+        if not limit:
+            return False
+        try:
+            return self._estimate_prompt_tokens(messages, tools) > int(limit)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _quota_exhausted(provider: LlmProvider) -> bool:
+        """F-005: суточный RPD free-tier исчерпан → провайдер пропускается, не тратя вызов."""
+        from aria.llm import quota
+
+        try:
+            return quota.exhausted(getattr(provider, "model", None), get_settings().gemini_projects)
+        except Exception:  # учёт квоты не должен ронять маршрут
+            return False
+
+    @staticmethod
+    def _quota_record(provider: LlmProvider) -> None:
+        from aria.llm import quota
+
+        try:
+            quota.record(getattr(provider, "model", None))
+        except Exception:
+            pass
+
+    async def _pick_available(
+        self,
+        provider_class: str,
+        db: OrmSession | None = None,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
+    ) -> LlmProvider | None:
         settings = get_settings()
         candidates = self.providers_by_class.get(provider_class, [])
+        if allowed_provider_ids is not None:
+            candidates = [p for p in candidates if p.provider_id in allowed_provider_ids]
         for provider in candidates:
             ok = await provider.check_connectivity(settings.providers_connectivity_timeout_sec)
-            if not ok:
-                # 1 retry, затем provider_status=offline и немедленное завершение
-                ok = await provider.check_connectivity(settings.providers_connectivity_timeout_sec)
             self._record_provider_status(provider, ProviderStatus.active if ok else ProviderStatus.offline, db=db)
             if ok:
                 return provider
@@ -241,7 +305,7 @@ class ProviderRouter:
                 holder = asyncio.Semaphore(limit)
                 try:
                     holder.aria_limit = limit
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 self.semaphores[provider_class] = holder
             async with holder:
@@ -262,14 +326,20 @@ class ProviderRouter:
         retry_backoff_sec: float = RETRY_BACKOFF_SEC,
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
+        sensitive: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
     ) -> RoutingResult:
         """П.5.2 ТЗ: запрос держит слот класса провайдера — параллельные волны EXECUTE
         и делегирование не выбивают квоты free-tier одним залпом."""
         t_wait = time.monotonic()
+        t_call = time.monotonic()
         async with self.provider_slot(provider_class):
             timing.record("provider_slot_wait", (time.monotonic() - t_wait) * 1000.0)
             with timing.stage("route_chat"):
-                return await self._route_chat_impl(
+                result = await self._route_chat_impl(
                     provider_class,
                     messages,
                     tools,
@@ -281,7 +351,28 @@ class ProviderRouter:
                     retry_backoff_sec=retry_backoff_sec,
                     prefer_provider_id=prefer_provider_id,
                     reject_empty=reject_empty,
+                    sensitive=sensitive,
+                    allowed_provider_ids=allowed_provider_ids,
+                    purpose=purpose,
+                    session_id=session_id,
+                    task_id=task_id,
                 )
+        # E1: ровно одна строка на успешный route_chat (не в _timed_chat: preferred-fallthrough
+        # и empty-reply дают несколько попыток на один вызов).
+        from aria.llm.usage import record_usage
+
+        provider = self.find_provider(result.provider_id)
+        record_usage(
+            provider_id=result.provider_id,
+            model=getattr(provider, "model", None) if provider is not None else None,
+            usage=getattr(result.response, "usage", None),
+            purpose=purpose,
+            session_id=session_id,
+            task_id=task_id,
+            provider_class=getattr(provider, "provider_class", "") if provider is not None else "",
+            ms=(time.monotonic() - t_call) * 1000.0,
+        )
+        return result
 
     async def _route_chat_impl(
         self,
@@ -296,6 +387,11 @@ class ProviderRouter:
         retry_backoff_sec: float = RETRY_BACKOFF_SEC,
         prefer_provider_id: str | None = None,
         reject_empty: bool = False,
+        sensitive: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
     ) -> RoutingResult:
         """``reject_empty`` — пустой текст без вызова тулов считается отказом звена (идём к следующему),
         а не успехом. Нужно чату: 200 OK с пустым content раньше обрывал всю цепочку (502).
@@ -303,9 +399,16 @@ class ProviderRouter:
         в бюджет (§12.4) или ответила ошибкой, запрос идёт обычной цепочкой класса, а результат помечен
         ``fallback=True`` (UI может сказать, что ответила другая модель)."""
         preferred_failed = False
+        if allowed_provider_ids is not None and not allowed_provider_ids:
+            raise ProviderUnavailable("no adult-approved provider is configured")
         if prefer_provider_id:
             preferred = self.find_provider(prefer_provider_id)
+            if sensitive and preferred is not None and not preferred.provider_id.startswith("deepseek"):
+                preferred = None
+            if preferred is not None and allowed_provider_ids is not None and preferred.provider_id not in allowed_provider_ids:
+                preferred = None
             if preferred is not None and self.budget_gate(preferred.provider_class)[0]:
+                t_pref = time.monotonic()
                 try:
                     if await self._connectivity_ok(preferred, db):
                         response = await _timed_chat(preferred, messages, tools, timeout_sec)
@@ -314,16 +417,96 @@ class ProviderRouter:
                         else:
                             log_cache_usage(preferred.provider_id, response)
                             return RoutingResult(response=response, provider_id=preferred.provider_id)
-                except Exception as exc:  # noqa: BLE001 — выбранная модель не должна ронять задачу
+                except Exception as exc:  # выбранная модель не должна ронять задачу
                     logger.warning("preferred model %s failed (%s); using the class chain", prefer_provider_id, type(exc).__name__)
+                    self._record_failed_attempt(
+                        preferred, exc, purpose, session_id, task_id,
+                        (time.monotonic() - t_pref) * 1000.0,
+                    )
             preferred_failed = True
         result = await self._route_by_class(
             provider_class, messages, tools, timeout_sec, allow_degrade, db, resilient, fallback_classes, retry_backoff_sec,
-            reject_empty,
+            reject_empty, sensitive, allowed_provider_ids,
+            purpose=purpose, session_id=session_id, task_id=task_id,
         )
         if preferred_failed:
             result.fallback = True
         return result
+
+    @staticmethod
+    def _record_failed_attempt(
+        provider,
+        exc: Exception,
+        purpose: str,
+        session_id: object | None,
+        task_id: object | None,
+        ms: float | None,
+    ) -> None:
+        """F-016: неуспешная попытка в usage.jsonl с cost=0 (413/429/таймаут тоже считаются)."""
+        from aria.llm.usage import record_attempt
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            outcome = f"http_{exc.response.status_code}"
+        else:
+            outcome = type(exc).__name__
+        record_attempt(
+            provider_id=provider.provider_id,
+            model=getattr(provider, "model", None),
+            provider_class=getattr(provider, "provider_class", ""),
+            purpose=purpose,
+            session_id=session_id,
+            task_id=task_id,
+            outcome=outcome,
+            ms=ms,
+        )
+
+    async def _route_sensitive(
+        self,
+        provider_class: str,
+        messages: list[ChatMessage],
+        tools: list[dict],
+        timeout_sec: float,
+        db: OrmSession | None,
+        reject_empty: bool,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
+    ) -> RoutingResult:
+        """E9: чувствительное — только DeepSeek; free-tier (Gemini/Groq) не используется."""
+        classes = [provider_class, "standard_reasoning", "premium_reasoning", "plan_flash_reasoning"]
+        seen: set[str] = set()
+        last_exc: Exception | None = None
+        for cls in classes:
+            if cls in seen:
+                continue
+            seen.add(cls)
+            allowed, _warn = self.budget_gate(cls)
+            if not allowed:
+                continue
+            for provider in self._ordered(self.providers_by_class.get(cls, [])):
+                if allowed_provider_ids is not None and provider.provider_id not in allowed_provider_ids:
+                    continue
+                if not provider.provider_id.startswith("deepseek"):
+                    continue
+                if not await self._connectivity_ok(provider, db):
+                    continue
+                t_attempt = time.monotonic()
+                try:
+                    response = await _timed_chat(provider, messages, tools, timeout_sec)
+                except Exception as exc:  # попытка фиксируется, цепочка идёт дальше
+                    last_exc = exc
+                    self._record_failed_attempt(
+                        provider, exc, purpose, session_id, task_id, (time.monotonic() - t_attempt) * 1000.0,
+                    )
+                    continue
+                if reject_empty and _is_empty_reply(response):
+                    continue
+                log_cache_usage(provider.provider_id, response)
+                return RoutingResult(response=response, provider_id=provider.provider_id)
+        if last_exc is not None:
+            raise last_exc
+        raise ProviderUnavailable("sensitive data requires DeepSeek; no DeepSeek provider is available")
 
     async def _route_by_class(
         self,
@@ -337,35 +520,68 @@ class ProviderRouter:
         fallback_classes: tuple[str, ...],
         retry_backoff_sec: float,
         reject_empty: bool = False,
+        sensitive: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
     ) -> RoutingResult:
+        if allowed_provider_ids is not None and not allowed_provider_ids:
+            raise ProviderUnavailable("no adult-approved provider is configured")
+        if sensitive:
+            return await self._route_sensitive(
+                provider_class, messages, tools, timeout_sec, db, reject_empty, allowed_provider_ids,
+                purpose=purpose, session_id=session_id, task_id=task_id,
+            )
         if resilient:
             return await self._route_resilient(
-                provider_class, messages, tools, timeout_sec, db, fallback_classes, retry_backoff_sec, reject_empty
+                provider_class, messages, tools, timeout_sec, db, fallback_classes, retry_backoff_sec,
+                reject_empty, allowed_provider_ids,
+                purpose=purpose, session_id=session_id, task_id=task_id,
             )
-        allowed, warn = self.budget_gate(provider_class)
+        allowed, _warn = self.budget_gate(provider_class)
         target_class = provider_class
         degraded = False
 
         if not allowed:
             if not allow_degrade:
                 raise ProviderUnavailable(f"budget_block_threshold_pct reached, {provider_class} blocked (§12.4)")
-            target_class = "free_tier_reasoning"
-            degraded = True
-            logger.warning("budget block: degrading %s -> free_tier_reasoning", provider_class)
+            if allowed_provider_ids is None:
+                target_class = "free_tier_reasoning"
+                degraded = True
+                logger.warning("budget block: degrading %s -> free_tier_reasoning", provider_class)
 
-        provider = await self._pick_available(target_class, db=db)
-        if provider is None and target_class != "free_tier_reasoning" and allow_degrade:
+        provider = await self._pick_available(target_class, db=db, allowed_provider_ids=allowed_provider_ids)
+        if (
+            provider is None
+            and target_class != "free_tier_reasoning"
+            and allow_degrade
+            and allowed_provider_ids is None
+        ):
             logger.warning("%s unavailable, falling back to free_tier_reasoning", target_class)
             provider = await self._pick_available("free_tier_reasoning", db=db)
             degraded = True
 
         if provider is None:
+            if allowed_provider_ids is not None:
+                raise ProviderUnavailable("no adult-approved provider is available for this request")
             raise ProviderUnavailable(f"no available provider for class={target_class} (§12.3)")
+        if self._quota_exhausted(provider):
+            raise ProviderUnavailable(
+                f"daily free-tier quota exhausted for {provider.provider_id} ({getattr(provider, 'model', '')})"
+            )
 
-        response = await _timed_chat(provider, messages, tools, timeout_sec)
+        t_attempt = time.monotonic()
+        self._quota_record(provider)
+        try:
+            response = await _timed_chat(provider, messages, tools, timeout_sec)
+        except Exception as exc:  # неуспех фиксируется и уходит наверх как раньше
+            self._record_failed_attempt(
+                provider, exc, purpose, session_id, task_id, (time.monotonic() - t_attempt) * 1000.0,
+            )
+            raise
         log_cache_usage(provider.provider_id, response)
         return RoutingResult(response=response, provider_id=provider.provider_id, degraded_to_free=degraded)
-
 
     # ---------- resilient path (A20): retry on 5xx, fail over across providers ----------
 
@@ -373,8 +589,6 @@ class ProviderRouter:
         settings = get_settings()
         with timing.stage("connectivity_check"):
             ok = await provider.check_connectivity(settings.providers_connectivity_timeout_sec)
-            if not ok:
-                ok = await provider.check_connectivity(settings.providers_connectivity_timeout_sec)
         self._record_provider_status(provider, ProviderStatus.active if ok else ProviderStatus.offline, db=db)
         return ok
 
@@ -399,6 +613,10 @@ class ProviderRouter:
         fallback_classes: tuple[str, ...],
         backoff_sec: float,
         reject_empty: bool = False,
+        allowed_provider_ids: set[str] | frozenset[str] | None = None,
+        purpose: str = "other",
+        session_id: object | None = None,
+        task_id: object | None = None,
     ) -> RoutingResult:
         """Walk every provider of the class, then each fallback class.
 
@@ -424,20 +642,37 @@ class ProviderRouter:
                 else:
                     continue
             for provider in self._ordered(self.providers_by_class.get(cls, [])):
+                if allowed_provider_ids is not None and provider.provider_id not in allowed_provider_ids:
+                    continue
+                if self._oversize_for_provider(provider, messages, tools):
+                    logger.info(
+                        "provider %s skipped oversize (estimated tokens above TPM)", provider.provider_id
+                    )
+                    attempts.append(f"{provider.provider_id} skipped oversize")
+                    continue
+                if self._quota_exhausted(provider):
+                    logger.info("provider %s skipped: daily free-tier quota exhausted", provider.provider_id)
+                    attempts.append(f"{provider.provider_id} daily quota exhausted")
+                    continue
                 if not await self._connectivity_ok(provider, db):
                     attempts.append(f"{provider.provider_id} {self._unavailable_reason(provider)}")
                     continue
                 for attempt in range(RETRY_ATTEMPTS_PER_PROVIDER):
                     tried += 1
+                    outcome = "ok"
+                    t_attempt = time.monotonic()
+                    self._quota_record(provider)
                     try:
                         response = await _timed_chat(provider, messages, tools, timeout_sec)
                     except httpx.HTTPStatusError as exc:
                         status = exc.response.status_code
+                        outcome = f"http_{status}"
+                        self._on_failure(provider)
                         last_exc = exc
                         exc.provider_id = provider.provider_id  # чтобы вызывающий мог назвать виновника
                         attempts.append(f"{provider.provider_id} HTTP {status}")
                         if status in ACCOUNT_STATUS:
-                            self.cooldown_until[provider.provider_id] = self.clock() + ACCOUNT_COOLDOWN_SEC
+                            self._cool(provider, ACCOUNT_COOLDOWN_SEC)
                             logger.warning("%s: HTTP %s (account/billing), switching provider for %.0fs", provider.provider_id, status, ACCOUNT_COOLDOWN_SEC)
                             break
                         if status in RETRYABLE_STATUS and attempt + 1 < RETRY_ATTEMPTS_PER_PROVIDER:
@@ -450,10 +685,13 @@ class ProviderRouter:
                             break
                         # 400/401/413/422...: этот провайдер не обслужил запрос (схема тулов, параметры, все ключи
                         # мертвы). Не останавливаемся на первой же ошибке: идём к следующему, пока цепочка не кончится.
-                        self.cooldown_until[provider.provider_id] = self.clock() + OTHER_ERROR_COOLDOWN_SEC
+                        # 413 — размер запроса выше TPM: 5 минут не дёргаем этого провайдера.
+                        self._cool(provider, OVERSIZE_COOLDOWN_SEC if status == 413 else OTHER_ERROR_COOLDOWN_SEC)
                         logger.warning("%s: HTTP %s, trying the next provider", provider.provider_id, status)
                         break
                     except (NoAvailableKeys, httpx.TimeoutException, httpx.TransportError) as exc:
+                        outcome = type(exc).__name__
+                        self._on_failure(provider)
                         self._cool(
                             provider,
                             self._no_keys_cooldown(provider) if isinstance(exc, NoAvailableKeys) else TIMEOUT_COOLDOWN_SEC,
@@ -463,27 +701,52 @@ class ProviderRouter:
                         attempts.append(f"{provider.provider_id} {type(exc).__name__}")
                         break
                     except (KeyError, IndexError, TypeError, ValueError) as exc:  # пустой/битый ответ (нет choices, не JSON)
+                        outcome = f"bad_response_{type(exc).__name__}"
+                        self._on_failure(provider)
                         logger.warning("%s: unusable response (%s), switching provider", provider.provider_id, type(exc).__name__)
                         last_exc = exc
                         attempts.append(f"{provider.provider_id} bad response ({type(exc).__name__})")
-                        self.cooldown_until[provider.provider_id] = self.clock() + OTHER_ERROR_COOLDOWN_SEC
+                        self._cool(provider, OTHER_ERROR_COOLDOWN_SEC)
                         break
                     else:
                         if reject_empty and _is_empty_reply(response):
                             # 200 OK, но ни текста, ни вызова тула (reasoning съел лимит, фильтр, сбой): это отказ звена.
                             # Раньше такой ответ возвращался как успех, и чат падал 502, не дойдя до остальной цепочки.
+                            outcome = "empty_reply"
+                            self._on_failure(provider)
                             logger.warning("%s: empty reply (no text, no tool calls), switching provider", provider.provider_id)
                             attempts.append(f"{provider.provider_id} empty reply{_finish_hint(response)}")
                             last_exc = ProviderUnavailable(f"{provider.provider_id} returned an empty reply")
                             break
                         log_cache_usage(provider.provider_id, response)
-                        self.cooldown_until.pop(provider.provider_id, None)  # живой ответ снимает карантин
+                        self._on_success(provider)  # живой ответ снимает карантин и счётчик отказов
                         return RoutingResult(
                             response=response,
                             provider_id=provider.provider_id,
                             degraded_to_free=degraded or (cls != provider_class and cls == "free_tier_reasoning"),
                             fallback=tried > 1,
                         )
+                    finally:
+                        ms = (time.monotonic() - t_attempt) * 1000.0
+                        timing.record("provider_attempt", ms, ok=outcome == "ok")
+                        logger.info(
+                            "provider_attempt provider=%s class=%s outcome=%s ms=%.0f",
+                            provider.provider_id, cls, outcome, ms,
+                        )
+                        if outcome != "ok":
+                            # F-016: неуспешная попытка видна в usage.jsonl с cost=0 (413/429 тоже).
+                            from aria.llm.usage import record_attempt
+
+                            record_attempt(
+                                provider_id=provider.provider_id,
+                                model=getattr(provider, "model", None),
+                                provider_class=cls,
+                                purpose=purpose,
+                                session_id=session_id,
+                                task_id=task_id,
+                                outcome=outcome,
+                                ms=ms,
+                            )
         if last_exc is not None and isinstance(last_exc, (httpx.HTTPError, NoAvailableKeys, ProviderUnavailable)):
             # keep the original error so callers map it as before (429 -> 429, timeout -> 504, ...)
             last_exc.attempts = attempts
@@ -502,17 +765,16 @@ def build_default_router() -> ProviderRouter:
     Gemini/Groq с ротацией ключей. Всегда есть deterministic stub для smoke/MVP."""
     from aria.llm import gemini_pools
     from aria.llm.key_pool import KeyPool
-    from aria.llm.providers.openai_compatible import OpenAICompatibleProvider, thinking_payload
-    from aria.llm.providers.stub import StubProvider
+    from aria.llm.providers.openai_compatible import (
+        OpenAICompatibleProvider,
+        thinking_payload,
+    )
 
     settings = get_settings()
     router = ProviderRouter()
     gemini_pools.reset()  # новая сборка роутера (старт или смена .env): cooldown пулов начинается с нуля
 
-    has_any_real_provider = False
-
     if settings.deepseek_api_key_resolved:
-        has_any_real_provider = True
         router.register(
             OpenAICompatibleProvider(
                 provider_id="deepseek-chat",
@@ -521,6 +783,7 @@ def build_default_router() -> ProviderRouter:
                 model=settings.deepseek_chat_model,
                 api_key=settings.deepseek_api_key_resolved,
                 extra_payload=thinking_payload(settings.deepseek_chat_thinking),
+                adult_ok=True,
             )
         )
         router.register(
@@ -531,6 +794,21 @@ def build_default_router() -> ProviderRouter:
                 model=settings.deepseek_reasoner_model,
                 api_key=settings.deepseek_api_key_resolved,
                 extra_payload=thinking_payload(settings.deepseek_reasoner_thinking),
+                adult_ok=True,
+            )
+        )
+        # B3: отдельный fallback-класс планирования. Тот же физический endpoint,
+        # но класс "plan_flash_reasoning" изолирован от premium-контура: при таймауте
+        # Oracle (deepseek-v4-pro) план перестраивает flash с thinking=high.
+        router.register(
+            OpenAICompatibleProvider(
+                provider_id="deepseek-flash-plan",
+                provider_class="plan_flash_reasoning",
+                base_url=settings.deepseek_base_url,
+                model=settings.deepseek_chat_model,
+                api_key=settings.deepseek_api_key_resolved,
+                extra_payload=thinking_payload(settings.deepseek_plan_fallback_thinking),
+                adult_ok=True,
             )
         )
 
@@ -539,7 +817,6 @@ def build_default_router() -> ProviderRouter:
     # или весь его пул ключей исчерпан (see KeyPool.mark_rate_limited/mark_dead).
     gemini_keys = settings.gemini_api_keys_list
     if gemini_keys:
-        has_any_real_provider = True
         # Квота Gemini считается на проект И МОДЕЛЬ (0020): пул ключей общий для всех, кто ходит в одну
         # модель этими ключами (реестр gemini_pools), и раздельный для разных моделей. С 0021 на класс
         # можно задать ЦЕПОЧКУ моделей (GEMINI_FLASH_MODELS / GEMINI_PRO_MODELS): у каждой модели своя
@@ -580,7 +857,6 @@ def build_default_router() -> ProviderRouter:
     groq_fast: list[str] = []
     groq_pools: dict[str, KeyPool] = {}
     if groq_keys:
-        has_any_real_provider = True
         # Цепочки не заданы в .env -> подобрать по списку моделей пула (кэш на 12 ч; сеть недоступна = GROQ_MODEL).
         if settings.groq_models_auto and not settings.groq_models:
             from aria.llm import groq_discovery
@@ -619,7 +895,6 @@ def build_default_router() -> ProviderRouter:
     # --- Vision (multimodal): отдельный пул, не разделяет состояние с main pool ---
     vision_keys = settings.vision_gemini_api_keys_list
     if vision_keys:
-        has_any_real_provider = True
         # Те же ключи и та же модель, что у чата, = тот же пул (одна квота, один cooldown). Отдельные
         # VISION_GEMINI_API_KEYS дают отдельный набор ключей и потому свой пул.
         vision_model = settings.gemini_flash_chain[0]

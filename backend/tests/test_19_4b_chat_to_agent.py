@@ -1,0 +1,178 @@
+"""19.4b B2: a Chat request that needs a tool switches the session to Agent."""
+from __future__ import annotations
+
+import json
+import uuid
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from aria.api.auth import require_runtime_token
+from aria.db import repository as repo
+from aria.db.base import session_scope
+from aria.db.enums import TaskStatus
+from aria.llm.providers.base import LlmProvider, LlmResponse
+from aria.llm.router import ProviderRouter
+from aria.routers import chat as chat_mod
+from aria.routers import sessions as sessions_mod
+from tests.test_wave1_runner_and_policy import _RecordingRunner
+
+
+class _EchoLlm(LlmProvider):
+    def __init__(self):
+        self.provider_id = "fake-chat"
+        self.provider_class = "free_tier_reasoning"
+        self.calls = 0
+
+    async def check_connectivity(self, timeout_sec):
+        return True
+
+    async def chat(self, messages, tools, timeout_sec):
+        self.calls += 1
+        return LlmResponse(text="pong")
+
+
+def _client():
+    app = FastAPI()
+    app.include_router(chat_mod.router)
+    app.include_router(sessions_mod.router)
+    app.dependency_overrides[require_runtime_token] = lambda: "t"
+    rec = _RecordingRunner()
+    app.state.task_runner = rec
+    llm = ProviderRouter()
+    provider = _EchoLlm()
+    llm.register(provider)
+    app.state.router = llm
+    return TestClient(app), rec, provider
+
+
+def _session(title: str = "chat") -> str:
+    with session_scope() as db:
+        return str(repo.create_session(db, title, active_role="general").id)
+
+
+@pytest.mark.parametrize("text", [
+    "открой https://example.com и скажи заголовок",
+    "открой example.com",
+    r"прочитай C:\temp\logs\app.log",
+    "запусти pytest в backend",
+])
+def test_tool_request_in_chat_switches_to_agent(text):
+    client, rec, provider = _client()
+    sid = _session()
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": text})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "agent" and body["queued"] is True and body["task_id"]
+    assert len(rec.submitted) == 1
+    assert rec.submitted[0][0] == body["task_id"] and rec.submitted[0][1] == "agent"
+    assert provider.calls == 0  # no chat answer from memory; the agent runs the tool
+    with session_scope() as db:
+        session = repo.get_session(db, uuid.UUID(sid))
+        assert str(session.current_task_id) == body["task_id"]
+        roles = [msg.role for msg in repo.list_messages(db, uuid.UUID(sid), limit=10)]
+    assert roles[-1] == "user"
+
+
+@pytest.mark.parametrize("text", ["привет", "спасибо", "ок"])
+def test_small_talk_stays_in_chat(text):
+    client, rec, provider = _client()
+    sid = _session()
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": text})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("mode") != "agent"
+    assert rec.submitted == []
+    assert body["assistant"]["content"] == "pong" and provider.calls == 1
+
+
+@pytest.mark.parametrize("text", [
+    "Что такое DNS?",
+    "что в папке C:\\logs",
+    "найди в интернете свежие новости про Python",
+])
+def test_non_small_talk_goes_to_agent_without_questions(text):
+    """UX-2: всё, кроме болтовни, исполняется агентом сразу; карточки нет."""
+    client, rec, provider = _client()
+    sid = _session()
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": text})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "agent" and body["queued"] is True
+    assert body.get("questions") in (None, [])
+    assert len(rec.submitted) == 1 and provider.calls == 0
+
+
+def test_tool_request_switches_even_when_previous_task_awaits_attention():
+    """A3: awaiting_attention больше не блокирует Chat→Agent молчаливым None."""
+    client, rec, provider = _client()
+    sid = _session()
+    with session_scope() as db:
+        session = repo.get_session(db, uuid.UUID(sid))
+        stale = repo.create_task(db, session, role="general", objective="old")
+        repo.set_task_status(db, stale, TaskStatus.approved)
+        repo.set_task_status(db, stale, TaskStatus.in_progress)
+        repo.set_task_status(db, stale, TaskStatus.awaiting_attention)
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": "открой https://example.com"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["mode"] == "agent" and len(rec.submitted) == 1
+    assert provider.calls == 0
+
+
+def test_tool_request_while_task_runs_returns_short_message():
+    """A3: если задача реально идёт — короткая реплика, а не простыня из головы."""
+    client, rec, provider = _client()
+    sid = _session()
+    with session_scope() as db:
+        session = repo.get_session(db, uuid.UUID(sid))
+        running = repo.create_task(db, session, role="general", objective="running")
+        repo.set_task_status(db, running, TaskStatus.approved)
+        repo.set_task_status(db, running, TaskStatus.in_progress)
+        running_id = str(running.id)
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": "открой https://example.com"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "agent_busy" and body["task_id"] == running_id
+    assert "Cancel task" in body["message"]
+    assert rec.submitted == [] and provider.calls == 0
+
+
+def test_attachments_force_agent_even_for_small_talk():
+    """Attach: файл в сообщении = нужен инструмент, даже если текст — «привет»."""
+    client, rec, provider = _client()
+    sid = _session()
+
+    r = client.post(
+        f"/chat/sessions/{sid}/send",
+        json={"content": "привет", "attachments": ["chat-uploads/a.png"]},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["mode"] == "agent" and len(rec.submitted) == 1
+    assert provider.calls == 0
+
+
+def test_streaming_chat_switch_reports_the_mode():
+    client, rec, _ = _client()
+    sid = _session()
+
+    r = client.post(f"/chat/sessions/{sid}/send", json={"content": "открой https://example.com", "stream": True})
+
+    assert r.status_code == 200, r.text
+    events = [json.loads(line) for line in r.text.splitlines() if line.strip()]
+    done = [e for e in events if e.get("type") == "done"]
+    assert len(done) == 1
+    result = done[0]["result"]
+    assert result["mode"] == "agent" and result["queued"] is True
+    assert len(rec.submitted) == 1 and rec.submitted[0][1] == "agent"

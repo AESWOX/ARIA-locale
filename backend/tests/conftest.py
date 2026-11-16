@@ -22,7 +22,13 @@ atexit.register(shutil.rmtree, _TEST_ROOT, ignore_errors=True)
 # Never inherit the developer's configuration or real provider keys.
 for _name in (
     "ARIA_SKILLS_DIR", "OBSIDIAN_VAULT_PATH", "GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY",
-    "GROQ_API_KEYS", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "GROQ_API_KEYS",
+    "TAVILY_API_KEY",
+    "BRAVE_API_KEY",
+    "EXA_API_KEY",
+    "SERPER_API_KEY",
+    "SEARXNG_URL",
+    "TELEGRAM_PUBLIC_CHANNELS", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     "GEMINI_FLASH_MODEL", "GEMINI_PRO_MODEL", "GROQ_MODELS", "GROQ_MODEL", "VISION_GEMINI_API_KEYS", "COMPRESSION_GEMINI_API_KEYS",
 ):
     os.environ.pop(_name, None)
@@ -150,7 +156,14 @@ def _fresh_database():
 
 
 def pytest_collection_modifyitems(items):
-    """Auto-apply anyio marker to all async test functions."""
+    """Auto-apply anyio marker to all async test functions; skip live network tests by default."""
+    import os
+
+    if os.environ.get("ARIA_LIVE") != "1":
+        skip_live = pytest.mark.skip(reason="live network test; set ARIA_LIVE=1")
+        for item in items:
+            if "live" in item.keywords:
+                item.add_marker(skip_live)
     for item in items:
         if item.get_closest_marker("anyio") is None:
             # Check if it's an async function
@@ -195,3 +208,30 @@ def _reset_settings_cache_after_test():
     from aria.config import get_settings
 
     get_settings.cache_clear()
+
+
+_NO_REAL_LAUNCH_CALLS: list[str] = []
+
+
+def _no_real_launch(path) -> None:
+    """Test stub: record the launch instead of opening Explorer/Finder/xdg-open."""
+    _NO_REAL_LAUNCH_CALLS.append(str(path))
+
+
+_no_real_launch.calls = _NO_REAL_LAUNCH_CALLS
+
+
+@_pytest.fixture(autouse=True)
+def _never_launch_file_manager(monkeypatch):
+    """POST /logs/open-folder must never spawn a real file manager during tests.
+
+    test_api_fuzz_contract walks every route with a token, so the endpoint is
+    reached in the full run; without this fixture each body opens a window.
+    """
+    from aria.routers import logs as logs_router
+
+    _NO_REAL_LAUNCH_CALLS.clear()
+    monkeypatch.setattr(logs_router, "_open_in_file_manager", _no_real_launch)
+    yield
+    _NO_REAL_LAUNCH_CALLS.clear()
+

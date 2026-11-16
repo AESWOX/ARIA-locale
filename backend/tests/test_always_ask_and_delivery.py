@@ -1,10 +1,9 @@
-"""Решения владельца 19.10: вопросы всегда (до 7, по 5 вариантов, с рекомендацией), результат задачи
+"""L3: мягкое уточнение (явный контракт без карточек, не больше 2 за раунд); результат задачи
 приходит в чат, кнопка подтверждения плана не роняет сервер 500 на завершённой задаче."""
 from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -57,8 +56,8 @@ def test_question_message_lists_lettered_options_and_marks_recommended():
     assert "   A) " in msg and "   E) " in msg and "(рекомендую)" in msg
 
 
-def test_gate_asks_even_when_model_says_request_is_clear(env, monkeypatch):
-    async def clear(router, content, spec):
+def test_gate_does_not_ask_when_model_returns_a_full_contract(env, monkeypatch):
+    async def clear(router, content, spec, **kwargs):
         return {"goal": "Составить список навыков Blender", "questions": [],
                 "acceptance_criteria": [{"id": "ac-1", "statement": "ответ содержит перечень из 15 пунктов"}]}
 
@@ -69,7 +68,7 @@ def test_gate_asks_even_when_model_says_request_is_clear(env, monkeypatch):
         repo.set_task_status(db, t, TaskStatus.draft)
         tid = t.id
     out = asyncio.run(clarifier.run_gate(tid, "навыки blender", router=object()))
-    assert out.status == "awaiting_clarification" and len(out.questions) >= 3
+    assert out.status == "approved" and out.questions == []
 
 
 # ── 500 -> 409 ───────────────────────────────────────────────────────────
@@ -137,7 +136,7 @@ def test_finished_plan_task_posts_the_result_into_the_chat(env):
         s = repo.create_session(db, "deliver")
         t = repo.create_task(db, s, role="general", objective="навыки blender", draft_tz_md="# tz\n")
         repo.set_task_status(db, t, TaskStatus.approved)
-        sid, tid = s.id, t.id
+        sid = s.id
         res = asyncio.run(executor.run_task(db, t, router=_Script()))
     assert res["status"] == "done", res
     with session_scope() as db:

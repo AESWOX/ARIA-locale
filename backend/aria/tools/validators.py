@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 
 from aria.db.enums import IdempotencyClass
 
@@ -40,6 +41,7 @@ SHELL_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ls", "dir", "cat", "type", "pwd", "echo", "head", "tail", "wc", "sort",
         "uniq", "cut", "tr", "rg", "grep", "find", "which", "where", "tree",
+        "cd", "chdir", "ver",
         "mkdir", "touch", "cp", "copy", "mv", "move", "rm", "del", "test",
         "python", "python3", "pip", "node", "npm", "git", "pytest",
         "black", "ruff", "mypy", "tsc",
@@ -89,7 +91,7 @@ def is_high_risk_command(command: str) -> bool:
 
 
 def _tokens(segment: str) -> list[str]:
-    """Токены сегмента. posix=False — иначе shlex съедает «\» в Windows-путях."""
+    r"""Токены сегмента. posix=False — иначе shlex съедает «\» в Windows-путях."""
     try:
         raw = shlex.split(segment, posix=False)
     except ValueError:
@@ -150,6 +152,41 @@ def _segment_allowed(segment: str) -> bool:
     return True
 
 
+_SANDBOX_AUTO_HEADS = frozenset({"python", "python3", "pytest", "node", "cd", "chdir", "dir", "echo", "type"})
+_SANDBOX_RUNNERS = frozenset({"python", "python3", "pytest", "node"})
+
+
+def is_sandbox_code_runner(command: str) -> bool:
+    """True: агент запускает свой скрипт/тесты в песочнице — это не «опасное действие».
+
+    Разрешены только python/pytest/node/npm run по относительным путям, без inline-кода
+    (``-c``/``-e``), без абсолютных путей/``..``/переменных, без редиректов. Всё остальное
+    (curl, powershell, rm, запуск вне песочницы) по-прежнему требует Approve.
+    """
+    if not command or is_high_risk_command(command):
+        return False
+    if "$(" in command or "`" in command or re.search(r"[<>]", command):
+        return False
+    segments = [seg for seg in _SHELL_SEPARATORS.split(command) if seg.strip()]
+    if not segments:
+        return False
+    saw_runner = False
+    for segment in segments:
+        head, args = _normalize_head(_tokens(segment))
+        if head not in _SANDBOX_AUTO_HEADS:
+            if head == "npm" and next((a for a in args if not a.startswith("-")), "") in _NPM_CODE_SUBCOMMANDS:
+                saw_runner = True
+                continue
+            return False
+        if any(_PATH_ESCAPE.search(arg) for arg in args):
+            return False
+        if head in _INTERPRETERS and any(arg in _INLINE_CODE_FLAGS for arg in args):
+            return False
+        if head in _SANDBOX_RUNNERS or head == "npm":
+            saw_runner = True
+    return saw_runner
+
+
 def classify_shell_command(command: str) -> str:
     """Вернуть ``"allow"`` или ``"approval"`` для команды (§14.2 / волна 1 A13).
 
@@ -182,6 +219,124 @@ def classify_shell_command(command: str) -> str:
     if not segments:
         return "approval"
     return "allow" if all(_segment_allowed(seg) for seg in segments) else "approval"
+
+
+# ── R1 (19.3 PLAN-1): команда выполнима на Windows? ───────────────────────
+# Проверка применимости команды на Windows: каждая часть составной команды
+# (; && || | &) должна начинаться с cmd-builtin ИЛИ с бинарника из PATH
+# (shutil.which). На не-Windows платформе функция всегда True. Список «unix-only»
+# ниже НЕ участвует в решении True/False — только в тексте причины отказа.
+
+# Полный набор внутренних команд cmd.exe (решение владельца 30.10: rmdir и весь
+# список). `where` сюда НЕ входит — он есть как where.exe в System32 и определяется
+# через shutil.which, как любая внешняя утилита.
+_CMD_BUILTINS: frozenset[str] = frozenset(
+    {
+        "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date",
+        "del", "dir", "echo", "endlocal", "erase", "exit", "for", "ftype", "goto",
+        "if", "md", "mkdir", "mklink", "move", "path", "pause", "popd", "prompt",
+        "pushd", "rd", "rem", "ren", "rename", "rmdir", "set", "setlocal", "shift",
+        "start", "time", "title", "type", "ver", "verify", "vol",
+    }
+)
+
+# Известные POSIX-утилиты: используются ТОЛЬКО для различия «unix-only» vs
+# «не найдено в PATH» в сообщении отказа (см. command_rejection_reason).
+_UNIX_ONLY_HINTS: frozenset[str] = frozenset(
+    {"bash", "sh", "zsh", "dash", "csh", "ksh", "ls", "cat", "grep", "egrep",
+     "fgrep", "sed", "awk", "head", "tail", "wc", "cut", "tr", "touch", "cp",
+     "mv", "rm", "which", "iconv", "chmod", "chown", "chgrp", "sudo", "su",
+     "tee", "xargs", "ln", "rmdir", "diff", "less", "more", "tar", "gzip",
+     "gunzip", "unzip", "wget", "scp", "ssh", "rsync"}
+)
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
+def _split_compound(command: str) -> list[str]:
+    """Делит команду по ``;`` ``&&`` ``||`` ``|`` ``&`` вне кавычек."""
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if command.startswith("&&", i) or command.startswith("||", i):
+            segments.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        if ch in ";&|":
+            segments.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    segments.append("".join(buf))
+    return [s.strip() for s in segments if s.strip()]
+
+
+def _first_lexeme(segment: str) -> str:
+    """Первая лексема сегмента: кавычки, путь и ``.exe``/``.com`` сняты (lowercase)."""
+    head, _ = _normalize_head(_tokens(segment))
+    if head.endswith(".com"):
+        head = head[:-4]
+    return head
+
+
+def is_windows_command(command: str) -> bool:
+    """True, если команда выполнима на Windows (cmd-builtin или найдена в PATH).
+
+    На не-Windows платформе всегда True: проверка имеет смысл только на Windows.
+    """
+    if not _is_windows_platform():
+        return True
+    if not command or not command.strip():
+        return False
+    for segment in _split_compound(command):
+        head = _first_lexeme(segment)
+        if not head:
+            continue
+        if head in _CMD_BUILTINS:
+            continue
+        if shutil.which(head) is not None:
+            continue
+        return False
+    return True
+
+
+def command_rejection_reason(command: str) -> str:
+    """Причина, по которой ``is_windows_command`` вернул False.
+
+    ``unix_only_command`` — известная POSIX-утилита, которой на Windows нет;
+    ``command_not_found_in_path`` — инструмент может существовать (например, в venv),
+    но не в текущем PATH.
+    """
+    for segment in _split_compound(command):
+        head = _first_lexeme(segment)
+        if not head:
+            continue
+        if head in _CMD_BUILTINS:
+            continue
+        if shutil.which(head) is not None:
+            continue
+        return "unix_only_command" if head in _UNIX_ONLY_HINTS else "command_not_found_in_path"
+    return "command_not_found_in_path"
 
 
 def build_dry_run_command(command: str) -> str:

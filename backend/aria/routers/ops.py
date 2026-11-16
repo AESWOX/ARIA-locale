@@ -100,7 +100,7 @@ def _sqlite_copy(src_path: Path, dst_path: Path) -> None:
 @router.post("/ops/dump")
 async def ops_dump(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         "host": socket.gethostname(),
         "platform": platform.platform(),
         "python": sys.version.split()[0],
@@ -247,7 +247,7 @@ def run_security_audit() -> list[dict[str, Any]]:
             add("bootstrap_permissions", "fail", f"{tok} читается другими пользователями")
         else:
             add("bootstrap_permissions", "ok", str(tok))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         add("settings", "warn", f"не удалось прочитать настройки: {exc}")
 
     hooks = load_json("webhooks.json", {})

@@ -15,7 +15,6 @@ from aria.core.executor import (
 )
 from aria.core.integrity import assert_file_changed
 from aria.llm.router import ProviderUnavailable
-from aria.core.plan_validator import validate_plan
 from aria.tools.handlers.files import file_write
 
 

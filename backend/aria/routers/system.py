@@ -8,7 +8,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
 from aria.api.auth import require_runtime_token, ticket_store, token_store
 from aria.config import get_settings
@@ -110,6 +117,14 @@ async def open_external(body: dict[str, Any], _: str = Depends(require_runtime_t
     if not opened:
         raise HTTPException(status_code=502, detail="could not launch the default browser")
     return {"ok": True}
+
+
+@router.get("/system/balance")
+async def system_balance(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """E4: баланс DeepSeek; без ключа/ошибки — честное «неизвестно», не 5xx."""
+    from aria.llm.balance import fetch_balance
+
+    return await fetch_balance()
 
 
 @router.get("/system/self-test")
@@ -235,7 +250,8 @@ async def system_self_test(_: str = Depends(require_runtime_token)) -> dict[str,
     # 10. H4: хуки и чекпоинты — реальные проверки, а не декларация
     try:
         from aria.checkpoints import store as _cps
-        from aria.hooks import EVENTS as _EVENTS, load_hooks as _load_hooks
+        from aria.hooks import EVENTS as _EVENTS
+        from aria.hooks import load_hooks as _load_hooks
 
         hooks = _load_hooks()
         unknown = sorted({str(h.get("event")) for h in hooks} - set(_EVENTS))

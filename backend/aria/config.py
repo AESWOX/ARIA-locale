@@ -13,6 +13,7 @@ SQLite vs Postgres (P1.5):
 """
 from __future__ import annotations
 
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -41,6 +42,9 @@ class Settings(BaseSettings):
     # §2.9 TZ v1.1: optimistic lock TTL (file-lock + DB)
     LOCK_TTL_SECONDS: int = 30
     loop_max_iterations: int = 15
+    # E7: жёсткий потолок вызовов LLM на задачу/субагента (0 = выключено).
+    agent_max_llm_calls: int = 40
+    agent_max_llm_calls_subagent: int = 15
     # Волна 1 (A10): размер пула TaskRunner. На 4 ГБ RAM держим 3 по умолчанию,
     # при нехватке памяти TaskRunner сам опускается до 1 воркера.
     runner_max_workers: int = 3
@@ -50,10 +54,24 @@ class Settings(BaseSettings):
     plan_dag_parallel_enabled: bool = True
     # П.4.1 ТЗ: выключатель Clarifier-гейта (PR-3). False — поведение как до PR-3:
     # быстрый путь draft -> approved без уточняющих вопросов.
-    clarifier_gate_enabled: bool = True
+    clarifier_gate_enabled: bool = False
+    # Этап 3а: в сборке владельца 18+ включён по умолчанию и без карточек возраста.
+    adult_default: bool = False
+    # Провайдеры, которым разрешены взрослые запросы (помимо флага adult_ok).
+    adult_provider_ids: str = ""
     # П.4.2 ТЗ: список глаголов-маркеров задачи (через запятую) для agent-режима;
     # пусто = встроенный список clarifier._DEFAULT_TASK_VERBS.
     clarifier_task_verbs: str = ""
+    # L0 (TZ_COMPLIANCE_V2): execution contract в system-prompt чата и роль агента.
+    compliance_prompt_enabled: bool = True
+    # L0: только детекция и логирование отказов, без повторных вызовов провайдера.
+    refusal_detection_enabled: bool = True
+    # L1: persona.md в system-prompt чата и роль агента (после базы, до compliance).
+    persona_prompt_enabled: bool = True
+    # L6: статическая карта роль → класс провайдера или provider_id (JSON), например
+    # {"content_creative": "standard_reasoning", "coder": "premium_reasoning"}.
+    # Пусто = модель по роли как раньше; автопереключения при отказе нет.
+    role_models: str = ""
     # П.5.2 ТЗ: лимиты параллелизма по классам провайдеров, например
     # "free_tier_reasoning=2,standard_reasoning=3" (иначе один общий лимит).
     provider_max_concurrency: str = ""
@@ -63,7 +81,9 @@ class Settings(BaseSettings):
     # цикл не маскируется — плейсхолдеры сломали бы пути и команды в tool calls.
     dlp_chat_enabled: bool = False
     dlp_names: str = ""  # имена/логины через запятую: то, что не ловится шаблоном
-    delegate_max_parallel: int = 5
+    delegate_max_parallel: int = 3
+    # 19.5: рой субагентов за флагом; False = строго последовательный запуск.
+    swarm_enabled: bool = True
     delegate_timeout_sec: int = 60
     tools_default_timeout_sec: int = 120
     providers_connectivity_timeout_sec: int = 2
@@ -73,10 +93,28 @@ class Settings(BaseSettings):
     budget_warn_threshold_pct: int = 80
     aria_dev_mode: bool = False
     budget_block_threshold_pct: int = 100
-    # Spend limits in USD (0 = limit disabled). Spend is estimated from message token counts
-    # at DeepSeek Flash peak rates, so it is an upper bound for Flash and a lower bound for Pro.
-    budget_daily_usd: float = 0.0
-    budget_weekly_usd: float = 0.0
+    # Spend limits in USD (0 = limit disabled). Spend is the real sum of llm_usage.cost_usd (E1/E2/E3).
+    budget_daily_usd: float = 1.0
+    budget_weekly_usd: float = 2.0
+    # E3: per-task guardrails and pre-start estimate approval (owner-approved 30.10).
+    budget_task_warn_usd: float = 0.30
+    budget_task_hard_usd: float = 0.40
+    budget_estimate_approval_usd: float = 0.15
+    # E6: вывод инструмента длиннее порога сворачивается (голова+хвост+ref), полный — на диск.
+    tool_result_fold_chars: int = 3000
+    # S1: кэш поиска (TTL) и кулдаун провайдеров после 429/блока.
+    search_cache_ttl_hours: int = 24
+    search_provider_cooldown_min: int = 10
+    # S7: свой SearXNG (пусто = адаптер не активен).
+    searxng_url: str = ""
+    # T1: публичные каналы t.me (имена через запятую), правит только владелец.
+    telegram_public_channels: str = ""
+    # J2: профиль исполнителя (JSON: skills, rates, languages, portfolio, tone, min_budget_usd, blacklist).
+    jobs_profile: str = ""
+    # S2b: вежливый пул OpenAlex (пусто = без mailto).
+    openalex_mailto: str = ""
+    # S3: кэш прочитанных страниц (TTL, только при ETag/Last-Modified).
+    page_cache_ttl_hours: int = 24
 
     @field_validator("aria_dev_mode", mode="before")
     @classmethod
@@ -158,10 +196,23 @@ class Settings(BaseSettings):
     # Vision: deepseek-flash (V4.1) принимает изображения, deepseek-v4-pro НЕТ (docs: Models & Pricing, Vision).
     # Поэтому для картинок берётся только Flash, а не premium-модель.
     deepseek_vision_model: str = "deepseek-flash"
+    # P0: DeepSeek Vision — платный last-resort. По умолчанию OFF: сначала вся цепочка Gemini.
+    vision_deepseek_fallback: bool = Field(
+        default=False,
+        description="Allow paid DeepSeek vision as the last resort after all Gemini models/keys.",
+    )
+    # Groq Vision: у текущих ключей vision-моделей нет (проверено 2026-11-04). Пусто = выключено.
+    vision_groq_model: str = Field(
+        default="",
+        description="Groq vision model id (e.g. a multimodal Llama). Empty = disabled.",
+    )
     # DeepSeek V4 thinks by default (effort=high) and bills reasoning tokens as output.
     # off = {"thinking": {"type": "disabled"}}; low|high|max = reasoning_effort.
     deepseek_chat_thinking: str = "off"
     deepseek_reasoner_thinking: str = "high"
+    # B3: fallback-класс планирования (deepseek-flash-plan). Flash берёт thinking=high,
+    # чтобы качество откатного плана не проседало при таймауте premium-модели.
+    deepseek_plan_fallback_thinking: str = "high"
 
     # Legacy single-key fallback (used only if GEMINI_API_KEYS is empty).
     gemini_api_key: str = ""
@@ -182,8 +233,10 @@ class Settings(BaseSettings):
     gemini_flash_models: str = ""
     gemini_pro_models: str = ""
     # 0027: автоподбор цепочек по доступным моделям (aria/llm/gemini_discovery.py, scripts/gemini_autoconfig.py).
-    # Работает, только когда цепочка не задана явно; явные GEMINI_*_MODELS всегда главнее. 0 = выключить.
     gemini_models_auto: bool = True
+    # F-005: число Google-проектов у владельца. Free-tier RPD считается на проект,
+    # поэтому суточный бакет = лимит модели × projects (Flash-Lite 500 × 10 = 5000).
+    gemini_projects: int = 10
 
     groq_api_key: str = ""
     # GROQ_API_KEYS=key1,key2,...,key10
@@ -201,24 +254,47 @@ class Settings(BaseSettings):
     # main answer pool above. Does NOT share state with gemini_api_keys. ---
     compression_enabled: bool = True
     compression_gemini_api_keys: str = ""  # falls back to gemini_api_keys if empty
-    compression_model: str = "gemini-3.8-flash"
+    compression_model: str = "gemini-3.5-flash-lite"
     compression_models: str = ""  # цепочка моделей сжатия (см. gemini_flash_models); пусто = compression_model
     compression_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     compression_timeout_sec: int = 120
     # CTX: основной триггер — оценка токенов истории сессии (порог на СЕССИЮ,
     # не на ключ Gemini: ротация ключей по квоте историю не меняет).
-    # 0 = токенный триггер выключен.
-    compression_token_threshold: int = 100_000
+    # 0 = токенный триггер выключен (тогда порог считается от окна модели).
+    compression_token_threshold: int = 0
+    # F-005/решение 10.11: окно 1 048 576; trigger 70% (~734k), hard 85% (~891k).
+    compression_context_window: int = 1_048_576
+    compression_trigger_ratio: float = 0.70
+    compression_hard_ratio: float = 0.85
     # запасной триггер по числу сообщений; 0 = выключен (раньше было 60)
     compression_hard_message_limit: int = 0
     compression_protect_first_n: int = 3
     compression_protect_last_n: int = 15
-    compression_target_ratio: float = 0.2
+    # сжатый блок ≤25% оригинала (redflag-валидация)
+    compression_target_ratio: float = 0.25
 
     agent_sandbox_root: str = paths.default_sandbox_path()
+    # Автономный агент: python/pytest/node по относительным путям в песочнице запускаются
+    # без пошагового Approve. Опасное (rm, powershell, сеть, пути вне песочницы) — всегда Approve.
+    shell_auto_approve_sandbox: bool = True
     # Папка проекта пользователя, которую агент может ТОЛЬКО читать (file_read/file_search/file_grep со scope="project").
-    # Пусто = выключено. Писать, запускать команды и создавать файлы там агент не может: корень получают лишь читающие инструменты.
-    agent_project_root: str = ""
+    # Пусто = выключено. При agent_shell_enabled=True этот же корень становится рабочим каталогом shell.
+    agent_project_root: str = Field(
+        default="",
+        description="Project folder for Agent shell (and read-only project scope). Empty = disabled.",
+    )
+    # P0 A2: тумблер «Shell в Agent». general остаётся read-only, пока флаг выключен.
+    # При включении shell_execute доступен только роли general, всегда через Approve и только внутри agent_project_root.
+    agent_shell_enabled: bool = Field(
+        default=False,
+        description="Allow shell_execute in the default Agent role (general). Always requires approval and stays inside the project root.",
+    )
+    agent_shell_timeout_sec: int = Field(
+        default=120,
+        ge=5,
+        le=600,
+        description="Max runtime for an Agent shell command (seconds).",
+    )
 
     @field_validator(
         "gemini_api_keys", "groq_api_keys", "compression_gemini_api_keys",
@@ -349,29 +425,9 @@ class Settings(BaseSettings):
             return key
         return self.deepseek_api_key or None
 
-    # --- Codex exec bridge (cheap-path integration, see app/agents/codex_exec_bridge.py) ---
-    # Off by default: with this false, /tasks/{id}/start keeps using the
-    # existing demo executor. Flip to true only once `codex` is installed and
-    # OPENAI_API_KEY / `codex login` is set up locally.
-    codex_enabled: bool = False
-    codex_binary_path: str = "codex"
-    # read-only | workspace-write | danger-full-access — see docs/sandbox.md
-    # in the Codex repo. workspace-write is the sane default: Codex can edit
-    # files under codex_workspace_dir but nothing outside it.
-    codex_sandbox_mode: str = "workspace-write"
-    codex_workspace_dir: str = "."
-    # Only needed if you're not using `codex login` (ChatGPT account) locally.
-    # Never commit a real value — set it in your local .env only.
+    # Optional OpenAI-compatible key. Never commit a real value — set it in
+    # your local .env only.
     openai_api_key: str = ""
-    # Multi-provider path: name of the [model_providers.<id>] block in
-    # ~/.codex/config.toml that points at your local LiteLLM proxy (see
-    # codex_config.toml.snippet + litellm-config.yaml). Leave empty to use
-    # Codex's built-in OpenAI provider with openai_api_key above instead.
-    codex_model_provider: str = ""
-    # Default model alias (must match a model_name in litellm-config.yaml,
-    # e.g. "qwen" | "deepseek" | "gemini" | "openrouter" | "groq" | "grok").
-    # Can be overridden per-task via the `model` field on POST /tasks/{id}/start.
-    codex_default_model: str = ""
 
     # --- Research notes bridge (unofficial API, cookie-based auth) ---
     # Off by default: requires a Google session cookies file.
@@ -393,9 +449,30 @@ class Settings(BaseSettings):
 
 
 
+    @property
+    def jobs_profile_dict(self) -> dict:
+        import json
+
+        try:
+            data = json.loads(self.jobs_profile or "{}")
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @property
+    def telegram_public_channels_list(self) -> list[str]:
+        names: list[str] = []
+        for raw in (self.telegram_public_channels or "").split(","):
+            name = raw.strip().lstrip("@")
+            if re.fullmatch(r"[A-Za-z0-9_]{5,32}", name or ""):
+                names.append(name)
+        return names
+
+
 @lru_cache
 def get_settings() -> Settings:
     # Installed app: make sure the persistent user dir (db, vault, skills,
     # logs) exists and bundled skills are copied before anything touches it.
     paths.ensure_user_data()
     return Settings()
+

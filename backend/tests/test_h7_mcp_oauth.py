@@ -95,7 +95,7 @@ class FakeAuthServer:
             auth = request.headers.get("authorization")
             self.mcp_auth_headers.append(auth)
             if not auth or auth.removeprefix("Bearer ") not in self.valid_access:
-                return httpx.Response(401, headers={"www-authenticate": f'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"'})
+                return httpx.Response(401, headers={"www-authenticate": 'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"'})
             body = json.loads(request.content) if request.content else {}
             method = body.get("method")
             if method == "initialize":

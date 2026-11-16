@@ -50,8 +50,14 @@ export function Backdrop() {
         style={
           {
             backgroundColor: "var(--background-base)",
+            backgroundImage:
+              "linear-gradient(rgba(0,0,0,var(--surface-image-dim, 0)), rgba(0,0,0,var(--surface-image-dim, 0))), var(--surface-image, none), var(--surface-texture, none)",
+            backgroundSize:
+              "auto, var(--surface-image-size, auto), var(--surface-texture-size, auto)",
+            backgroundPosition: "center, center, 0 0",
+            backgroundRepeat: "no-repeat, no-repeat, repeat",
             mixBlendMode:
-              "var(--component-backdrop-bg-blend-mode, difference)",
+              "var(--surface-blend, var(--component-backdrop-bg-blend-mode, difference))",
           } as unknown as React.CSSProperties
         }
       />
@@ -67,7 +73,7 @@ export function Backdrop() {
             // default behaviour unchanged when no theme customises these.
             mixBlendMode:
               "var(--component-backdrop-filler-blend-mode, difference)",
-            opacity: "var(--component-backdrop-filler-opacity, 0.033)",
+            opacity: "var(--component-backdrop-filler-opacity, 0)",
             backgroundImage: "var(--theme-asset-bg)",
             backgroundSize: "var(--component-backdrop-background-size, cover)",
             backgroundPosition:

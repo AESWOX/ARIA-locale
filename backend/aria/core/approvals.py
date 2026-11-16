@@ -17,8 +17,8 @@ def request_high_risk_shell_approval(db: OrmSession, session: m.Session, task: m
     item = repo.create_attention_item(
         db,
         type_=AttentionType.high_risk_shell,
-        title=f"Подтверждение high-risk shell: {command[:60]}",
-        body_md=f"Команда классифицирована как high-risk по §14.2. Причина: {reason}",
+        title=f"Approve: {command[:60]}",
+        body_md=f"Runs:\n{command}\n\nGoal: {(task.objective or '')[:300]}",
         session=session,
         task=task,
         payload_json={
@@ -27,6 +27,38 @@ def request_high_risk_shell_approval(db: OrmSession, session: m.Session, task: m
             "reason": reason,
             "working_directory": None,
             "required_policy": "approval + dry-run",
+        },
+    )
+    repo.set_task_status(db, task, TaskStatus.awaiting_attention)
+    return item
+
+
+def request_tool_approval(
+    db: OrmSession,
+    session: m.Session,
+    task: m.Task,
+    tool_name: str,
+    arguments: dict,
+    *,
+    summary: str,
+    reason: str = "",
+    type_: AttentionType = AttentionType.untrusted_context_override,
+) -> m.AttentionItem:
+    """Этап 3: одна короткая карточка «что запускается и зачем» для отправки,
+    внешнего POST и действий по недоверенному контенту."""
+    item = repo.create_attention_item(
+        db,
+        type_=type_,
+        title=f"Approve: {summary[:80]}",
+        body_md=summary,
+        session=session,
+        task=task,
+        payload_json={
+            "kind": "tool",
+            "tool_name": tool_name,
+            "arguments": dict(arguments or {}),
+            "summary": summary,
+            "reason": reason,
         },
     )
     repo.set_task_status(db, task, TaskStatus.awaiting_attention)
@@ -61,6 +93,29 @@ def request_mcp_tool_approval(
     return item
 
 
+def request_preference_update_approval(
+    db: OrmSession, session: m.Session, task: m.Task, arguments: dict
+) -> m.AttentionItem:
+    """L6: запись в vault/preferences.md — только после Approve владельца."""
+    section = str(arguments.get("section") or "")
+    content = str(arguments.get("content") or "")
+    item = repo.create_attention_item(
+        db,
+        type_=AttentionType.preference_update,
+        title=f"Запись предпочтения: {section or 'без секции'}",
+        body_md=(
+            "Агент хочет сохранить ваше предпочтение в vault/preferences.md.\n\n"
+            f"Секция: {section or '—'}\nТекст: {content}\n\n"
+            "Approve — сохранить, Reject — не сохранять."
+        ),
+        session=session,
+        task=task,
+        payload_json={"kind": "preference", "tool_name": "memory_save", "arguments": arguments, "section": section},
+    )
+    repo.set_task_status(db, task, TaskStatus.awaiting_attention)
+    return item
+
+
 def request_task_tz_approval(db: OrmSession, session: m.Session, task: m.Task, draft_tz_md: str) -> m.AttentionItem:
     item = repo.create_attention_item(
         db,
@@ -72,6 +127,27 @@ def request_task_tz_approval(db: OrmSession, session: m.Session, task: m.Task, d
         payload_json={"draft_tz_md": draft_tz_md},
     )
     repo.set_task_status(db, task, TaskStatus.awaiting_approval)
+    return item
+
+
+def request_budget_estimate_approval(
+    db: OrmSession, session: m.Session, task: m.Task, estimate: dict, mode: str
+) -> m.AttentionItem:
+    """E3: дорогая задача не стартует без Approve владельца (оценка p50–p90)."""
+    item = repo.create_attention_item(
+        db,
+        type_=AttentionType.budget_escalation,
+        title=f"Оценка задачи: ${estimate.get('p50', 0):.2f}–${estimate.get('p90', 0):.2f}"
+        f" ({estimate.get('source')})",
+        body_md=(
+            "Задача может стоить дороже порога предоценки. Approve — запустить, Reject — отменить.\n\n"
+            f"p50: ${estimate.get('p50', 0):.2f}\np90: ${estimate.get('p90', 0):.2f}\n"
+            f"Задач в выборке: {estimate.get('n', 0)}\nРежим: {mode}"
+        ),
+        session=session,
+        task=task,
+        payload_json={"kind": "estimate", "mode": mode, **estimate},
+    )
     return item
 
 

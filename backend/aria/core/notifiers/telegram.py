@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from aria.core.notifiers.protocol import Notifier, NotifierError
+from aria.core.notifiers.protocol import NotifierError
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ class TelegramNotifier:
         iteration: int,
         tool_call_log_url: str,
     ) -> str:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         return (
             f"\U0001f6a8 ARIA — эскалация задачи\n\n"
             f"**Задача:** `{task_id[:8]}` — {objective[:60]}\n"

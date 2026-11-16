@@ -8,9 +8,8 @@ data/config.yaml and applied to the cached Settings instance immediately.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Any
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
+from aria import paths
 from aria.api.auth import require_runtime_token, token_store
 from aria.config import get_settings
 from aria.http_utils import public_config_payload
@@ -44,6 +44,10 @@ _BUILTIN_THEMES: tuple[tuple[str, str, str], ...] = (
     ("mono", "Mono", "Clean grayscale — minimal and focused"),
     ("cyberpunk", "Cyberpunk", "Neon green on black — matrix terminal"),
     ("rose", "Rosé", "Soft pink and warm ivory — easy on the eyes"),
+    ("black", "Black", "Deep black — the default 0.2.1 look"),
+    ("white", "White", "Light canvas with dark text"),
+    ("gray", "Gray", "Neutral gray without a colour accent"),
+    ("hermes", "Hermes (optional)", "Legacy Hermes look with the hero backdrop"),
 )
 
 _BUILTIN_THEME_NAMES = {name for name, _, _ in _BUILTIN_THEMES}
@@ -72,7 +76,6 @@ _CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("delegate_", "delegation"),
     ("approval_", "security"),
     ("security_", "security"),
-    ("codex_", "agent"),
     ("notebook_", "browser"),
     ("lock_", "general"),
     ("audit_", "tool_loop_guardrails"),
@@ -96,13 +99,11 @@ _CATEGORY_ORDER = [
     "bedrock",
 ]
 
-_SELECT_FIELDS: dict[str, list[str]] = {
-    "codex_sandbox_mode": ["read-only", "workspace-write", "danger-full-access"],
-}
 
 
 def _is_secret(name: str) -> bool:
-    return any(tok in name for tok in ("api_key", "apikey", "application_key", "key_id", "token", "pin"))
+    lowered = name.lower()
+    return any(tok in lowered for tok in ("api_key", "apikey", "application_key", "key_id", "token", "pin"))
 
 
 def _category_for(name: str) -> str:
@@ -223,12 +224,6 @@ def _settings_schema() -> dict[str, dict[str, Any]]:
             "type": _field_type(name, finfo.annotation),
             "category": _category_for(name),
         }
-        if name in _SELECT_FIELDS:
-            spec = {
-                "type": "select",
-                "options": _SELECT_FIELDS[name],
-                "category": spec["category"],
-            }
         if finfo.description:
             spec["description"] = finfo.description
         fields[name] = spec
@@ -259,22 +254,149 @@ def _apply_config(config: dict[str, Any]) -> None:
             setattr(settings, path, _coerce(path, value))
 
 
+_SURFACE_MODES = {"theme", "white", "textured", "custom", "image"}
+_SURFACE_COLOR_RE = re.compile(r"^#[0-9a-f]{6}$", re.IGNORECASE)
+_SURFACE_IMAGE_RE = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=\s]+$", re.IGNORECASE)
+_MAX_SURFACE_IMAGE_CHARS = 4_200_000
+_DASHBOARD_DEFAULTS: dict[str, Any] = {
+    "theme": "black",
+    "font": "theme",
+    "surface_mode": "theme",
+    "surface_color": "#101418",
+    "surface_image": "",
+    "surface_dim": 0,
+    "overrides": {"textColor": "", "windowTextColor": "", "accentColor": ""},
+    "open_tabs": [],
+    "active_tab": None,
+    "theme_schema": 2,
+}
+
+
+def _dashboard_defaults() -> dict[str, Any]:
+    return {
+        "theme": _DASHBOARD_DEFAULTS["theme"],
+        "font": _DASHBOARD_DEFAULTS["font"],
+        "surface_mode": _DASHBOARD_DEFAULTS["surface_mode"],
+        "surface_color": _DASHBOARD_DEFAULTS["surface_color"],
+        "surface_image": _DASHBOARD_DEFAULTS["surface_image"],
+        "surface_dim": _DASHBOARD_DEFAULTS["surface_dim"],
+        "overrides": dict(_DASHBOARD_DEFAULTS["overrides"]),
+        "open_tabs": list(_DASHBOARD_DEFAULTS["open_tabs"]),
+        "active_tab": _DASHBOARD_DEFAULTS["active_tab"],
+        "theme_schema": _DASHBOARD_DEFAULTS["theme_schema"],
+    }
+
+
+def _dashboard_prefs_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    prefs = _dashboard_defaults()
+    for key in ("theme", "font"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            prefs[key] = value.strip()[:120]
+    mode = raw.get("surface_mode")
+    if isinstance(mode, str) and mode in _SURFACE_MODES:
+        prefs["surface_mode"] = mode
+    color = raw.get("surface_color")
+    if isinstance(color, str) and _SURFACE_COLOR_RE.fullmatch(color):
+        prefs["surface_color"] = color
+    image = raw.get("surface_image")
+    if isinstance(image, str):
+        if not image:
+            prefs["surface_image"] = ""
+        elif len(image) <= _MAX_SURFACE_IMAGE_CHARS and _SURFACE_IMAGE_RE.fullmatch(image):
+            prefs["surface_image"] = image
+    dim = raw.get("surface_dim")
+    if isinstance(dim, (int, float)) and not isinstance(dim, bool):
+        prefs["surface_dim"] = max(0, min(100, int(dim)))
+    overrides = raw.get("overrides")
+    if isinstance(overrides, dict):
+        for key in ("textColor", "windowTextColor", "accentColor"):
+            value = overrides.get(key)
+            if isinstance(value, str) and (value == "" or _SURFACE_COLOR_RE.fullmatch(value)):
+                prefs["overrides"][key] = value
+    tabs = raw.get("open_tabs")
+    if isinstance(tabs, list):
+        clean: list[str] = []
+        for value in tabs:
+            if isinstance(value, str) and value.strip() and len(value) <= 64 and value not in clean:
+                clean.append(value.strip())
+        prefs["open_tabs"] = clean[:50]
+    active = raw.get("active_tab")
+    if isinstance(active, str) and len(active) <= 64:
+        prefs["active_tab"] = active
+    schema = raw.get("theme_schema")
+    if isinstance(schema, int) and not isinstance(schema, bool):
+        prefs["theme_schema"] = schema
+    return prefs
+
+
+def _validate_dashboard_prefs(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="prefs must be an object")
+    mode = raw.get("surface_mode")
+    if mode is not None and mode not in _SURFACE_MODES:
+        raise HTTPException(status_code=400, detail=f"unknown surface mode: {mode}")
+    color = raw.get("surface_color")
+    if color is not None and (not isinstance(color, str) or not _SURFACE_COLOR_RE.fullmatch(color)):
+        raise HTTPException(status_code=400, detail="surface_color must be #rrggbb")
+    image = raw.get("surface_image")
+    if image is not None:
+        if not isinstance(image, str):
+            raise HTTPException(status_code=400, detail="surface_image must be a string")
+        if image and (len(image) > _MAX_SURFACE_IMAGE_CHARS or not _SURFACE_IMAGE_RE.fullmatch(image)):
+            raise HTTPException(status_code=400, detail="surface_image must be a png/jpeg/webp/gif data URL under 4 MB")
+    dim = raw.get("surface_dim")
+    if dim is not None and (isinstance(dim, bool) or not isinstance(dim, (int, float)) or dim < 0 or dim > 100):
+        raise HTTPException(status_code=400, detail="surface_dim must be 0..100")
+    overrides = raw.get("overrides")
+    if overrides is not None:
+        if not isinstance(overrides, dict):
+            raise HTTPException(status_code=400, detail="overrides must be an object")
+        for key in ("textColor", "windowTextColor", "accentColor"):
+            value = overrides.get(key)
+            if value is not None and (not isinstance(value, str) or (value and not _SURFACE_COLOR_RE.fullmatch(value))):
+                raise HTTPException(status_code=400, detail=f"overrides.{key} must be #rrggbb or empty")
+    tabs = raw.get("open_tabs")
+    if tabs is not None:
+        if not isinstance(tabs, list) or any(not isinstance(item, str) for item in tabs):
+            raise HTTPException(status_code=400, detail="open_tabs must be a list of strings")
+        if len(tabs) > 50 or any(len(item) > 64 for item in tabs):
+            raise HTTPException(status_code=400, detail="open_tabs is limited to 50 ids of 64 chars")
+    active = raw.get("active_tab")
+    if active is not None and (not isinstance(active, str) or len(active) > 64):
+        raise HTTPException(status_code=400, detail="active_tab must be a string or null")
+    return _dashboard_prefs_payload(raw)
+
+
 def _load_dashboard_prefs() -> dict[str, Any]:
+    raw: dict[str, Any] = {}
     if _DASHBOARD_PATH.exists():
         try:
             with _DASHBOARD_PATH.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                return data
+                raw = data
         except Exception:
-            pass
-    return {"theme": "default", "font": "theme"}
+            raw = {}
+    try:
+        schema = int(raw.get("theme_schema") or 0)
+    except (TypeError, ValueError):
+        schema = 0
+    if schema < 2:
+        # 0.2.1: old Hermes/Midnight saves move to Black once; choosing a theme again
+        # writes theme_schema=2 and is preserved.
+        raw["theme"] = "black"
+        raw["theme_schema"] = 2
+    return _dashboard_prefs_payload(raw)
 
 
 def _save_dashboard_prefs(prefs: dict[str, Any]) -> None:
-    _DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _DASHBOARD_PATH.open("w", encoding="utf-8") as fh:
-        json.dump(prefs, fh, indent=2)
+    with _LOAD_LOCK:
+        _DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DASHBOARD_PATH.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(prefs, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, _DASHBOARD_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +488,7 @@ async def verify_pin(payload: dict[str, Any], _: str = Depends(require_runtime_t
 async def dashboard_themes_alias(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     prefs = _load_dashboard_prefs()
     return {
-        "active": prefs.get("theme", "default"),
+        "active": prefs.get("theme", "black"),
         "themes": [
             {"name": name, "label": label, "description": description}
             for name, label, description in _BUILTIN_THEMES
@@ -381,6 +503,7 @@ async def dashboard_theme_set(payload: dict[str, Any], _: str = Depends(require_
         raise HTTPException(status_code=400, detail=f"unknown theme: {name}")
     prefs = _load_dashboard_prefs()
     prefs["theme"] = name
+    prefs["theme_schema"] = 2
     _save_dashboard_prefs(prefs)
     return {"ok": True, "theme": name}
 
@@ -398,6 +521,29 @@ async def dashboard_font_set(payload: dict[str, Any], _: str = Depends(require_r
     prefs["font"] = font
     _save_dashboard_prefs(prefs)
     return {"ok": True, "font": font}
+
+
+@router.get("/dashboard/prefs")
+async def dashboard_prefs_get(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
+    """Full UI preferences: theme, font, surface image/dim, color overrides.
+
+    The browser keeps a localStorage copy for a flash-free start; this file is
+    the durable source of truth across app restarts and profiles.
+    """
+    return _load_dashboard_prefs()
+
+
+@router.put("/dashboard/prefs")
+async def dashboard_prefs_put(
+    payload: dict[str, Any], _: str = Depends(require_runtime_token)
+) -> dict[str, Any]:
+    patch = _validate_dashboard_prefs(payload)
+    prefs = _load_dashboard_prefs()
+    for key, value in patch.items():
+        if key in payload:
+            prefs[key] = value
+    _save_dashboard_prefs(prefs)
+    return {"ok": True, **prefs}
 
 
 @router.get("/dashboard/plugins")

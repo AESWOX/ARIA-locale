@@ -1,5 +1,6 @@
-import { Maximize2, Minimize2, Loader2 } from "lucide-react";
-import type { ChatModels, RunProfile, ProfileSeat } from "@/lib/api";
+import { useState } from "react";
+import { Check, Copy, Maximize2, Minimize2, Loader2, Info } from "lucide-react";
+import type { ChatUsage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /* Top bar of the chat: what you are talking to and how, at a glance, plus the
@@ -7,18 +8,9 @@ import { cn } from "@/lib/utils";
    conversation the whole window). Purely presentational: all state lives in
    NativeChatPage. */
 
-const TIER_SHORT: Record<string, string> = { premium: "Strong", standard: "Medium", free: "Free", fast: "Fast" };
-const AUDIT_SHORT = { off: "no check", light: "quick check", strict: "strict check" } as const;
-const THINK_SHORT = { off: "fast", medium: "balanced", high: "deep" } as const;
-
-export function seatLabel(seat: ProfileSeat | undefined, models: ChatModels | null): string {
-  if (!seat) return "auto";
-  if (seat.model) {
-    const found = models?.models.find((m) => m.id === seat.model || m.model === seat.model);
-    return found?.model ?? seat.model;
-  }
-  if (seat.tier) return TIER_SHORT[seat.tier] ?? seat.tier;
-  return "auto";
+/** D-38: under ten cents two decimals would read as $0.00; keep four there. */
+export function formatUsd(value: number): string {
+  return value < 0.1 ? value.toFixed(4) : value.toFixed(2);
 }
 
 function Chip({ children, title, tone }: { children: React.ReactNode; title?: string; tone?: "warn" }) {
@@ -36,43 +28,81 @@ function Chip({ children, title, tone }: { children: React.ReactNode; title?: st
 }
 
 export function ChatTopBar({
-  title, mode, profile, models, busy, waiting, costToday, focus, onToggleFocus,
+  title, adult, audit, busy, waiting, costToday, costTodayUnpriced, usage, focus, inspectorOpen, onCopyChat, onToggleInspector, onToggleFocus,
 }: {
   title: string;
-  mode: string;
-  profile: RunProfile | null;
-  models: ChatModels | null;
+  adult?: boolean;
+  audit?: string | null;
   busy: boolean;
   waiting: boolean;
   costToday: number | null;
+  /** D-38: ledger calls today without a price (shown next to the sum, never hidden). */
+  costTodayUnpriced: number;
+  usage: ChatUsage | null;
   focus: boolean;
+  inspectorOpen: boolean;
+  /** Copies only the chat transcript (user + assistant), never the UI chrome. */
+  onCopyChat: () => void | Promise<void>;
+  onToggleInspector: () => void;
   onToggleFocus: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    await onCopyChat();
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
   return (
     <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
       <div className="min-w-0 flex-1 truncate text-sm font-medium" title={title}>
         {title || "New chat"}
       </div>
+      {adult && <Chip title="Adult mode (18+)">18+</Chip>}
+      {audit === "pass" && <Chip title="Audit verdict">verified</Chip>}
+      {(audit === "needs_rework" || audit === "fail_after_max_attempts") && (
+        <Chip title="Audit verdict">unverified</Chip>
+      )}
       {waiting && <Chip tone="warn" title="A step is waiting for your Approve / Reject">needs you</Chip>}
       {busy && !waiting && (
         <Chip title="A task is running">
           <Loader2 className="h-3 w-3 animate-spin" /> working
         </Chip>
       )}
-      <Chip title="Mode">{mode}</Chip>
-      {profile && (
-        <>
-          <Chip title="Main model (who plans / answers)">{seatLabel(profile.main, models)}</Chip>
-          <Chip title="Thinking / check">
-            {THINK_SHORT[profile.thinking]} · {AUDIT_SHORT[profile.audit]}
-          </Chip>
-        </>
-      )}
-      {costToday !== null && (
-        <Chip title="Estimated spend today across all chats (upper bound, cache not counted)">
-          ≈ ${costToday.toFixed(2)} today
+      {usage?.context_pct != null && (
+        <Chip title="Session context used (prompt tokens / model window)">
+          ctx {usage.context_pct}%
         </Chip>
       )}
+      {usage?.session_cost != null && (
+        <Chip title="Cost of this chat (from provider usage and model prices)">
+          ${formatUsd(usage.session_cost)} this chat
+          {usage.unpriced_messages > 0 && ` +${usage.unpriced_messages} unpriced`}
+        </Chip>
+      )}
+      {costToday !== null && (
+        <Chip title="Spend today across all chats, from the provider usage ledger">
+          ≈ ${formatUsd(costToday)} today
+          {costTodayUnpriced > 0 && ` +${costTodayUnpriced} unpriced`}
+        </Chip>
+      )}
+      <button
+        type="button"
+        onClick={() => void handleCopy()}
+        title="Copy chat text (user + assistant messages only)"
+        aria-label="Copy chat text"
+        className="border border-border p-1 text-muted-foreground hover:bg-foreground/5"
+      >
+        {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+      </button>
+      <button
+        type="button"
+        onClick={onToggleInspector}
+        title={usage ? "Session details" : "Session details (no usage yet)"}
+        aria-pressed={inspectorOpen}
+        className={cn("border border-border p-1 text-muted-foreground hover:bg-foreground/5", inspectorOpen && "bg-foreground/10")}
+      >
+        <Info className="h-3.5 w-3.5" />
+      </button>
       <button
         type="button"
         onClick={onToggleFocus}

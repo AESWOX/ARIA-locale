@@ -1,4 +1,4 @@
-"""Дочерние процессы на Windows не должны открывать видимое консольное окно (uvx/npx/shell/hooks/codex)."""
+"""Дочерние процессы на Windows не должны открывать видимое консольное окно (uvx/npx/shell/hooks)."""
 from __future__ import annotations
 
 import importlib
@@ -29,7 +29,7 @@ def test_flag_is_empty_elsewhere():
 
 @pytest.mark.parametrize(
     "rel",
-    ["aria/mcp/client.py", "aria/tools/handlers/shell.py", "aria/hooks/engine.py", "aria/agents/codex_exec_bridge.py"],
+    ["aria/mcp/client.py", "aria/tools/handlers/shell.py", "aria/hooks/engine.py"],
 )
 def test_every_spawn_site_uses_no_window(rel):
     src = (Path(__file__).resolve().parents[1] / rel).read_text(encoding="utf-8")

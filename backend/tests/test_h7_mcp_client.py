@@ -255,7 +255,7 @@ def test_only_allowed_roles_see_mcp_tools(data_dir):
         return mgr.tool_names_for_role("general"), mgr.tool_names_for_role("coder"), mgr.tool_names_for_role("qa_auditor")
 
     general, coder, auditor = _with_manager(data_dir, _fake_cfg(), body)
-    assert "mcp__fake__echo" in general and coder == () and auditor == ()
+    assert "mcp__fake__echo" in general and "mcp__fake__echo" in coder and auditor == ()
 
 
 def test_big_and_error_results_are_normalized(data_dir):
@@ -408,3 +408,8 @@ def test_agent_pauses_for_owner_approval_on_mcp_write_tool(data_dir, tmp_path, m
         assert task.status == TaskStatus.awaiting_attention
         assert [i.type.value for i in items] == ["mcp_tool_approval"]
         assert items[0].payload_json["tool_name"] == "mcp__fake__write_thing" and items[0].payload_json["arguments"] == {"v": "x"}
+
+
+def test_mcp_roles_include_the_coder_used_by_plan():
+    assert set(mcp_manager.MCP_ROLES) == {"general", "orchestrator", "coder", "worker"}
+    assert "qa_auditor" not in mcp_manager.MCP_ROLES

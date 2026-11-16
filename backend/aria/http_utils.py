@@ -6,33 +6,60 @@ under ``aria.routers`` can share them without circular imports.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import ssl
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import HTTPException
+from sqlalchemy import func
 
+from aria import secretguard
 from aria.config import get_settings
 from aria.core.events import event_bus
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import ProviderStatus, SourceTrust, TaskStatus
+from aria.db.enums import ProviderStatus, SessionStatus, SourceTrust, TaskStatus
 from aria.storage import obsidian_vault
 
 settings = get_settings()
 
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=4)
+def _ssl_context_for(cafile: str | None) -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=cafile)
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """TLS context with real CA verification: SSL_CERT_FILE, else certifi, else system store."""
+    cafile = os.environ.get("SSL_CERT_FILE") or None
+    if cafile is None:
+        try:
+            import certifi
+        except ImportError:
+            logger.warning("certifi is not installed; falling back to the system CA store")
+        else:
+            cafile = certifi.where()
+    return _ssl_context_for(cafile)
+
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(value: datetime | None) -> str | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat()
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def serialize_session(session: m.Session) -> dict[str, Any]:
@@ -63,14 +90,57 @@ def serialize_task(task: m.Task | None) -> dict[str, Any] | None:
     }
 
 
-def serialize_message(msg: m.Message) -> dict[str, Any]:
+_TOOL_OUTPUT_PREVIEW_CHARS = 6000
+
+
+def _tool_output_preview(msg: m.Message) -> dict[str, Any] | None:
+    """A bounded view of a tool message for the chat UI's expandable process row."""
+    if msg.role != "tool" or not isinstance(msg.content_json, dict):
+        return None
+    payload = msg.content_json
+    def bounded(value: Any) -> Any:
+        if isinstance(value, str) and len(value) > _TOOL_OUTPUT_PREVIEW_CHARS:
+            return (
+                f"{value[:_TOOL_OUTPUT_PREVIEW_CHARS]}"
+                f"… (+{len(value) - _TOOL_OUTPUT_PREVIEW_CHARS})"
+            )
+        return value
+
+    output = payload.get("output")
+    if isinstance(output, dict):
+        output = {str(key): bounded(value) for key, value in output.items()}
+    else:
+        output = bounded(output)
+    arguments = payload.get("arguments")
+    if isinstance(arguments, dict):
+        arguments = {str(key): bounded(value) for key, value in arguments.items()}
     return {
+        "tool_name": payload.get("tool_name"),
+        "status": payload.get("status"),
+        "arguments": arguments,
+        "output": output,
+        "fold_ref": payload.get("fold_ref"),
+        "checkpoint_id": payload.get("checkpoint_id"),
+    }
+
+
+def serialize_message(msg: m.Message) -> dict[str, Any]:
+    payload = {
         "id": str(msg.id),
         "role": msg.role,
         "content": msg.content,
         "source_trust": msg.source_trust.value if hasattr(msg.source_trust, "value") else str(msg.source_trust),
         "created_at": iso(msg.created_at),
+        "tool_output": _tool_output_preview(msg),
     }
+    meta = msg.content_json if isinstance(msg.content_json, dict) else {}
+    if meta.get("notice"):
+        payload["content_json"] = {
+            "notice": meta["notice"],
+            "action": meta.get("action"),
+            "action_path": meta.get("action_path"),
+        }
+    return payload
 
 
 def serialize_tool_call(call: m.ToolCall) -> dict[str, Any]:
@@ -132,6 +202,12 @@ def _safe_export_filename(title: str, session_id: uuid.UUID) -> str:
     stem = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in (title or 'session')).strip('-')
     stem = stem[:48] or 'session'
     return f"{stem}-{session_id}.md"
+
+
+def content_disposition(filename: str) -> str:
+    """RFC 5987 header value: ASCII fallback plus the UTF-8 name (headers are latin-1)."""
+    fallback = filename.encode("ascii", "replace").decode("ascii").replace('"', "-")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 def render_session_export_markdown(
@@ -203,7 +279,7 @@ def render_session_export_markdown(
             lines.append(json.dumps(report.metrics_compared, ensure_ascii=False, indent=2))
             lines.append("```")
             lines.append("")
-    return "\n".join(lines).strip() + "\n"
+    return secretguard.mask_secrets("\n".join(lines).strip() + "\n")
 
 
 def _redact_dsn(dsn: str | None) -> str:
@@ -218,11 +294,15 @@ def _redact_dsn(dsn: str | None) -> str:
 def health_payload(ws_connected: bool = False, reconnect_mode: str = "live") -> dict[str, Any]:
     with session_scope() as db:
         providers = repo.list_provider_health(db)
+        active_sessions = db.query(func.count(m.Session.id)).filter(
+            m.Session.status == SessionStatus.active
+        ).scalar() or 0
     return {
         "overall": "online",
         "ws_connected": ws_connected,
         "reconnect_mode": reconnect_mode,
         "checked_at": iso(utc_now()),
+        "active_sessions": int(active_sessions),
         "components": [
             {"key": "backend", "label": "Backend API", "status": "online", "detail": "FastAPI running"},
             {"key": "postgres", "label": "Database", "status": "online", "detail": _redact_dsn(settings.POSTGRES_DSN)},

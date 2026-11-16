@@ -28,6 +28,11 @@ _PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
 )
 
 
+def contains_sensitive(text: str) -> bool:
+    """E9: в тексте есть секрет или email (по тем же паттернам, что и DLP-анонимизатор)."""
+    return any(pattern.search(text or "") for _kind, pattern in _PATTERNS)
+
+
 class EntityAnonymizer:
     """Обратимая маскировка сущностей в тексте.
 
@@ -82,7 +87,7 @@ class EntityAnonymizer:
                     msg.content = content
                     out.append(msg)
                     continue
-                except Exception:  # noqa: BLE001 — slots/dataclass без setattr
+                except Exception:  # slots/dataclass без setattr
                     pass
             out.append(type(msg)(role=getattr(msg, "role", "user"), content=content) if hasattr(msg, "role") else content)
         return out

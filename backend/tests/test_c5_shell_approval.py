@@ -27,7 +27,7 @@ from aria.db.enums import ApprovalStatus, TaskStatus, ToolStatus
 from aria.llm.providers.stub import StubProvider, final_answer, tool_call
 from aria.llm.router import ProviderRouter
 from aria.tools.registry import TOOL_REGISTRY
-from aria.tools.validators import classify_shell_command, is_high_risk_command
+from aria.tools.validators import classify_shell_command
 
 # --- Варианты SEC-2: любой порядок/написание флагов rm, плюс обёртки и составные команды -------------------
 SEC2_DANGEROUS = [
@@ -47,6 +47,15 @@ SEC2_SAFE = ["rm file.txt", "rm -f a.txt", "rm -i x"]  # рекурсии нет
 
 # Команда-ловушка: что реально «запустили»
 SPAWNED: list[str] = []
+
+
+def _spawned_command(raw: str) -> str:
+    """S10: на Windows команда уходит в PowerShell как -EncodedCommand."""
+    if "-EncodedCommand" in raw:
+        import base64
+
+        return base64.b64decode(raw.rsplit(" ", 1)[-1]).decode("utf-16-le")
+    return raw
 
 
 class _FakeProc:
@@ -75,6 +84,15 @@ def trap(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_shell", _spawn)
     return SPAWNED
+
+
+@pytest.fixture(autouse=True)
+def _windows_runnable(monkeypatch):
+    # R3(c) (19.3 PLAN-1): C5 проверяет SEC-2 approve, а не применимость на Windows.
+    # Считаем команды «выполнимыми», чтобы они дошли до classify_shell_command → Approve.
+    import aria.core.loop as loop
+
+    monkeypatch.setattr(loop, "is_windows_command", lambda command: True)
 
 
 @pytest.fixture()
@@ -116,7 +134,7 @@ def test_trap_is_real_safe_variants_reach_the_spawn_point(sandbox, trap):
     for cmd in SEC2_SAFE:
         out = asyncio.run(spec.handler(input_json={"command": cmd}, timeout_sec=5, sandbox_root=sandbox))
         assert out.get("returncode") == 0, (cmd, out)
-    assert trap == SEC2_SAFE
+    assert len(trap) == len(SEC2_SAFE) and all(cmd in _spawned_command(spawned) for cmd, spawned in zip(SEC2_SAFE, trap))
 
 
 @pytest.mark.parametrize("cmd", SEC2_SAFE)
@@ -138,7 +156,7 @@ def test_execute_tool_reports_blocked_policy_not_ok(cmd, sandbox, trap):
 def test_execute_tool_runs_only_with_system_approved_kwarg(sandbox, trap):
     spec = TOOL_REGISTRY["shell_execute"]
     out, status, code, _e = asyncio.run(_execute_tool(spec, {"command": "rm -rf x"}, sandbox, approved=True))
-    assert status == ToolStatus.ok and code is None and trap == ["rm -rf x"]
+    assert status == ToolStatus.ok and code is None and len(trap) == 1 and "rm -rf x" in _spawned_command(trap[0])
 
 
 # --------------------------------------------------------------------------- 3. полный цикл
@@ -173,8 +191,9 @@ def _snapshot(task_id):
         return task.status, [(i.id, i.status, (i.payload_json or {}).get("command")) for i in items], calls
 
 
-LOOP_VARIANTS = ["rm -rf /", "rm -fr /tmp/x", "rm -Rf x", "rm -rfv x", "rm --recursive x", "rm -r -f x", "sudo rm -rf /",
-                 "rm -r ~/docs", "ls; rm -rf x", "bash -c 'rm -rf x'", "RM -RF x", "rmdir /s /q x"]
+LOOP_VARIANTS = ["rm -Rf x", "rm -rfv x", "rm --recursive x", "rm -r -f x",
+                 "ls; rm -rf x", "bash -c 'rm -rf x'", "RM -RF x", "rmdir /s /q x"]
+DENY_VARIANTS = ["rm -rf /", "rm -fr /tmp/x", "sudo rm -rf /", "rm -r ~/docs"]
 
 
 @pytest.mark.parametrize("cmd", LOOP_VARIANTS)
@@ -188,6 +207,33 @@ def test_loop_pauses_and_creates_attention_item_without_running(cmd, world, trap
     assert len(items) == 1 and items[0][1] == ApprovalStatus.pending and items[0][2] == cmd
     assert trap == [], "до Approve процесс не запускается"
     assert calls == [], "до решения владельца нет и записи tool_call (действие не считается выполненным)"
+
+
+def test_loop_reads_and_writes_inside_project_without_approval(world, trap):
+    """Этап 3: чтение и запись внутри проекта — автоматически, без карточки."""
+    router, stubs, sandbox, task_id = world
+    sub = stubs["subagent_execution"]
+    sub.push(tool_call("file_write", {"path": "auto.txt", "content": "rails"}))
+    sub.push(tool_call("file_read", {"path": "auto.txt"}))
+    sub.push(final_answer("done"))
+    asyncio.run(execute_agent_loop(task_id, router, sandbox))
+
+    _status, items, calls = _snapshot(task_id)
+    assert items == [] and trap == []
+    assert [c[1] for c in calls if c[0] in ("file_write", "file_read")] == ["ok", "ok"]
+    from pathlib import Path
+
+    assert (Path(sandbox) / "auto.txt").read_text(encoding="utf-8") == "rails"
+
+
+@pytest.mark.parametrize("cmd", DENY_VARIANTS)
+def test_loop_hard_denies_commands_outside_project(cmd, world, trap):
+    router, stubs, sandbox, task_id = world
+    stubs["subagent_execution"].push(tool_call("shell_execute", {"command": cmd}))
+    asyncio.run(execute_agent_loop(task_id, router, sandbox))
+
+    _status, items, calls = _snapshot(task_id)
+    assert items == [] and calls == [] and trap == []
 
 
 def test_loop_ignores_forged_approved_flag_from_the_model(world, trap):
@@ -212,7 +258,7 @@ def test_approve_runs_the_command_exactly_once(world, trap):
         item = repo.get_attention_item(db, item_id)
         db.expunge(item)
     asyncio.run(resume_after_approval(task_id, router, sandbox, item))
-    assert trap == ["rm -rf build"], "после Approve команда исполнена один раз"
+    assert len(trap) == 1 and "rm -rf build" in _spawned_command(trap[0]), "после Approve команда исполнена один раз"
 
     # повторная доставка того же Approve (дубль, перезапуск с задачей в in_progress) не запускает команду второй раз
     with session_scope() as db:
@@ -220,7 +266,7 @@ def test_approve_runs_the_command_exactly_once(world, trap):
         task.status = TaskStatus.in_progress
     sub.push(final_answer("second pass"))
     asyncio.run(resume_after_approval(task_id, router, sandbox, item))
-    assert trap == ["rm -rf build"]
+    assert len(trap) == 1 and "rm -rf build" in _spawned_command(trap[0])
     _st, _items, calls = _snapshot(task_id)
     shell = [c for c in calls if c[0] == "shell_execute"]
     assert len(shell) == 1 and shell[0][1] == "ok" and shell[0][2] == item_id, "tool_call привязан к attention item"

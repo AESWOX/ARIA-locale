@@ -139,6 +139,20 @@ async def get_audit_reports(task_id: uuid.UUID, _: str = Depends(require_runtime
         return [serialize_audit(row) for row in repo.list_audit_reports(db, task_id)]
 
 
+def _clarify_echo(answers: list[dict[str, Any]]) -> str:
+    """User-visible echo of clarification answers.
+
+    "Accept assumptions" sends an empty answer list; it must not create the
+    empty "Уточнения: " bubble the owner reported.
+    """
+    answer_text = "; ".join(
+        f"{a.get('field') or a.get('id')}: {a.get('value')}"
+        for a in answers
+        if isinstance(a, dict) and str(a.get("value") or "").strip()
+    )
+    return ("Уточнения: " + answer_text) if answer_text else "Приняты допущения."
+
+
 @router.post("/tasks/{task_id}/clarify")
 async def clarify_task(
     task_id: uuid.UUID,
@@ -166,7 +180,9 @@ async def clarify_task(
     from aria.core.taskspec import MAX_CLARIFY_ROUNDS, MIN_GOAL_CHARS
 
     body = payload or {}
-    mode = _normalize_mode(body)
+    requested_mode = str(body.get("mode") or "").strip().lower()
+    if requested_mode and requested_mode not in RUN_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(RUN_MODES)}")
     answers = body.get("answers") or []
     accept_assumptions = bool(body.get("accept_assumptions"))
     if not isinstance(answers, list):
@@ -183,6 +199,8 @@ async def clarify_task(
                 detail=f"task is not awaiting clarification (current status: {task.status.value})",
             )
         spec = clarifier.load_spec(db, task_id) or taskspec.derive_spec(task.objective or "")
+        # D-21: без явного mode берём режим вкладки, сохранённый при постановке задачи.
+        mode = requested_mode or (spec.mode or "plan")
         # Старые данные (до раунда 2): вопросы без id — восстанавливаем id из текстов.
         if not spec.clarify_questions and spec.open_questions:
             spec.clarify_questions = [
@@ -284,7 +302,7 @@ async def clarify_task(
                                 id=f"ac-{len(spec.acceptance_criteria) + 1}", statement=value[:300]
                             )
                         )
-                    except Exception:  # noqa: BLE001 — непроверяемая формулировка
+                    except Exception:  # непроверяемая формулировка
                         spec.constraints.append(f"Критерий (не проверяем): {value}")
                 else:
                     # п.1.1.2: структурная запись вместо «q1: да» в constraints.
@@ -315,13 +333,7 @@ async def clarify_task(
         if not spec.is_valid and not spec.clarify_questions:
             raise HTTPException(status_code=500, detail="invariant violated: awaiting_clarification without questions")
         if session is not None:
-            # Запасной путь П.3.2: ответы остаются текстом в чате.
-            repo.append_message(
-                db, session, role="user",
-                content="Уточнения: " + "; ".join(
-                    f"{a.get('field') or a.get('id')}: {a.get('value')}" for a in answers if isinstance(a, dict)
-                ),
-            )
+            repo.append_message(db, session, role="user", content=_clarify_echo(answers))
         result = {
             "ok": True,
             "task_id": str(task_id),

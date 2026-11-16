@@ -14,15 +14,18 @@ import asyncio
 import codecs
 import ipaddress
 import logging
+import os
 import re
 import socket
 import time
 import urllib.error
 import urllib.request
+import zlib
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
 from aria import paths
+from aria.http_utils import _ssl_context
 
 logger = logging.getLogger("aria.web")
 
@@ -174,6 +177,8 @@ _DEBUG_KEEP = 3
 
 def _save_debug_page(name: str, html: str) -> str | None:
     """Кладёт нераспознанную страницу выдачи в <data>/debug/, чтобы её можно было прислать и поправить парсер."""
+    if os.environ.get("ARIA_DEBUG_SEARCH") != "1":
+        return None
     try:
         folder = paths.data_dir() / "debug"
         folder.mkdir(parents=True, exist_ok=True)
@@ -200,7 +205,7 @@ def _ddg_get(url: str) -> str:
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.8",
     })
-    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT_SEC) as resp:
+    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT_SEC, context=_ssl_context()) as resp:
         return resp.read(MAX_SEARCH_BYTES).decode("utf-8", errors="replace")
 
 
@@ -240,6 +245,7 @@ def _search_blocking(query: str, max_results: int) -> dict:
     if blocked:
         return {
             "results": [],
+            "blocked": True,
             "error": "duckduckgo blocked the request (captcha or rate limit); retry later or ask the user",
         }
     if last_error:
@@ -261,6 +267,15 @@ async def web_search(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:
         return {"results": [], "error": "empty query"}
     max_results = _clamp_int(input_json.get("max_results"), DEFAULT_MAX_RESULTS, 1, HARD_MAX_RESULTS)
 
+    # S1: пробуем роутер провайдеров; None = провайдеров нет -> прежний DDG-путь.
+    from aria.tools.search import router as search_router
+
+    routed = await search_router.search(query, max_results)
+    if routed is not None:
+        routed["source_trust"] = "untrusted"
+        routed.setdefault("notice", UNTRUSTED_NOTICE)
+        return routed
+
     out = await asyncio.to_thread(_search_blocking, query, max_results)
     out["source_trust"] = "untrusted"
     out["notice"] = UNTRUSTED_NOTICE
@@ -279,8 +294,75 @@ MAX_REDIRECTS = 5
 _TEXT_TYPES = frozenset({
     "text/html", "application/xhtml+xml", "text/plain", "text/markdown", "text/csv",
     "text/xml", "application/xml", "application/json", "application/rss+xml", "application/atom+xml",
+    "application/javascript", "text/javascript", "application/x-javascript", "application/ecmascript",
 })
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+
+def _is_textual(ctype: str) -> bool:
+    """F-010: текст, JSON (+json), XML (+xml), JS; остальное — честный отказ."""
+    ctype = (ctype or "").lower()
+    return (
+        ctype in _TEXT_TYPES or ctype.startswith("text/") or ctype.endswith(("+json", "+xml"))
+    )
+
+
+def _brotli_available() -> bool:
+    try:
+        import brotli  # noqa: F401
+    except Exception:  # модуль необязательный
+        return False
+    return True
+
+
+def accept_encoding() -> str:
+    """Не обещаем br, если декодера нет (иначе сервер пришлёт нечитаемое)."""
+    return "gzip, deflate, br" if _brotli_available() else "gzip, deflate"
+
+
+def _inflate_limited(data: bytes, wbits: int) -> bytes:
+    obj = zlib.decompressobj(wbits)
+    return obj.decompress(data, MAX_FETCH_BYTES)
+
+
+def _brotli_limited(data: bytes) -> bytes:
+    """Потоковая распаковка br с жёстким пределом (bomb не съедает память)."""
+    import brotli
+
+    decoder = brotli.Decompressor()
+    method = getattr(decoder, "process", None) or getattr(decoder, "decompress", None)
+    if method is None:
+        raise FetchError("the installed brotli module has no streaming decompressor")
+    out = bytearray()
+    for offset in range(0, len(data), 65536):
+        out.extend(method(data[offset:offset + 65536]))
+        if len(out) > MAX_FETCH_BYTES:
+            return bytes(out[:MAX_FETCH_BYTES])
+    return bytes(out)
+
+
+def _decompress(data: bytes, encoding: str) -> bytes:
+    """Распаковать gzip/deflate/br по заголовку Content-Encoding (F-010)."""
+    codings = [part.strip().lower() for part in (encoding or "").split(",") if part.strip()]
+    for coding in reversed(codings):
+        if coding in ("identity",):
+            continue
+        if coding in ("gzip", "x-gzip"):
+            data = _inflate_limited(data, 16 + zlib.MAX_WBITS)
+        elif coding == "deflate":
+            try:
+                data = _inflate_limited(data, zlib.MAX_WBITS)
+            except zlib.error:
+                data = _inflate_limited(data, -zlib.MAX_WBITS)
+        elif coding in ("br", "brotli"):
+            if not _brotli_available():
+                raise FetchError("the server sent brotli (br) but no brotli decoder is installed")
+            data = _brotli_limited(data)
+        else:
+            raise FetchError(f"unsupported content-encoding: {coding}")
+    return data
+
+
 _BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
@@ -349,10 +431,13 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def _open_url(req: urllib.request.Request, timeout: float):
     """Единственная точка сетевого доступа web_fetch (в тестах подменяется)."""
-    return urllib.request.build_opener(_SafeRedirectHandler).open(req, timeout=timeout)
+    opener = urllib.request.build_opener(
+        _SafeRedirectHandler, urllib.request.HTTPSHandler(context=_ssl_context())
+    )
+    return opener.open(req, timeout=timeout)
 
 
-_ZERO_WIDTH = re.compile("[​-‏‪-‮⁠-⁤﻿]")
+_ZERO_WIDTH = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 _CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _META_CHARSET = re.compile(rb"<meta[^>]+charset=[\"']?\s*([\w\-]+)", re.IGNORECASE)
 
@@ -375,7 +460,14 @@ def _decode(data: bytes, declared: str | None, is_html: bool) -> str:
 
 
 class _TextExtractor(HTMLParser):
-    _SKIP = frozenset({"script", "style", "noscript", "template", "svg", "iframe"})
+    _SKIP_TAGS = frozenset({
+        "script", "style", "noscript", "template", "svg", "iframe",
+        "nav", "header", "footer", "aside", "form",
+    })
+    _BOILER = re.compile(r"(menu|sidebar|newsletter|advert|cookie|share|promo|banner)", re.IGNORECASE)
+    _VOID = frozenset({
+        "meta", "link", "br", "hr", "img", "input", "source", "area", "base", "col", "embed", "param", "track", "wbr",
+    })
     _BLOCK = frozenset({
         "p", "div", "br", "tr", "section", "article", "header", "footer", "main", "aside", "nav",
         "ul", "ol", "table", "pre", "blockquote", "hr", "form", "h1", "h2", "h3", "h4", "h5", "h6",
@@ -384,36 +476,67 @@ class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.article_parts: list[str] = []
         self.title_parts: list[str] = []
+        self.date: str = ""
         self._skip = 0
+        self._article = 0
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs) -> None:
-        if tag in self._SKIP:
-            self._skip += 1
-        elif tag == "title":
+        if self._skip:
+            if tag not in self._VOID:
+                self._skip += 1
+            return
+        attrs_d = {str(k): str(v or "") for k, v in attrs}
+        if tag == "meta":
+            prop = (attrs_d.get("property") or attrs_d.get("name") or "").lower()
+            if prop in ("article:published_time", "date", "pubdate", "og:updated_time"):
+                self.date = attrs_d.get("content") or self.date
+            return
+        if tag == "title":
             self._in_title = True
+            return
+        marker = f"{attrs_d.get('class', '')} {attrs_d.get('id', '')}"
+        if tag in self._SKIP_TAGS or (
+            tag in ("div", "section", "ul", "ol", "table") and self._BOILER.search(marker)
+        ):
+            self._skip = 1
+            return
+        if tag in ("article", "main"):
+            self._article += 1
+            self.parts.append("\n")
         elif tag == "li":
             self.parts.append("\n- ")
         elif tag in self._BLOCK:
             self.parts.append("\n")
 
     def handle_startendtag(self, tag: str, attrs) -> None:
-        if tag in self._BLOCK:
+        self.handle_starttag(tag, attrs)
+        if tag in self._BLOCK and tag not in self._VOID:
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in self._SKIP:
+        if self._skip:
             self._skip = max(0, self._skip - 1)
-        elif tag == "title":
+            return
+        if tag == "title":
             self._in_title = False
-        elif tag in self._BLOCK or tag == "li":
+            return
+        if tag in ("article", "main"):
+            self._article = max(0, self._article - 1)
+        if tag in self._BLOCK or tag == "li":
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._skip:
             return
-        (self.title_parts if self._in_title else self.parts).append(data)
+        if self._in_title:
+            self.title_parts.append(data)
+            return
+        self.parts.append(data)
+        if self._article:
+            self.article_parts.append(data)
 
 
 def _clean_text(text: str) -> str:
@@ -423,21 +546,30 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
-def _clean_plain(text: str) -> str:
-    """Для text/plain, json, csv, markdown: убрать невидимые/управляющие символы, отступы сохранить."""
-    text = _ZERO_WIDTH.sub("", _CONTROL.sub("", text.replace("\r\n", "\n").replace("\r", "\n")))
-    return text.strip()
-
-
-def extract_readable(html: str) -> tuple[str, str]:
-    """(title, text) из HTML."""
+def extract_readable_meta(html: str) -> tuple[str, str, str]:
+    """(title, text, date) из HTML: article/main приоритетнее всего остального."""
     parser = _TextExtractor()
     try:
         parser.feed(html)
         parser.close()
     except Exception:
         logger.debug("html extract error", exc_info=True)
-    return _collapse(_clean_text("".join(parser.title_parts)))[:200], _clean_text("".join(parser.parts))
+    full = _clean_text("".join(parser.parts))
+    article = _clean_text("".join(parser.article_parts))
+    text = article if len(article) >= 200 else full
+    title = _collapse(_clean_text("".join(parser.title_parts)))[:200]
+    return title, text, parser.date
+
+
+def extract_readable(html: str) -> tuple[str, str]:
+    title, body, _date = extract_readable_meta(html)
+    return title, body
+
+
+def _clean_plain(text: str) -> str:
+    """Для text/plain, json, csv, markdown: сохраняем переносы/пробелы, режем управляющие."""
+    text = _ZERO_WIDTH.sub("", _CONTROL.sub("", text.replace("\r\n", "\n").replace("\r", "\n")))
+    return text.strip()
 
 
 def _read_limited(resp, limit: int, deadline: float) -> tuple[bytes, bool]:
@@ -455,18 +587,43 @@ def _read_limited(resp, limit: int, deadline: float) -> tuple[bytes, bool]:
     return data[:limit], len(data) > limit
 
 
-def _fetch_blocking(url: str, max_chars: int) -> dict:
+_JS_APP_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__next_data__", "ng-app")
+
+
+def _looks_js_rendered(raw_html: str, extracted_text: str) -> bool:
+    """HTML без читаемого текста и с кучей <script> — почти наверняка рендерится JS."""
+    if len(extracted_text) >= 200:
+        return False
+    low = raw_html.lower()
+    if low.count("<script") >= 3:
+        return True
+    return any(marker in low for marker in _JS_APP_MARKERS)
+
+
+def _fetch_blocking(url: str, max_chars: int, etag: str | None = None, last_modified: str | None = None) -> dict:
     url = validate_public_url(url)
-    req = urllib.request.Request(url, headers={
+    headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.1",
         "Accept-Language": "en-US,en;q=0.8",
-        "Accept-Encoding": "identity",
-    })
+        "Accept-Encoding": accept_encoding(),
+    }
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+    req = urllib.request.Request(url, headers=headers)
     deadline = time.monotonic() + FETCH_DEADLINE_SEC
     try:
         resp = _open_url(req, FETCH_TIMEOUT_SEC)
     except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return {
+                "not_modified": True,
+                "url": url,
+                "etag": exc.headers.get("ETag") or etag,
+                "last_modified": exc.headers.get("Last-Modified") or last_modified,
+            }
         return {"error": f"http {exc.code}", "url": url, "status": exc.code}
     except urllib.error.URLError as exc:
         return {"error": f"request failed: {exc.reason}", "url": url}
@@ -476,46 +633,192 @@ def _fetch_blocking(url: str, max_chars: int) -> dict:
         validate_public_url(final_url)
         headers = resp.headers
         ctype = headers.get_content_type()
-        if ctype not in _TEXT_TYPES:
+        if not _is_textual(ctype):
             raise FetchError(f"unsupported content type: {ctype}")
         encoding = (headers.get("Content-Encoding") or "identity").strip().lower()
-        if encoding not in ("", "identity"):
-            raise FetchError(f"unsupported content-encoding: {encoding}")
         data, byte_truncated = _read_limited(resp, MAX_FETCH_BYTES, deadline)
+        if encoding not in ("", "identity"):
+            data = _decompress(data, encoding)
         status = getattr(resp, "status", None) or 200
         charset = headers.get_content_charset()
+        resp_etag = headers.get("ETag")
+        resp_last_modified = headers.get("Last-Modified")
 
     raw = _decode(data, charset, ctype in _HTML_TYPES)
+    page_date = ""
+    js_rendered = False
     if ctype in _HTML_TYPES:
-        title, text = extract_readable(raw)
+        title, text, page_date = extract_readable_meta(raw)
+        js_rendered = _looks_js_rendered(raw, text)
     else:
         title, text = "", _clean_plain(raw)
 
     truncated = byte_truncated or len(text) > max_chars
-    return {
+    out = {
         "url": url,
         "final_url": final_url,
         "status": status,
         "content_type": ctype,
         "title": title,
+        "date": page_date,
         "content": text[:max_chars],
         "chars": min(len(text), max_chars),
         "truncated": truncated,
+        "etag": resp_etag,
+        "last_modified": resp_last_modified,
+        "js_rendered": js_rendered,
     }
+    if js_rendered:
+        out["note"] = (
+            "No readable text was extracted: the page looks JavaScript-rendered. "
+            "ARIA does not execute JavaScript, so this is not evidence that the page has no content."
+        )
+    return out
+
+
+def _render_page(text: str, max_chars: int, focus: str | None = None) -> tuple[str, bool]:
+    """S3: срез по max_chars; при focus — лучшие абзацы в исходном порядке (без LLM)."""
+    if not focus or len(text) <= max_chars:
+        return text[:max_chars], len(text) > max_chars
+    tokens = {t for t in re.findall(r"[\w+-]+", focus.lower()) if len(t) > 2}
+    if not tokens:
+        return text[:max_chars], True
+    paragraphs = [part for part in text.split("\n\n") if part.strip()]
+    scored = []
+    for index, paragraph in enumerate(paragraphs):
+        words = set(re.findall(r"[\w+-]+", paragraph.lower()))
+        score = len(words & tokens) / max(1, len(tokens))
+        if score > 0:
+            scored.append((score, index, paragraph))
+    if not scored:
+        return text[:max_chars], True
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    budget, chosen = max_chars, []
+    for _score, index, paragraph in scored:
+        if budget <= 0:
+            break
+        taken = paragraph[:budget]
+        chosen.append((index, taken))
+        budget -= len(taken) + 2
+    if not chosen:
+        return text[:max_chars], True
+    chosen.sort(key=lambda item: item[0])
+    rendered = "\n\n".join(part for _index, part in chosen)
+    return rendered[:max_chars], True
+
+
+def _page_response(data: dict, max_chars: int, focus: str | None) -> dict:
+    content, truncated = _render_page(str(data.get("content") or ""), max_chars, focus)
+    out = {
+        "url": data.get("url"),
+        "final_url": data.get("final_url") or data.get("url"),
+        "status": data.get("status"),
+        "content_type": data.get("content_type"),
+        "title": data.get("title") or "",
+        "date": data.get("date") or "",
+        "content": content,
+        "chars": len(content),
+        "truncated": bool(truncated or data.get("truncated")),
+        "source_trust": "untrusted",
+        "notice": UNTRUSTED_NOTICE,
+    }
+    if data.get("js_rendered"):
+        out["js_rendered"] = True
+        out["note"] = data.get("note") or (
+            "No readable text was extracted: the page looks JavaScript-rendered."
+        )
+    return out
 
 
 async def web_fetch(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:
-    """Читаемый текст публичной веб-страницы. Результат — недоверенный ввод."""
-    url = input_json.get("url")
+    """Читает веб-страницу в безопасном режиме. Вывод — недоверенный контент."""
+    from aria.tools import page_cache
+
+    raw_url = input_json.get("url")
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        return {
+            "error": "url не передан: повтори вызов web_fetch с полным http(s) URL "
+                     "в аргументе url (например https://example.com/page)",
+            "url": "",
+        }
+    url = raw_url.strip().split("#", 1)[0]
     max_chars = _clamp_int(input_json.get("max_chars"), DEFAULT_MAX_CHARS, 200, HARD_MAX_CHARS)
+    focus = str(input_json.get("focus") or "").strip() or None
     try:
-        out = await asyncio.to_thread(_fetch_blocking, url, max_chars)
+        url = validate_public_url(url)
+        cached = page_cache.get(url)
+        if cached is not None:
+            return _page_response(cached, max_chars, focus)
+        stale = page_cache.get_stale(url)
+        out = await asyncio.to_thread(
+            _fetch_blocking,
+            url,
+            HARD_MAX_CHARS,
+            stale.get("etag") if stale else None,
+            stale.get("last_modified") if stale else None,
+        )
+        if out.get("not_modified"):
+            if stale is not None:
+                stale["etag"] = out.get("etag") or stale.get("etag")
+                stale["last_modified"] = out.get("last_modified") or stale.get("last_modified")
+                page_cache.put(url, stale)
+                return _page_response(stale, max_chars, focus)
+            out = await asyncio.to_thread(_fetch_blocking, url, HARD_MAX_CHARS)
+        if not out.get("error") and (out.get("etag") or out.get("last_modified")):
+            page_cache.put(url, out)
+        return _page_response(out, max_chars, focus) if not out.get("error") else {
+            **out, "source_trust": "untrusted",
+        }
     except FetchError as exc:
-        out = {"error": str(exc) or exc.__class__.__name__, "url": url if isinstance(url, str) else ""}
+        out = {"error": str(exc) or exc.__class__.__name__, "url": url}
     except Exception as exc:
         logger.warning("web_fetch failed: %s", exc, exc_info=True)
-        out = {"error": f"fetch failed: {exc.__class__.__name__}", "url": url if isinstance(url, str) else ""}
+        out = {"error": f"fetch failed: {exc.__class__.__name__}", "url": url}
     out["source_trust"] = "untrusted"
     if not out.get("error"):
         out["notice"] = UNTRUSTED_NOTICE
     return out
+
+
+async def telegram_channel(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:
+    """Read recent posts from a public Telegram channel via t.me/s (no account)."""
+    from aria.integrations.telegram_public.reader import (
+        TelegramPublicError,
+        read_channel,
+    )
+
+    channel = str(input_json.get("channel") or "").strip()
+    if not channel:
+        return {"error": "channel required"}
+    try:
+        limit = max(1, min(int(input_json.get("limit") or 20), 50))
+    except (TypeError, ValueError):
+        limit = 20
+    query = str(input_json.get("query") or "").strip().lower()
+    try:
+        posts = await read_channel(channel, pages=1)
+    except TelegramPublicError as exc:
+        return {"error": str(exc), "source_trust": "untrusted"}
+    if query:
+        posts = [post for post in posts if query in str(post.get("text") or "").lower()]
+    posts = posts[-limit:]
+    out = [
+        {
+            "channel": post.get("channel"),
+            "message_id": post.get("message_id"),
+            "date": post.get("date"),
+            "text": post.get("text"),
+            "views": post.get("views"),
+            "links": post.get("links") or [],
+            "url": post.get("url"),
+            "source_trust": "untrusted",
+        }
+        for post in posts
+    ]
+    return {
+        "channel": channel.lstrip("@"),
+        "count": len(out),
+        "posts": out,
+        "source_trust": "untrusted",
+        "notice": UNTRUSTED_NOTICE,
+    }

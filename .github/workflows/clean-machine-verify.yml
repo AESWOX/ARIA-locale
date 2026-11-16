@@ -94,6 +94,7 @@ jobs:
       - name: Stage sidecar for Tauri (externalBin name)
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force desktop/src-tauri/bin | Out-Null
           Copy-Item backend/dist/backend.exe desktop/src-tauri/bin/backend-x86_64-pc-windows-msvc.exe -Force
           Get-Item desktop/src-tauri/bin/backend-x86_64-pc-windows-msvc.exe | Select-Object Name, Length
 
@@ -101,7 +102,7 @@ jobs:
         working-directory: desktop
         shell: pwsh
         run: |
-          npx tauri build --bundles msi
+          npx tauri build --bundles msi --config src-tauri/tauri.ci.conf.json
           Get-ChildItem src-tauri/target/release/bundle/msi/*.msi | Select-Object FullName, Length
 
       # ── 3.2 Silent per-user install (no admin rights) ─────────────────────

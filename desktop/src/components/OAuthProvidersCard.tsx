@@ -18,13 +18,10 @@ import {
   CardTitle,
 } from "@vendor/ui/ui/components/card";
 import { Badge } from "@vendor/ui/ui/components/badge";
-import { ConfirmDialog } from "@vendor/ui/ui/components/confirm-dialog";
-import { OAuthLoginModal } from "@/components/OAuthLoginModal";
 import { useI18n } from "@/i18n";
 
 interface Props {
   onError?: (msg: string) => void;
-  onSuccess?: (msg: string) => void;
 }
 
 function formatExpiresAt(
@@ -49,13 +46,9 @@ function formatExpiresAt(
   }
 }
 
-export function OAuthProvidersCard({ onError, onSuccess }: Props) {
+export function OAuthProvidersCard({ onError }: Props) {
   const [providers, setProviders] = useState<OAuthProvider[] | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
-  const [disconnectTarget, setDisconnectTarget] =
-    useState<OAuthProvider | null>(null);
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
@@ -73,20 +66,6 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   useEffect(() => {
     refresh();
   }, [refresh]);
-
-  const handleDisconnect = async (provider: OAuthProvider) => {
-    setBusyId(provider.id);
-    setDisconnectTarget(null);
-    try {
-      await api.disconnectOAuthProvider(provider.id);
-      onSuccess?.(`${provider.name} ${t.oauth.disconnect.toLowerCase()}ed`);
-      refresh();
-    } catch (e) {
-      onError?.(`${t.oauth.disconnect} failed: ${e}`);
-    } finally {
-      setBusyId(null);
-    }
-  };
 
   const connectedCount =
     providers?.filter((p) => p.status.logged_in).length ?? 0;
@@ -136,7 +115,6 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
               p.status.expires_at,
               t.oauth.expiresIn,
             );
-            const isBusy = busyId === p.id;
             return (
               <div
                 key={p.id}
@@ -227,27 +205,6 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                       </Button>
                     </a>
                   )}
-                  {!p.status.logged_in && p.flow !== "external" && (
-                    <Button
-                      size="sm"
-                      className="uppercase"
-                      onClick={() => setLoginFor(p)}
-                    >
-                      {t.oauth.login}
-                    </Button>
-                  )}
-                  {p.status.logged_in && p.flow !== "external" && (
-                    <Button
-                      size="sm"
-                      outlined
-                      className="uppercase"
-                      onClick={() => setDisconnectTarget(p)}
-                      disabled={isBusy}
-                      prefix={isBusy ? <Spinner /> : undefined}
-                    >
-                      {t.oauth.disconnect}
-                    </Button>
-                  )}
                   {p.status.logged_in && p.flow === "external" && (
                     <span className="text-xs text-text-tertiary italic px-2">
                       <Terminal className="h-3 w-3 inline mr-0.5" />
@@ -260,28 +217,6 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           })}
         </div>
       </CardContent>
-      {loginFor && (
-        <OAuthLoginModal
-          provider={loginFor}
-          onClose={() => {
-            setLoginFor(null);
-            refresh();
-          }}
-          onSuccess={(msg) => onSuccess?.(msg)}
-          onError={(msg) => onError?.(msg)}
-        />
-      )}
-      <ConfirmDialog
-        open={disconnectTarget !== null}
-        onCancel={() => setDisconnectTarget(null)}
-        onConfirm={() => {
-          if (disconnectTarget) void handleDisconnect(disconnectTarget);
-        }}
-        title={`${t.oauth.disconnect} ${disconnectTarget?.name ?? ""}?`}
-        description={`This will remove the stored OAuth tokens for ${disconnectTarget?.name ?? "this provider"}. You will need to re-authenticate to use it again.`}
-        destructive
-        confirmLabel={t.oauth.disconnect}
-      />
     </Card>
   );
 }

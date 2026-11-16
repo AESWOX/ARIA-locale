@@ -27,7 +27,6 @@ def test_fresh_seed_task_is_not_runnable():
     from aria.db import models as m
     from aria.db.base import session_scope
     from aria.db import repository as repo
-    from aria.db.enums import TaskStatus
     from aria.http_utils import BOOTSTRAP_SESSION_TITLE, BOOTSTRAP_TASK_PREFIX
 
     with session_scope() as db:

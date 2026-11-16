@@ -19,13 +19,24 @@ def test_small_talk_skips_the_gate(text):
     "привет, сделай отчёт", "hi, build me an app", "hey deploy the site", "hello world program",
     "fix the failing test", "сделай отчёт по продажам", "what is the capital of France",
 ])
-def test_anything_with_a_request_still_goes_through_the_gate(text):
+def test_anything_with_a_request_still_goes_through_the_gate(monkeypatch, text):
+    from aria.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "clarifier_gate_enabled", True)
     assert clarifier.is_small_talk(text) is False
     assert clarifier.gate_required(text, "agent") is True
 
 
-def test_answer_to_open_questions_is_never_small_talk():
+def test_gate_is_off_by_default():
+    """UX-2: карточка уточнения по умолчанию не появляется; флаг остаётся для отката."""
+    assert clarifier.gate_required("сделай отчёт по продажам", "agent") is False
+
+
+def test_answer_to_open_questions_is_never_small_talk(monkeypatch):
     """«да» / «ок» в ответ на вопросы уточнения должны попасть в TaskSpec, а не пропустить гейт."""
+    from aria.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "clarifier_gate_enabled", True)
     for reply in ("да", "ок", "нет", "yes", "ok"):
         assert clarifier.gate_required(reply, "agent", awaiting=True) is True
 

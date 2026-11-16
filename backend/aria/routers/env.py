@@ -7,15 +7,14 @@ GET; POST /api/env/reveal returns the raw value under runtime-token auth.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import logging
 import os
-from pathlib import Path
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 
 router = APIRouter(tags=["env"])
@@ -178,7 +177,7 @@ def _refresh_settings(request: Request | None = None) -> None:
             runner = getattr(request.app.state, "task_runner", None)
             if runner is not None:
                 runner.set_router(new_router)
-        except Exception:  # noqa: BLE001 - never fail saving a key because of this
+        except Exception:  # never fail saving a key because of this
             logging.getLogger("local_agent.env").exception("could not rebuild LLM router")
 
 
@@ -227,6 +226,33 @@ async def delete_env_var(
     _persist_env_var(key, None)
     _refresh_settings(request)
     return {"ok": True}
+
+
+@router.post("/messaging/telegram/connect")
+async def telegram_connect(
+    body: dict[str, str],
+    request: Request,
+    _: str = Depends(require_runtime_token),
+) -> dict[str, Any]:
+    """Link a Telegram bot without the dead Channels onboarding stub.
+
+    The token is written to .env and never echoed. The channel is normalised to
+    @name so the gate (`telegram_bot_token` + `telegram_chat_id`) lifts.
+    """
+    token = (body.get("token") or "").strip()
+    channel = (body.get("channel") or "").strip()
+    if not re.fullmatch(r"\d{6,12}:[A-Za-z0-9_-]{30,}", token):
+        raise HTTPException(status_code=400, detail="token must look like 123456789:AA...")
+    if channel and not channel.startswith("@"):
+        channel = "@" + channel
+    if not re.fullmatch(r"@[A-Za-z0-9_]{3,32}", channel):
+        raise HTTPException(status_code=400, detail="channel must look like @name")
+    os.environ["TELEGRAM_BOT_TOKEN"] = token
+    os.environ["TELEGRAM_CHAT_ID"] = channel
+    _persist_env_var("TELEGRAM_BOT_TOKEN", token)
+    _persist_env_var("TELEGRAM_CHAT_ID", channel)
+    _refresh_settings(request)
+    return {"ok": True, "channel": channel, "token_saved": True}
 
 
 @router.post("/env/reveal")

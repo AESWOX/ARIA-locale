@@ -357,6 +357,28 @@ def _scan_roots() -> list[Path]:
     return [r for r in roots if r.exists()]
 
 
+def _count_notes_capped(
+    path: Path, max_files: int = _MAX_NOTES_COUNTED, deadline: float | None = None
+) -> tuple[int, float, bool]:
+    """Считает .md в каталоге. Третье значение True, если счёт оборван по лимиту файлов или времени."""
+    n, newest, seen = 0, 0.0, 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            seen += 1
+            if seen > max_files or (deadline is not None and (seen & 0xFF) == 0 and time.monotonic() > deadline):
+                return n, newest, True
+            if fn.lower().endswith(".md"):
+                n += 1
+                try:
+                    newest = max(newest, os.stat(os.path.join(dirpath, fn)).st_mtime)
+                except OSError:
+                    pass
+        if deadline is not None and time.monotonic() > deadline:
+            return n, newest, True
+    return n, newest, False
+
+
 def _count_notes(path: Path) -> tuple[int, float]:
     n, newest = 0, 0.0
     for dirpath, dirnames, filenames in os.walk(path):
@@ -377,7 +399,30 @@ def _norm(p: Path | str) -> str:
     return os.path.normcase(os.path.abspath(str(p)))
 
 
+_DISCOVER_TTL_SEC = 60.0
+_DISCOVER_NOTE_CAP = 5000
+_discover_cache: dict[tuple[int, float, str], tuple[float, dict[str, Any]]] = {}
+
+
+def reset_discover_cache() -> None:
+    """Сбросить кэш discover() (для тестов и после смены хранилища)."""
+    _discover_cache.clear()
+
+
 def discover(max_depth: int = 3, time_budget_sec: float = 4.0) -> dict[str, Any]:
+    """Кэшируется на 60 с. Подсчёт заметок ограничен 5000 файлов на хранилище и общим бюджетом времени:
+    при обрыве у хранилища ``note_count_capped`` = True (значение «не менее»)."""
+    key = (max_depth, time_budget_sec, _norm(ov.vault_root()))
+    hit = _discover_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _DISCOVER_TTL_SEC:
+        return hit[1]
+    result = _discover_uncached(max_depth, time_budget_sec)
+    _discover_cache[key] = (time.monotonic(), result)
+    return result
+
+
+def _discover_uncached(max_depth: int, time_budget_sec: float) -> dict[str, Any]:
+    deadline = time.monotonic() + time_budget_sec
     current = _norm(ov.vault_root())
     found: dict[str, dict[str, Any]] = {}
 
@@ -389,10 +434,10 @@ def discover(max_depth: int = 3, time_budget_sec: float = 4.0) -> dict[str, Any]
             return
         if not path.is_dir():
             return
-        n, newest = _count_notes(path)
+        n, newest, capped = _count_notes_capped(path, _DISCOVER_NOTE_CAP, deadline)
         found[key] = {
             "path": str(path), "name": path.name or str(path), "sources": [source],
-            "is_obsidian_vault": (path / ".obsidian").is_dir(), "note_count": n,
+            "is_obsidian_vault": (path / ".obsidian").is_dir(), "note_count": n, "note_count_capped": capped,
             "last_modified": _dt.datetime.fromtimestamp(newest).isoformat(timespec="seconds") if newest else None,
             "open_in_obsidian": opened, "current": key == current,
         }
@@ -402,7 +447,6 @@ def discover(max_depth: int = 3, time_budget_sec: float = 4.0) -> dict[str, Any]
             if isinstance(v, dict) and v.get("path"):
                 add(Path(v["path"]), "obsidian", bool(v.get("open")))
 
-    deadline = time.monotonic() + time_budget_sec
     visited = 0
     for root in _scan_roots():
         stack = [(root, 0)]

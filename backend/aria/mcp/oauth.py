@@ -27,7 +27,8 @@ import secrets
 import stat
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx
@@ -49,7 +50,7 @@ class OAuthError(Exception):
 
 
 # Подмена в тестах: фабрика httpx-клиента (например, с MockTransport).
-_client_factory: Callable[[], httpx.AsyncClient] = lambda: httpx.AsyncClient(  # noqa: E731
+_client_factory: Callable[[], httpx.AsyncClient] = lambda: httpx.AsyncClient(
     timeout=HTTP_TIMEOUT, follow_redirects=False
 )
 
