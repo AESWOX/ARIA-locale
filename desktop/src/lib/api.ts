@@ -527,6 +527,14 @@ export const api = {
       body: form,
     });
   },
+  importSkillsZip: (file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return fetchJSON<{ ok: boolean; imported: string[]; skipped: string[] }>(
+      "/api/skills/import",
+      { method: "POST", body: form },
+    );
+  },
   createDirectory: (path: string) =>
     fetchJSON<ManagedFileWriteResponse>("/api/files/mkdir", {
       method: "POST",

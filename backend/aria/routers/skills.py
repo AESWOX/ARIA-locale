@@ -8,11 +8,13 @@ no results, so the SkillsPage renders and installs/uninstalls locally.
 """
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from aria import paths
 from aria.api.auth import require_runtime_token
@@ -193,6 +195,95 @@ async def create_skill(
             source_origin="manual",
         )
     return {"success": True, "message": f"created {name}", "path": str(md)}
+
+
+_MAX_ZIP_BYTES = 25 * 1024 * 1024
+_MAX_UNPACKED_BYTES = 64 * 1024 * 1024
+_MAX_ZIP_ENTRIES = 1000
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _safe_zip_path(name: str) -> bool:
+    """Reject absolute paths, drive letters and `..` segments (zip-slip)."""
+    normalized = name.replace("\\", "/")
+    if not normalized or normalized.startswith("/"):
+        return False
+    if len(normalized) > 1 and normalized[1] == ":":
+        return False
+    return all(part not in ("", ".", "..") for part in normalized.split("/"))
+
+
+def _import_skills_from_zip(data: bytes) -> tuple[list[str], list[str]]:
+    """Install every `<dir>/SKILL.md` bundle from the archive. Returns (imported, skipped)."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="not a zip archive") from exc
+    infos = archive.infolist()
+    if len(infos) > _MAX_ZIP_ENTRIES:
+        raise HTTPException(status_code=400, detail=f"zip has more than {_MAX_ZIP_ENTRIES} entries")
+    if sum(info.file_size for info in infos) > _MAX_UNPACKED_BYTES:
+        raise HTTPException(status_code=413, detail="unpacked size is larger than 64 MB")
+    for info in infos:
+        if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+            raise HTTPException(status_code=400, detail=f"symlink in zip: {info.filename}")
+        if not _safe_zip_path(info.filename):
+            raise HTTPException(status_code=400, detail=f"unsafe path in zip: {info.filename}")
+
+    bundles: dict[str, Path] = {}
+    for info in infos:
+        if info.is_dir():
+            continue
+        parts = Path(info.filename.replace("\\", "/")).parts
+        if len(parts) < 2 or parts[-1] != "SKILL.md" or not _SKILL_NAME_RE.match(parts[-2]):
+            continue
+        bundles.setdefault(parts[-2], Path(*parts[:-1]))
+
+    if not bundles:
+        raise HTTPException(status_code=400, detail="no SKILL.md found in the archive")
+
+    SKILLS_ROOT.mkdir(parents=True, exist_ok=True)
+    imported: list[str] = []
+    skipped: list[str] = []
+    with session_scope() as db:
+        for name, prefix in sorted(bundles.items()):
+            dest = SKILLS_ROOT / name
+            if dest.exists():
+                skipped.append(name)
+                continue
+            for info in infos:
+                if info.is_dir():
+                    continue
+                rel_path = Path(info.filename.replace("\\", "/"))
+                try:
+                    sub = rel_path.relative_to(prefix)
+                except ValueError:
+                    continue
+                target = dest / sub
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(info))
+            repo.upsert_skill(
+                db,
+                name,
+                category="imported",
+                status=SkillStatus.active,
+                source_origin="import",
+            )
+            imported.append(name)
+    return imported, skipped
+
+
+@router.post("/skills/import")
+async def import_skills(
+    file: UploadFile = File(...),
+    _: str = Depends(require_runtime_token),
+) -> dict[str, Any]:
+    """Import skill bundles from a .zip: every folder with SKILL.md becomes a skill."""
+    data = await file.read(_MAX_ZIP_BYTES + 1)
+    if len(data) > _MAX_ZIP_BYTES:
+        raise HTTPException(status_code=413, detail="zip is larger than 25 MB")
+    imported, skipped = _import_skills_from_zip(data)
+    return {"ok": True, "imported": imported, "skipped": skipped}
 
 
 @router.put("/skills/content")
