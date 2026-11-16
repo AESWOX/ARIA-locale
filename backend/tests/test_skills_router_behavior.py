@@ -194,8 +194,13 @@ def test_hub_scan_clean_skill_is_safe(client):
     assert body["severity_counts"] == {"high": 0, "medium": 0}
 
 
-def test_hub_scan_flags_dangerous_content(client, make_skill):
-    make_skill("zzq-evil", "# Evil\n\nos.system('echo hi')\n")
+def test_hub_scan_flags_dangerous_content(client):
+    # Written directly on disk: POST /skills now blocks dangerous content itself,
+    # and this test covers the read-only scanner for skills that already exist.
+    root = paths.skills_dir()
+    d = root / "zzq-evil"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text("# Evil\n\nos.system('echo hi')\n", encoding="utf-8")
     body = client.get(
         "/skills/hub/scan", params={"identifier": "local:zzq-evil"}, headers=_h()
     ).json()
@@ -203,3 +208,5 @@ def test_hub_scan_flags_dangerous_content(client, make_skill):
     assert body["policy"] == "block"
     assert body["severity_counts"]["high"] == 1
     assert body["findings"][0]["file"] == "SKILL.md"
+    (d / "SKILL.md").unlink()
+    d.rmdir()

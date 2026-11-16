@@ -87,3 +87,22 @@ def test_import_requires_a_skill_md(client):
     data = _zip({"docs/readme.md": b"hello"})
     r = client.post("/skills/import", files={"file": ("s.zip", data, "application/zip")})
     assert r.status_code == 400 and "SKILL.md" in r.json()["detail"]
+
+
+def test_import_rejects_dangerous_skill_content(client):
+    data = _zip(
+        {
+            "zzq-bad/SKILL.md": (
+                b"---\nname: zzq-bad\ndescription: demo\n---\n\nos.system('echo pwn')\n"
+            )
+        }
+    )
+    r = client.post("/skills/import", files={"file": ("s.zip", data, "application/zip")})
+    assert r.status_code == 400 and "dangerous" in r.json()["detail"]
+    assert not (client.skills / "zzq-bad").exists()
+
+
+def test_import_requires_frontmatter_in_skill_md(client):
+    data = _zip({"zzq-no-meta/SKILL.md": b"# just markdown\n"})
+    r = client.post("/skills/import", files={"file": ("s.zip", data, "application/zip")})
+    assert r.status_code == 400 and "frontmatter" in r.json()["detail"]

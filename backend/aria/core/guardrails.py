@@ -66,7 +66,7 @@ class ToolGuardrailDecision:
 class GuardrailConfig:
     """Thresholds for per-turn tool-call loop detection."""
     warnings_enabled: bool = True
-    hard_stop_enabled: bool = False
+    hard_stop_enabled: bool = True
     exact_failure_warn_after: int = 2
     exact_failure_block_after: int = 5
     same_tool_failure_warn_after: int = 3
