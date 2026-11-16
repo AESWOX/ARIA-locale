@@ -30,13 +30,13 @@
       #boot-splash .bs-ring circle { fill: none; stroke-width: 3; stroke-linecap: round; }
       #boot-splash .bs-ring .bs-track { stroke: rgba(220, 236, 231, 0.10); }
       #boot-splash .bs-ring .bs-arc {
-        stroke: #5cf2c4; stroke-dasharray: 90 270; transform-origin: 66px 66px;
+        stroke: #5cf2c4; stroke-dasharray: 26 74; transform-origin: 66px 66px;
         animation: bs-spin 1.4s linear infinite;
       }
       #boot-splash .bs-halo {
-        position: absolute; left: 50%; top: 50%; width: 190px; height: 190px;
+        position: absolute; left: 50%; top: 50%; width: 108px; height: 108px;
         transform: translate(-50%, -50%); border-radius: 50%;
-        background: radial-gradient(circle, rgba(92, 242, 196, 0.22) 0%, rgba(92, 242, 196, 0) 68%);
+        background: radial-gradient(circle, rgba(92, 242, 196, 0.30) 0%, rgba(92, 242, 196, 0.12) 55%, rgba(92, 242, 196, 0) 100%);
         pointer-events: none;
       }
       #boot-splash .bs-ring text {
@@ -79,7 +79,7 @@
         <div class="bs-halo" aria-hidden="true"></div>
         <svg class="bs-ring" viewBox="0 0 132 132" aria-hidden="true">
           <circle class="bs-track" cx="66" cy="66" r="54" />
-          <circle class="bs-arc" cx="66" cy="66" r="54" />
+          <circle class="bs-arc" cx="66" cy="66" r="54" pathLength="100" />
           <text x="66" y="67">ARIA</text>
         </svg>
       </div>
