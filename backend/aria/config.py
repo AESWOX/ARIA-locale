@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     approval_ttl_default_hours: int = 24
     approval_ttl_budget_escalation_minutes: int = 30
     approval_ttl_shell_high_risk_hours: int = 2
+    # "allow always" approvals live in the session ledger for this long
+    approval_ledger_ttl_hours: int = 24
+    # hard cap on approval cards requested by one task (0 disables the cap)
+    agent_max_approvals_per_task: int = 8
 
     # --- §7.2 delegation ---
     delegate_max_depth: int = 1

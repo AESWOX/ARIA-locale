@@ -89,7 +89,7 @@ def test_no_dynamic_values_in_system_text():
     prompt_texts += [chat_mod.SYSTEM_PROMPT, loop._load_persona()]
     loop_lines = (BACKEND / "aria" / "core" / "loop.py").read_text(encoding="utf-8").splitlines()
     start = next(i for i, line in enumerate(loop_lines) if "role_prompt =" in line)
-    stop = next(i for i, line in enumerate(loop_lines[start:], start=start) if "iterations = 0" in line)
+    stop = next(i for i, line in enumerate(loop_lines[start:], start=start) if "while iterations < max_iterations" in line)
     prompt_texts.append("\n".join(loop_lines[start:stop]))
     prompt_texts.append((BACKEND / "aria" / "core" / "roles.py").read_text(encoding="utf-8"))
     prompt_texts.append((BACKEND / "aria" / "core" / "runprofile.py").read_text(encoding="utf-8"))

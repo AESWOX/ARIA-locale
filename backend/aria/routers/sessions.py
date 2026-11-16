@@ -590,6 +590,16 @@ async def approve_attention(item_id: uuid.UUID, request: Request, _: str = Depen
     from aria.core.events import event_bus
     from aria.db.enums import AttentionType
 
+    # "allow once" (default) lifts this card only; "allow always" also stores the exact
+    # (session, tool, args hash) in the session ledger so identical calls stop asking.
+    approval_mode = "once"
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict) and body.get("mode") in ("once", "always"):
+        approval_mode = str(body["mode"])
+
     with session_scope() as db:
         item = repo.get_attention_item(db, item_id)
         if item is None:
@@ -605,6 +615,28 @@ async def approve_attention(item_id: uuid.UUID, request: Request, _: str = Depen
     is_estimate = (
         resolved.type == AttentionType.budget_escalation and payload.get("kind") == "estimate"
     )
+    if approval_mode == "always" and resolved.type in (
+        AttentionType.high_risk_shell,
+        AttentionType.mcp_tool_approval,
+        AttentionType.preference_update,
+        AttentionType.untrusted_context_override,
+    ):
+        from aria.core import approval_ledger
+
+        tool_name = str(
+            payload.get("tool_name")
+            or ("shell_execute" if resolved.type == AttentionType.high_risk_shell else "")
+        )
+        if tool_name == "shell_execute" and "command" in payload:
+            arguments = {"command": payload.get("command")}
+        else:
+            arguments = dict(payload.get("arguments") or {})
+        if tool_name:
+            with session_scope() as db:
+                approval_ledger.record(
+                    db, resolved.session_id, tool_name, arguments,
+                    mode="always", task_id=resolved.task_id,
+                )
     if (
         resolved.type in (AttentionType.high_risk_shell, AttentionType.mcp_tool_approval, AttentionType.preference_update)
         or is_estimate

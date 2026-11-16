@@ -29,7 +29,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
-from aria.core import approvals, role_models, runprofile, toolhooks
+from aria.core import (
+    approval_ledger,
+    approvals,
+    loop_state,
+    role_models,
+    runprofile,
+    toolhooks,
+)
 from aria.core.audit import run_audit
 from aria.core.events import event_bus
 from aria.core.guardrails import ToolCallGuardrailController
@@ -362,6 +369,12 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         if task.status not in (TaskStatus.approved, TaskStatus.in_progress, TaskStatus.needs_rework):
             raise ValueError(f"task {task_id} is not runnable from status={task.status}")
 
+        # 0.2.1: бюджет шагов и guardrails переживают паузу на Approve. Продолжаем счётчики только
+        # для возобновления задачи (in_progress); новый запуск и rework начинают бюджет заново.
+        saved_state = loop_state.load(db, task_id) if task.status == TaskStatus.in_progress else {}
+        if not saved_state:
+            loop_state.clear(db, task_id)
+
         repo.set_task_status(db, task, TaskStatus.in_progress)
         event_bus.emit("task.status_changed", {"status": TaskStatus.in_progress.value}, session_id=session.id, task_id=task.id, db=db)
 
@@ -491,25 +504,50 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
     if _hint:
         role_prompt += "\n\n" + _hint
 
-    iterations = 0
+    iterations = int(saved_state.get("iterations", 0) or 0)
     guardrails = ToolCallGuardrailController()
+    loop_state.restore_guardrails(guardrails, saved_state.get("guardrails"))
     delegate_failures: dict[tuple[str, str], int] = {}
-    repeat_suppressed = 0
+    repeat_suppressed = int(saved_state.get("repeat_suppressed", 0) or 0)
+    approval_requests = int(saved_state.get("approvals", 0) or 0)
     # E7: потолок вызовов модели и жёсткий бюджет задачи.
     call_limit = int(
         settings.agent_max_llm_calls_subagent if delegation_depth > 0 else settings.agent_max_llm_calls
     )
     if call_limit <= 0:
         call_limit = 10 ** 9
+    approval_limit = int(getattr(settings, "agent_max_approvals_per_task", 8) or 0)
     max_iterations = max(int(settings.loop_max_iterations), call_limit) + 1
     hard_budget = float(getattr(settings, "budget_task_hard_usd", 0) or 0)
     budget_warned = False
     step_warned = False
     step_warn_at = max(1, int(call_limit * 0.8))
 
+    def _persist_state(db: OrmSession) -> None:
+        loop_state.save(db, task_id, {
+            "iterations": iterations,
+            "repeat_suppressed": repeat_suppressed,
+            "approvals": approval_requests,
+            "guardrails": loop_state.dump_guardrails(guardrails),
+        })
+
+    def _register_approval(db: OrmSession) -> str | None:
+        """Count one approval card; return the abort message when the per-task cap is hit."""
+        nonlocal approval_requests
+        if approval_limit > 0 and approval_requests >= approval_limit:
+            return (
+                f"Остановлено: задача запросила подтверждение {approval_requests} раз(а) "
+                f"при лимите {approval_limit}. Нужно другое решение или новая задача."
+            )
+        approval_requests += 1
+        _persist_state(db)
+        return None
+
     while iterations < max_iterations:
         iterations += 1
         if iterations > call_limit:
+            with session_scope() as db:
+                _persist_state(db)
             await _abort_task(
                 task_id,
                 "step_limit",
@@ -555,6 +593,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                 logger.info("task %s paused awaiting_attention, stopping loop iteration", task_id)
                 return  # loop будет продолжен вызовом resume_after_approval
             session_id_for_compression = session.id
+            _persist_state(db)
 
         # ВНЕ session_scope(): сетевой запрос компрессии не должен держать
         # writer-lock на всё время HTTP round-trip (см. docstring модуля).
@@ -642,8 +681,10 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         approval_ctx = None
         _parent_paused = False
         session_repeat_abort: str | None = None
+        approval_limit_hit: str | None = None
         delegate_batch: list[dict] = []  # B5-D1: delegate_task из одного ответа исполняются пачкой, параллельно
         for call in response.tool_calls:
+            ledger_approved = False
             with session_scope() as db:
                 task = repo.get_task(db, task_id)
                 session = repo.get_session(db, task.session_id)
@@ -682,43 +723,62 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                             "output": {"message": "Этот вызов уже выполнен, его результат выше. Не повторяй его: дай итоговый ответ."},
                         },
                     )
+                    _persist_state(db)
                     continue
 
                 if call.tool_name.startswith("mcp__") and spec.requires_approval:
                     # H7: тул стороннего MCP-сервера, который может менять данные, — только после Approve.
                     from aria.mcp.manager import get_manager as _mcp_mgr
 
-                    origin = _mcp_mgr().origin(call.tool_name) or ("", "")
-                    item = approvals.request_mcp_tool_approval(
-                        db, session, task, call.tool_name, call.arguments, server=origin[0], tool=origin[1],
-                    )
-                    event_bus.emit(
-                        "attention_item.created",
-                        {"id": str(item.id), "type": item.type.value, "title": item.title},
-                        session_id=session.id,
-                        task_id=task.id,
-                        db=db,
-                    )
-                    event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
-                    approval_ctx = (session.id, task.id, str(item.id), f"{call.tool_name} {json.dumps(call.arguments, ensure_ascii=False, default=str)[:300]}")
-                    break  # пауза до Approve; остальные tool calls ответа отбрасываются
+                    if approval_ledger.consume(db, session.id, call.tool_name, call.arguments) is not None:
+                        logger.info("task %s: %s allowed by the session approval ledger", task_id, call.tool_name)
+                        ledger_approved = True
+                    else:
+                        _limit = _register_approval(db)
+                        if _limit is not None:
+                            approval_limit_hit = _limit
+                            repo.append_message(db, session, role="tool", content=f"{call.tool_name} -> approval_limit: {_limit}")
+                            break
+                        origin = _mcp_mgr().origin(call.tool_name) or ("", "")
+                        item = approvals.request_mcp_tool_approval(
+                            db, session, task, call.tool_name, call.arguments, server=origin[0], tool=origin[1],
+                        )
+                        event_bus.emit(
+                            "attention_item.created",
+                            {"id": str(item.id), "type": item.type.value, "title": item.title},
+                            session_id=session.id,
+                            task_id=task.id,
+                            db=db,
+                        )
+                        event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                        approval_ctx = (session.id, task.id, str(item.id), f"{call.tool_name} {json.dumps(call.arguments, ensure_ascii=False, default=str)[:300]}")
+                        break  # пауза до Approve; остальные tool calls ответа отбрасываются
 
-                if call.tool_name == "memory_save" and str((call.arguments or {}).get("layer") or "") == "preference":
-                    # L6: правка vault/preferences.md — только после Approve владельца.
-                    item = approvals.request_preference_update_approval(db, session, task, dict(call.arguments or {}))
-                    event_bus.emit(
-                        "attention_item.created",
-                        {"id": str(item.id), "type": item.type.value, "title": item.title},
-                        session_id=session.id,
-                        task_id=task.id,
-                        db=db,
-                    )
-                    event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
-                    approval_ctx = (
-                        session.id, task.id, str(item.id),
-                        f"memory_save preference: {str(call.arguments.get('content'))[:120]}",
-                    )
-                    break  # пауза до Approve; остальные tool calls ответа отбрасываются
+                if call.tool_name == "memory_save" and str((call.arguments or {}).get("layer") or "") == "preference" and not ledger_approved:
+                    if approval_ledger.consume(db, session.id, call.tool_name, call.arguments) is not None:
+                        logger.info("task %s: %s allowed by the session approval ledger", task_id, call.tool_name)
+                        ledger_approved = True
+                    else:
+                        _limit = _register_approval(db)
+                        if _limit is not None:
+                            approval_limit_hit = _limit
+                            repo.append_message(db, session, role="tool", content=f"{call.tool_name} -> approval_limit: {_limit}")
+                            break
+                        # L6: правка vault/preferences.md — только после Approve владельца.
+                        item = approvals.request_preference_update_approval(db, session, task, dict(call.arguments or {}))
+                        event_bus.emit(
+                            "attention_item.created",
+                            {"id": str(item.id), "type": item.type.value, "title": item.title},
+                            session_id=session.id,
+                            task_id=task.id,
+                            db=db,
+                        )
+                        event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                        approval_ctx = (
+                            session.id, task.id, str(item.id),
+                            f"memory_save preference: {str(call.arguments.get('content'))[:120]}",
+                        )
+                        break  # пауза до Approve; остальные tool calls ответа отбрасываются
 
                 # Этап 3: политика auto/approve/deny до исполнения.
                 from aria.core import action_policy
@@ -742,23 +802,32 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     )
                     continue
                 if policy.action == "approve":
-                    item = approvals.request_tool_approval(
-                        db, session, task, call.tool_name, dict(call.arguments or {}),
-                        summary=policy.summary or call.tool_name,
-                        reason=policy.reason,
-                        type_=(AttentionType.untrusted_context_override
-                               if policy.code == "untrusted_context" else AttentionType.mcp_tool_approval),
-                    )
-                    event_bus.emit(
-                        "attention_item.created",
-                        {"id": str(item.id), "type": item.type.value, "title": item.title},
-                        session_id=session.id,
-                        task_id=task.id,
-                        db=db,
-                    )
-                    event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
-                    approval_ctx = (session.id, task.id, str(item.id), policy.summary or call.tool_name)
-                    break
+                    if not ledger_approved and approval_ledger.consume(db, session.id, call.tool_name, call.arguments) is not None:
+                        logger.info("task %s: %s allowed by the session approval ledger", task_id, call.tool_name)
+                        ledger_approved = True
+                    if not ledger_approved:
+                        _limit = _register_approval(db)
+                        if _limit is not None:
+                            approval_limit_hit = _limit
+                            repo.append_message(db, session, role="tool", content=f"{call.tool_name} -> approval_limit: {_limit}")
+                            break
+                        item = approvals.request_tool_approval(
+                            db, session, task, call.tool_name, dict(call.arguments or {}),
+                            summary=policy.summary or call.tool_name,
+                            reason=policy.reason,
+                            type_=(AttentionType.untrusted_context_override
+                                   if policy.code == "untrusted_context" else AttentionType.mcp_tool_approval),
+                        )
+                        event_bus.emit(
+                            "attention_item.created",
+                            {"id": str(item.id), "type": item.type.value, "title": item.title},
+                            session_id=session.id,
+                            task_id=task.id,
+                            db=db,
+                        )
+                        event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                        approval_ctx = (session.id, task.id, str(item.id), policy.summary or call.tool_name)
+                        break
 
                 if call.tool_name == "shell_execute":
                     command = call.arguments.get("command", "")
@@ -779,17 +848,26 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                         continue
                     # Рельсы: allowlisted-команда внутри проекта идёт сама; остальное — Approve.
                     if classify_shell_command(command) != "allow":
-                        item = approvals.check_command_and_maybe_request_approval(db, session, task, command)
-                        event_bus.emit(
-                            "attention_item.created",
-                            {"id": str(item.id), "type": item.type.value, "title": item.title},
-                            session_id=session.id,
-                            task_id=task.id,
-                            db=db,
-                        )
-                        event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
-                        approval_ctx = (session.id, task.id, str(item.id), command)
-                        break  # пауза: остальные tool calls ответа отбрасываются (как раньше при return)
+                        if not ledger_approved and approval_ledger.consume(db, session.id, call.tool_name, call.arguments) is not None:
+                            logger.info("task %s: %s allowed by the session approval ledger", task_id, call.tool_name)
+                            ledger_approved = True
+                        if not ledger_approved:
+                            _limit = _register_approval(db)
+                            if _limit is not None:
+                                approval_limit_hit = _limit
+                                repo.append_message(db, session, role="tool", content=f"{call.tool_name} -> approval_limit: {_limit}")
+                                break
+                            item = approvals.check_command_and_maybe_request_approval(db, session, task, command)
+                            event_bus.emit(
+                                "attention_item.created",
+                                {"id": str(item.id), "type": item.type.value, "title": item.title},
+                                session_id=session.id,
+                                task_id=task.id,
+                                db=db,
+                            )
+                            event_bus.emit("task.status_changed", {"status": TaskStatus.awaiting_attention.value}, session_id=session.id, task_id=task.id, db=db)
+                            approval_ctx = (session.id, task.id, str(item.id), command)
+                            break  # пауза: остальные tool calls ответа отбрасываются (как раньше при return)
 
                 # Создаём ToolCall запись для всех tool call'ов
                 tool_call_row = repo.start_tool_call(
@@ -857,6 +935,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                         db, session, role="tool",
                         content=f"{spec.tool_name} -> guardrail_blocked: {guardrail_decision.message}",
                     )
+                    _persist_state(db)
                 continue
 
             if guardrail_decision.action == "warn":
@@ -887,7 +966,8 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                 continue
 
             output, status, error_code, error_message = await _execute_tool(
-                spec, call.arguments, sandbox_root, router=router, task_id=task_id,
+                spec, call.arguments, sandbox_root, approved=bool(ledger_approved and spec.tool_name == "shell_execute"),
+                router=router, task_id=task_id,
                 shell_root=agent_shell_root, agent_shell=agent_shell,
             )
 
@@ -908,6 +988,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     task_id=task.id,
                     db=db,
                 )
+                _persist_state(db)
 
             await toolhooks.post_tool(
                 spec.tool_name, call.arguments, output, status.value,
@@ -918,6 +999,10 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     "on_error", session_id=task.session_id, task_id=task_id,
                     tool=spec.tool_name, code=error_code, message=error_message,
                 )
+
+        if approval_limit_hit is not None:
+            await _abort_task(task_id, "approval_limit", approval_limit_hit)
+            return
 
         if session_repeat_abort is not None:
             await _abort_task(task_id, "loop_detected", session_repeat_abort)
@@ -931,9 +1016,13 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
 
         if _parent_paused and approval_ctx is None:
             logger.info("task %s paused: its sub-task awaits owner approval", task_id)
+            with session_scope() as db:
+                _persist_state(db)
             return  # продолжит deliver_child_result + execute_agent_loop (Approve) или отказ (Reject)
 
         if approval_ctx is not None:
+            with session_scope() as db:
+                _persist_state(db)
             await toolhooks.lifecycle(
                 "on_approval", session_id=approval_ctx[0], task_id=approval_ctx[1],
                 state="requested", item_id=approval_ctx[2], command=approval_ctx[3],
