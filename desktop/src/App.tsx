@@ -42,7 +42,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
-  RotateCw,
   Settings,
   Shield,
   Sparkles,
@@ -954,15 +953,7 @@ function SidebarSystemActions({
     useSystemActions();
   const canUpdateARIA = status?.can_update_aria === true;
 
-  const items: SystemActionItem[] = [
-    {
-      action: "restart",
-      icon: RotateCw,
-      label: t.status.restartGateway,
-      runningLabel: t.status.restartingGateway,
-      spin: true,
-    },
-  ];
+  const items: SystemActionItem[] = [];
   if (canUpdateARIA) {
     items.push({
       action: "update",

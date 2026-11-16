@@ -15,10 +15,7 @@
       #boot-splash {
         position: fixed; inset: 0; z-index: 2147483001;
         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px;
-        background:
-          radial-gradient(ellipse at 50% 34%, rgba(92, 242, 196, 0.10) 0%, rgba(92, 242, 196, 0) 46%),
-          radial-gradient(ellipse at 50% 118%, rgba(96, 76, 190, 0.12) 0%, rgba(96, 76, 190, 0) 58%),
-          linear-gradient(158deg, #0c0f15 0%, #07090d 52%, #020304 100%);
+        background: linear-gradient(158deg, #0c0f15 0%, #07090d 52%, #020304 100%);
         color: #dcece7;
         font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
         transition: opacity 0.4s ease;
@@ -30,14 +27,8 @@
       #boot-splash .bs-ring circle { fill: none; stroke-width: 3; stroke-linecap: round; }
       #boot-splash .bs-ring .bs-track { stroke: rgba(220, 236, 231, 0.10); }
       #boot-splash .bs-ring .bs-arc {
-        stroke: #5cf2c4; stroke-dasharray: 26 74; transform-origin: 66px 66px;
+        stroke: #dcece7; stroke-dasharray: 26 74; transform-origin: 66px 66px;
         animation: bs-spin 1.4s linear infinite;
-      }
-      #boot-splash .bs-halo {
-        position: absolute; left: 50%; top: 50%; width: 108px; height: 108px;
-        transform: translate(-50%, -50%); border-radius: 50%;
-        background: radial-gradient(circle, rgba(92, 242, 196, 0.30) 0%, rgba(92, 242, 196, 0.12) 55%, rgba(92, 242, 196, 0) 100%);
-        pointer-events: none;
       }
       #boot-splash .bs-ring text {
         fill: #e7f7f1; font-size: 26px; font-weight: 700; letter-spacing: 3px;
@@ -56,8 +47,8 @@
       #boot-splash .bs-phrases span:nth-child(5) { animation-delay: 12s; }
       #boot-splash .bs-bar { width: 180px; height: 2px; overflow: hidden; background: rgba(220, 236, 231, 0.10); border-radius: 2px; }
       #boot-splash .bs-bar i {
-        display: block; width: 40%; height: 100%; background: #5cf2c4; border-radius: 2px;
-        box-shadow: 0 0 8px rgba(92, 242, 196, 0.9); animation: bs-slide 1.3s ease-in-out infinite;
+        display: block; width: 40%; height: 100%; background: #dcece7; border-radius: 2px;
+        box-shadow: 0 0 6px rgba(220, 236, 231, 0.55); animation: bs-slide 1.3s ease-in-out infinite;
       }
       @keyframes bs-spin { to { transform: rotate(360deg); } }
       @keyframes bs-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(260%); } }
@@ -76,7 +67,6 @@
   <body>
     <div id="boot-splash" role="status" aria-live="polite">
       <div style="position:relative;width:132px;height:132px;display:flex;align-items:center;justify-content:center">
-        <div class="bs-halo" aria-hidden="true"></div>
         <svg class="bs-ring" viewBox="0 0 132 132" aria-hidden="true">
           <circle class="bs-track" cx="66" cy="66" r="54" />
           <circle class="bs-arc" cx="66" cy="66" r="54" pathLength="100" />
