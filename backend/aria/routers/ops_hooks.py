@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -52,7 +52,7 @@ async def ops_hooks_create(payload: dict[str, Any], _: str = Depends(require_run
         "command": command,
         "timeout": timeout,
         "allowed": approved,
-        "approved_at": datetime.now(timezone.utc).isoformat() if approved else None,
+        "approved_at": datetime.now(UTC).isoformat() if approved else None,
         "executable": approved,
     })
     save_hooks(hooks)

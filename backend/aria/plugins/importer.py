@@ -15,10 +15,11 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 
@@ -387,7 +388,7 @@ def save_registry(entries: list[dict]) -> None:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def stage_tree(src: Path, dest: Path) -> None:

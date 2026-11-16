@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from aria.core import approvals, taskspec
-from aria.core.taskspec import MAX_CLARIFY_ROUNDS, TaskSpec, default_criterion, derive_spec
+from aria.core.taskspec import (
+    MAX_CLARIFY_ROUNDS,
+    TaskSpec,
+    default_criterion,
+    derive_spec,
+)
 from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import TaskStatus
@@ -470,7 +475,7 @@ def _merge_payload(spec: TaskSpec, payload: dict) -> list[str]:
             continue
         try:
             spec.acceptance_criteria.append(taskspec.AcceptanceCriterion(**raw))
-        except Exception:  # noqa: BLE001 — непроверяемый критерий от модели просто не берём
+        except Exception:  # непроверяемый критерий от модели просто не берём
             logger.info("clarifier: критерий отклонён как непроверяемый: %s", raw)
     for raw in payload.get("assumptions") or []:
         text = str(raw).strip()
@@ -504,7 +509,7 @@ def _apply_assumptions(spec: TaskSpec, parts: list[str]) -> None:
         if existing.startswith("принял:"):
             spec.assumptions[i] = f"{existing.rstrip('.')}; {line[len('принял: '):]}"
             return
-    spec.assumptions = _dedupe(list(spec.assumptions) + [line])
+    spec.assumptions = _dedupe([*list(spec.assumptions), line])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -518,7 +523,7 @@ def load_spec(db, task_id: uuid.UUID) -> TaskSpec | None:
         return None
     try:
         return TaskSpec(**dict(row.spec_json or {}))
-    except Exception:  # noqa: BLE001 — битая версия не должна ронять весь путь
+    except Exception:  # битая версия не должна ронять весь путь
         logger.warning("clarifier: TaskSpec задачи %s не читается, считаем отсутствующим", str(task_id)[:8])
         return None
 
@@ -614,7 +619,7 @@ async def run_gate(
         if router is not None:
             try:
                 payload = await _ask_model(router, content, spec, context=context, task_id=task_id)
-            except Exception as exc:  # noqa: BLE001 — clarifier недоступен, работаем детерминированно
+            except Exception as exc:  # clarifier недоступен, работаем детерминированно
                 logger.warning("clarifier недоступен (%s), гейт работает детерминированно", type(exc).__name__)
                 payload = {}
         new_assumptions += _merge_payload(spec, payload)

@@ -25,24 +25,29 @@ import uuid
 from pathlib import Path
 
 import httpx
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
-from aria.core import approvals, role_models, runprofile
+from aria.core import approvals, role_models, runprofile, toolhooks
 from aria.core.audit import run_audit
 from aria.core.events import event_bus
-from aria.llm import compression
+from aria.core.guardrails import ToolCallGuardrailController
 from aria.core.roles import get_role
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import AttentionType, AuditVerdict, SourceTrust, TaskStatus, ToolStatus
+from aria.db.enums import (
+    AttentionType,
+    AuditVerdict,
+    SourceTrust,
+    TaskStatus,
+    ToolStatus,
+)
+from aria.llm import compression
 from aria.llm.providers.base import ChatMessage
 from aria.llm.router import ProviderRouter, ProviderUnavailable, tried_suffix
 from aria.tools.registry import get_tool
-from aria.core import toolhooks
 from aria.tools.validators import (
     ToolValidationError,
     assert_role_allowed,
@@ -50,7 +55,6 @@ from aria.tools.validators import (
     command_rejection_reason,
     is_windows_command,
 )
-from aria.core.guardrails import ToolCallGuardrailController
 
 logger = logging.getLogger("local_agent.loop")
 
@@ -160,7 +164,7 @@ def _fold_tool_output(sandbox_root: str, task_id, ref, output) -> dict:
     """E6: длинный вывод пишем в sandbox/.tool_output/<task>/<ref>.txt и отдаём ref в контекст."""
     try:
         threshold = int(get_settings().tool_result_fold_chars)
-    except Exception:  # noqa: BLE001 — сбой диска не должен ронять вызов/транзакцию
+    except Exception:  # сбой диска не должен ронять вызов/транзакцию
         threshold = 3000
     try:
         body = json.dumps(output, ensure_ascii=False, default=str)
@@ -172,7 +176,7 @@ def _fold_tool_output(sandbox_root: str, task_id, ref, output) -> dict:
         directory = Path(sandbox_root) / ".tool_output" / str(task_id)
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"{ref}.txt").write_text(body, encoding="utf-8")
-    except Exception:  # noqa: BLE001 — сбой диска не должен ронять вызов/транзакцию
+    except Exception:  # сбой диска не должен ронять вызов/транзакцию
         logger.warning("folded tool output could not be stored, falling back to truncation", exc_info=True)
         return {}
     return {"fold_ref": str(ref), "folded_chars": len(body)}
@@ -372,11 +376,11 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         _mcp = _get_mcp()
         await _mcp.ensure_loaded()
         tool_whitelist = tuple(role.tool_whitelist) + _mcp.tool_names_for_role(role.role_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("MCP tools unavailable for task %s", task_id, exc_info=True)
     if agent_shell:
         # P0 A2: тумблер включён — добавляем shell РОЛИ general только на время этой задачи.
-        tool_whitelist = tuple(tool_whitelist) + ("shell_execute",)
+        tool_whitelist = (*tuple(tool_whitelist), "shell_execute")
     tool_schemas = _tool_schemas_for_role(tool_whitelist)
     allowed_provider_ids: frozenset[str] | None = None
     with session_scope() as db:
@@ -465,7 +469,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         _memory = _memory_store.recall_block(task.objective or "")
         if _memory:
             role_prompt += "\n\n" + _memory
-    except Exception:  # noqa: BLE001 — recall must not break the task
+    except Exception:  # recall must not break the task
         logger.warning("agent memory recall failed for task %s", task_id, exc_info=True)
     try:
         from aria.storage.obsidian_vault import relevant_block as _vault_block
@@ -473,7 +477,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         _vault = _vault_block(task.objective or "")
         if _vault:
             role_prompt += "\n\n" + _vault
-    except Exception:  # noqa: BLE001 — notes must not break the task
+    except Exception:  # notes must not break the task
         logger.warning("agent vault recall failed for task %s", task_id, exc_info=True)
     try:
         from aria.core import recall_honesty
@@ -481,7 +485,7 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         _honesty = recall_honesty.missing_note(task.objective or "", [_memory, _vault])
         if _honesty:
             role_prompt += "\n\n" + _honesty
-    except Exception:  # noqa: BLE001 — a note must not break the task
+    except Exception:  # a note must not break the task
         logger.warning("agent recall honesty note failed for task %s", task_id, exc_info=True)
     _hint = runprofile.thinking_hint(profile)
     if _hint:
@@ -599,7 +603,11 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         # L0 §4: диагностика отказа — строка в лог, без повторов и без текста.
         refused = False
         if bool(getattr(settings, "refusal_detection_enabled", True)):
-            from aria.core.refusal import finish_reason_from_response, is_model_refusal, log_refusal
+            from aria.core.refusal import (
+                finish_reason_from_response,
+                is_model_refusal,
+                log_refusal,
+            )
 
             refused = is_model_refusal(
                 response.text,
@@ -1004,8 +1012,8 @@ async def _execute_tool(
 ):
     # Аргументы приходят от модели: сверяем с input_schema ДО handler'а. Ошибка уходит модели понятным
     # текстом (какой аргумент и что не так), а не «KeyError: 'path'» и не молчаливым «ok» на пустой вызов.
-    from aria.tools.validators import validate_tool_input
     from aria import secretguard
+    from aria.tools.validators import validate_tool_input
 
     # SEC-6: секрет из модели/вывода не попадает в аргументы shell и других инструментов.
     arguments = secretguard.mask_obj(arguments)
@@ -1034,7 +1042,7 @@ async def _execute_tool(
         return output, ToolStatus.ok, None, None
     except TimeoutError:
         return None, ToolStatus.timeout, "tool_timeout", f"{spec.tool_name} exceeded {spec.timeout_sec}s"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return None, ToolStatus.error, "tool_error", str(exc)
 
 
@@ -1095,7 +1103,7 @@ async def _finalize_task_inner(task_id: uuid.UUID, router: ProviderRouter) -> tu
             if getattr(report, "verdict", None) == AuditVerdict.needs_info:
                 try:
                     repo.set_task_status(db, task, TaskStatus.awaiting_clarification)
-                except Exception:  # noqa: BLE001 — переход мог быть уже совершён
+                except Exception:  # переход мог быть уже совершён
                     logger.info("needs_info: статус задачи %s уже изменён", str(task.id)[:8])
                 try:
                     session_row = repo.get_session(db, task.session_id)
@@ -1106,9 +1114,9 @@ async def _finalize_task_inner(task_id: uuid.UUID, router: ProviderRouter) -> tu
                                     + "; ".join(list(getattr(report, 'missing_requirements', []) or [])[:5])
                                     or "Аудит запросил уточнение контракта (needs_info).",
                         )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("needs_info: не удалось записать сообщение в чат")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("audit crashed for task %s", task_id)
             repo.set_task_status(db, task, TaskStatus.failed, error_code="audit_crash", error_message=str(exc))
             event_bus.emit("task.status_changed", {"status": "failed"}, session_id=session.id, task_id=task.id, db=db)
@@ -1155,7 +1163,7 @@ async def resume_after_approval(task_id: uuid.UUID, router: ProviderRouter, sand
             from aria.mcp.manager import get_manager as _mcp_mgr
 
             await _mcp_mgr().ensure_loaded()  # после перезапуска тулы MCP ещё не зарегистрированы
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("MCP not available while resuming task %s", task_id, exc_info=True)
 
     with session_scope() as db:

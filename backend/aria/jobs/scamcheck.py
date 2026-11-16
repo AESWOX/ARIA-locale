@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from urllib.parse import quote, urljoin
 
 import httpx
-from urllib.parse import quote, urljoin
 
 from aria.tools.handlers.web import validate_public_url
 
@@ -49,7 +49,7 @@ def _parse_time(value: str | None) -> datetime | None:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 async def _default_rdap(host: str) -> dict:
@@ -74,7 +74,7 @@ async def domain_age_days(host: str, fetch=None) -> int | None:
     fetcher = fetch or _default_rdap
     try:
         data = await fetcher(host)
-    except Exception:  # noqa: BLE001 — RDAP не обязателен
+    except Exception:  # RDAP не обязателен
         return None
     events = data.get("events") if isinstance(data, dict) else None
     for event in events or []:
@@ -84,7 +84,7 @@ async def domain_age_days(host: str, fetch=None) -> int | None:
         if action == "registration":
             registered = _parse_time(event.get("eventDate"))
             if registered is not None:
-                return max(0, (datetime.now(timezone.utc) - registered).days)
+                return max(0, (datetime.now(UTC) - registered).days)
     return None
 
 
@@ -116,7 +116,7 @@ def check_lead(lead, *, age_days: int | None = None) -> dict:
     if url:
         try:
             validate_public_url(str(url))
-        except Exception:  # noqa: BLE001 — внутренние/небезопасные URL
+        except Exception:  # внутренние/небезопасные URL
             flags.append({"code": "unsafe_url", "reason": "URL не проходит проверку безопасности"})
     if age_days is not None and age_days < 30:
         flags.append({"code": "young_domain", "reason": f"домен моложе 30 дней ({age_days})"})

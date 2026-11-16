@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 import asyncio
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 from aria.textio import read_text_auto
@@ -112,7 +112,7 @@ def _pdf_text(path: Path) -> tuple[str, str | None]:
     for i, page in enumerate(reader.pages, 1):
         try:
             text = page.extract_text() or ""
-        except Exception:  # noqa: BLE001 — один битый page не должен ронять весь PDF
+        except Exception:  # один битый page не должен ронять весь PDF
             text = ""
         if text.strip():
             pages.append(f"# Page {i}\n{text}")
@@ -161,7 +161,7 @@ async def file_extract(input_json: dict, sandbox_root: str, **_ctx) -> dict:
             }
         else:
             return {"error": f"unsupported file type: {suffix or '(no extension)'}"}
-    except Exception as exc:  # noqa: BLE001 — битый документ не должен ронять задачу
+    except Exception as exc:  # битый документ не должен ронять задачу
         return {"error": f"extract failed: {exc}"}
 
     max_chars = int(input_json.get("max_chars") or DEFAULT_MAX_CHARS)

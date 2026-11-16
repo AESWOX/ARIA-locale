@@ -12,7 +12,6 @@ from fastapi import Header, HTTPException
 
 from aria.config import get_settings
 
-
 RUNTIME_TOKEN_ENV = "LOCAL_AGENT_RUNTIME_TOKEN"
 DISABLE_BOOTSTRAP_WRITE_ENV = "LOCAL_AGENT_DISABLE_BOOTSTRAP_WRITE"
 

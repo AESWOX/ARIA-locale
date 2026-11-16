@@ -18,7 +18,7 @@ import logging
 import re
 import shutil
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,7 @@ def _safe(name: str) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _within(root: Path, target: Path) -> bool:
@@ -102,7 +102,7 @@ def snapshot(
         (cp_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         _trim_session(str(session_key))
         return cp_id
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("checkpoint snapshot failed for %s", rel_paths)
         shutil.rmtree(cp_dir, ignore_errors=True)
         return None
@@ -117,7 +117,7 @@ def _trim_session(session_key: str) -> None:
     for mf_path in base.glob("*/manifest.json"):
         try:
             rows.append((mf_path.parent, json.loads(mf_path.read_text(encoding="utf-8"))))
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
     rows.sort(key=lambda item: item[1].get("created_at", ""))
     for cp_dir, _mf in rows[:-MAX_PER_SESSION]:
@@ -132,7 +132,7 @@ def _manifests() -> list[tuple[Path, dict[str, Any]]]:
     for mf in base.glob("*/*/manifest.json"):
         try:
             out.append((mf.parent, json.loads(mf.read_text(encoding="utf-8"))))
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
     return out
 

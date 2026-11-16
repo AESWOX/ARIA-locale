@@ -8,7 +8,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
 from aria.api.auth import require_runtime_token, ticket_store, token_store
 from aria.config import get_settings
@@ -243,7 +250,8 @@ async def system_self_test(_: str = Depends(require_runtime_token)) -> dict[str,
     # 10. H4: хуки и чекпоинты — реальные проверки, а не декларация
     try:
         from aria.checkpoints import store as _cps
-        from aria.hooks import EVENTS as _EVENTS, load_hooks as _load_hooks
+        from aria.hooks import EVENTS as _EVENTS
+        from aria.hooks import load_hooks as _load_hooks
 
         hooks = _load_hooks()
         unknown = sorted({str(h.get("event")) for h in hooks} - set(_EVENTS))

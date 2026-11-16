@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -12,7 +12,7 @@ logger = logging.getLogger("local_agent.llm.pricing")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _prices_path() -> Path:
@@ -27,7 +27,7 @@ def load_prices() -> dict:
     try:
         with _prices_path().open("r", encoding="utf-8") as fh:
             data = json.load(fh)
-    except Exception:  # noqa: BLE001 — без файла цен честно пишем n/a
+    except Exception:  # без файла цен честно пишем n/a
         logger.warning("prices.json unavailable; cost will be unknown", exc_info=True)
         return {"models": {}, "aliases": {}, "peak_windows_utc": [], "peak_weekdays": [], "offpeak_dates": []}
     return data if isinstance(data, dict) else {}
@@ -53,7 +53,7 @@ def tier_for(when: datetime | None = None) -> str:
     """'peak' или 'off' для момента времени (UTC). Выходные и offpeak_dates — off."""
     moment = when or _utcnow()
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     spec = load_prices()
     if moment.date().isoformat() in set(spec.get("offpeak_dates") or []):
         return "off"
@@ -101,7 +101,7 @@ def next_offpeak(now: datetime | None = None) -> datetime:
     """Ближайший момент off-peak: if already off — сам now, иначе ближайшая минута окна off."""
     moment = now or _utcnow()
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     if tier_for(moment) == "off":
         return moment
     cursor = moment.replace(second=0, microsecond=0) + timedelta(minutes=1)

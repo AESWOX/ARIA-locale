@@ -28,8 +28,9 @@ from aria.core.events import event_bus
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.logsetup import reset_task as reset_task_log_context, set_task as set_task_log_context
 from aria.db.enums import TaskStatus
+from aria.logsetup import reset_task as reset_task_log_context
+from aria.logsetup import set_task as set_task_log_context
 
 logger = logging.getLogger("local_agent.taskrunner")
 
@@ -121,7 +122,7 @@ def _record_episode(task_id: uuid.UUID, mode: str) -> None:
             session_id=session_id,
             task_id=str(task_id),
         )
-    except Exception:  # noqa: BLE001 — память не должна ломать завершение задачи
+    except Exception:  # память не должна ломать завершение задачи
         logger.exception("could not record task episode")
 
 def _unexecuted_approvals(task_ids: list[uuid.UUID]) -> dict[uuid.UUID, uuid.UUID]:
@@ -427,7 +428,7 @@ class TaskRunner:
                     repo.set_task_status(db, task, TaskStatus.cancelled)
             event_bus.emit("task.cancelled", {"task_id": key}, session_id=None, task_id=job.task_id)
             raise
-        except Exception as exc:  # noqa: BLE001 — граница задачи: падение одной не рушит воркер
+        except Exception as exc:  # граница задачи: падение одной не рушит воркер
             logger.exception("task %s failed in runner", key[:8])
             code = "provider_unavailable" if type(exc).__name__ == "ProviderUnavailable" else "runner_error"
             with session_scope() as db:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -64,7 +64,7 @@ def _parse(payload: dict) -> dict:
         "total_balance": _number(chosen.get("total_balance")),
         "granted_balance": _number(chosen.get("granted_balance")),
         "topped_up_balance": _number(chosen.get("topped_up_balance")),
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
         "error": None,
     }
 
@@ -90,7 +90,7 @@ async def fetch_balance() -> dict:
             response = await client.get(BALANCE_URL, headers={"Authorization": f"Bearer {key}"})
     except (httpx.TimeoutException, httpx.TransportError, OSError) as exc:
         return _error(f"network: {type(exc).__name__}")
-    except Exception as exc:  # noqa: BLE001 — баланс не должен ронять маршрут
+    except Exception as exc:  # баланс не должен ронять маршрут
         logger.warning("balance request failed: %s", type(exc).__name__)
         return _error(f"request failed: {type(exc).__name__}")
     if response.status_code == 401:

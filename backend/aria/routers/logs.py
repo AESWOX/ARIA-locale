@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -201,11 +201,11 @@ async def clear_logs(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
 def _open_in_file_manager(path: Path) -> None:
     """Открыть каталог в файловом менеджере системы (Windows: Проводник, macOS: Finder, Linux: xdg-open)."""
     if sys.platform.startswith("win"):
-        os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+        os.startfile(str(path))  # type: ignore[attr-defined]
     elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])  # noqa: S603, S607
+        subprocess.Popen(["open", str(path)])
     else:
-        subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 @router.post("/logs/open-folder")
@@ -281,7 +281,7 @@ def _build_diagnostics_zip() -> bytes:
 async def logs_diagnostics(_: str = Depends(require_runtime_token)) -> Response:
     """Zip для отчёта о проблеме: хвосты логов без секретов, версия, система, флаги ключей."""
     payload = await asyncio.to_thread(_build_diagnostics_zip)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     return Response(
         content=payload,
         media_type="application/zip",

@@ -302,7 +302,7 @@ async def clarify_task(
                                 id=f"ac-{len(spec.acceptance_criteria) + 1}", statement=value[:300]
                             )
                         )
-                    except Exception:  # noqa: BLE001 — непроверяемая формулировка
+                    except Exception:  # непроверяемая формулировка
                         spec.constraints.append(f"Критерий (не проверяем): {value}")
                 else:
                     # п.1.1.2: структурная запись вместо «q1: да» в constraints.

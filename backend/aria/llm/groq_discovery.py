@@ -143,7 +143,7 @@ def discover(
             models = list_models(base_url, key, http=http)
             good_key = key
             break
-        except Exception as exc:  # noqa: BLE001 — следующий ключ
+        except Exception as exc:  # следующий ключ
             last_exc = exc
     if not good_key:
         raise RuntimeError(f"model list unavailable with {min(len(keys), MAX_KEYS_TRIED)} key(s): "
@@ -221,7 +221,7 @@ def refresh_if_stale(
             result["chains"] = build_chains(result["models"], result["status"]) or result["chains"]
         save_cache(result, data_dir)
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("groq model discovery failed (%s); keeping previous chains", type(exc).__name__)
         return False
 

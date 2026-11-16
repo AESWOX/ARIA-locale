@@ -174,10 +174,7 @@ async def draft_reply(
         findings = verify_draft(draft, profile, lead)
         if not findings:
             break
-        messages = messages + [
-            ChatMessage(role="assistant", content=draft),
-            ChatMessage(role="user", content="Исправь выдуманные факты: " + json.dumps(findings, ensure_ascii=False)),
-        ]
+        messages = [*messages, ChatMessage(role="assistant", content=draft), ChatMessage(role="user", content="Исправь выдуманные факты: " + json.dumps(findings, ensure_ascii=False))]
     if not draft or findings:
         store.add_event(db, lead, "draft_failed", {"findings": findings})
         logger.warning("draft verification failed: %s", findings)

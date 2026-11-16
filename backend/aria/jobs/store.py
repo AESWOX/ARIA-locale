@@ -5,7 +5,7 @@ import hashlib
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import select
@@ -127,4 +127,4 @@ def update_status(db: OrmSession, lead_id: uuid.UUID, status: str) -> m.Lead | N
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

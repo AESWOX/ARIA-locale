@@ -284,7 +284,7 @@ def relevant_block(query: str, limit: int = 3, snippet_chars: int = 200) -> str:
         return cached[1]
     try:
         found = search_vault(text, max_results=max(limit * 3, limit), time_budget_sec=1.5)
-    except Exception:  # noqa: BLE001 — notes must not break a chat/agent turn
+    except Exception:  # notes must not break a chat/agent turn
         return ""
     lines: list[str] = []
     seen: set[str] = set()

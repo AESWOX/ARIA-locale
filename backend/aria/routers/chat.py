@@ -19,7 +19,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -27,18 +27,22 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
-from aria.api.auth import require_runtime_token
 from aria import secretguard
+from aria.api.auth import require_runtime_token
 from aria.config import get_settings
-from aria.core import runprofile, telegram_gate, timing
-from aria.core import adult_mode, content_limits
+from aria.core import adult_mode, content_limits, runprofile, telegram_gate, timing
 from aria.core.compliance import COMPLIANCE_TEXT
 from aria.core.persona import PERSONA_TEXT
 from aria.db import models as m
 from aria.db import repository as repo
 from aria.db.base import run_with_db_retry, session_scope
 from aria.db.enums import SourceTrust, TaskStatus
-from aria.http_utils import emit_message_created, emit_session_updated, iso, serialize_message
+from aria.http_utils import (
+    emit_message_created,
+    emit_session_updated,
+    iso,
+    serialize_message,
+)
 from aria.llm import compression
 from aria.llm.key_pool import NoAvailableKeys
 from aria.llm.providers.base import ChatMessage, LlmProvider
@@ -142,7 +146,7 @@ async def _telegram_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> di
                     "action_path": "/channels",
                 },
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             if (session.title or "") in DEFAULT_TITLES:
                 session.title = content.replace("\n", " ")[:60]
             return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
@@ -188,7 +192,7 @@ async def _secrets_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dic
                     "action_path": "/settings",
                 },
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             if (session.title or "") in DEFAULT_TITLES:
                 session.title = masked.replace("\n", " ")[:60]
             return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
@@ -275,7 +279,7 @@ async def _adult_gate(session_id: uuid.UUID, payload: dict[str, Any], request: R
                 db, session, role="assistant", content=text, source_trust=SourceTrust.trusted,
                 content_json={"notice": notice, "action": "adult_mode", "adult": notice != "adult_off"},
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             if (session.title or "") in DEFAULT_TITLES:
                 session.title = content.replace("\n", " ")[:60]
             return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
@@ -327,7 +331,7 @@ async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], r
                     "Нажми Cancel task или дождись завершения — тогда повторю запрос в Agent."
                 ),
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             logger.info(
                 "chat→agent suppressed: session %s has running task %s (%s)",
                 session_id, task.id, task.status,
@@ -349,7 +353,7 @@ async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], r
             user_msg = repo.append_message(
                 db, session, role="user", content=content, source_trust=SourceTrust.trusted
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             if (session.title or "") in DEFAULT_TITLES:
                 session.title = content.replace("\n", " ")[:60]
             task_id = task.id
@@ -471,7 +475,7 @@ def _attach_dynamic(prompt: list[ChatMessage], dynamic: str) -> list[ChatMessage
         if prompt[i].role == "user":
             insert_at = i
             break
-    return prompt[:insert_at] + [ChatMessage(role="system", content=dynamic)] + prompt[insert_at:]
+    return [*prompt[:insert_at], ChatMessage(role="system", content=dynamic), *prompt[insert_at:]]
 
 
 def _dlp_mask(prompt: list[ChatMessage], session_id: uuid.UUID) -> tuple[list[ChatMessage], bool]:
@@ -891,7 +895,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
                 stored_user = repo.append_message(
                     db, session, role="user", content=content, source_trust=SourceTrust.trusted
                 )
-            session.updated_at = datetime.now(timezone.utc)  # message inserts don't touch the sessions row
+            session.updated_at = datetime.now(UTC)  # message inserts don't touch the sessions row
             if (session.title or "") in DEFAULT_TITLES:
                 session.title = (content or stored_user.content).replace("\n", " ")[:60]
             return (
@@ -910,7 +914,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
     t_compress = time.monotonic()
     try:
         await compression.maybe_compress(session_id, request.app.state.router)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("chat: compression failed, continuing with full history")
     timing.record("chat_compress", (time.monotonic() - t_compress) * 1000.0)
     t_history = time.monotonic()
@@ -928,7 +932,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
         if fact and memory_store.enabled():
             try:
                 memory_store.add("fact", fact, source="user", session_id=str(session_id))
-            except Exception:  # noqa: BLE001 — память не должна ронять чат
+            except Exception:  # память не должна ронять чат
                 logger.exception("chat: could not save memory")
     if memory_store.enabled():
         memory_block = memory_store.recall_block(last_user_text)
@@ -939,7 +943,7 @@ async def _prepare_chat(session_id: uuid.UUID, payload: dict[str, Any], request:
         from aria.storage.obsidian_vault import relevant_block as _vault_block
 
         vault_block = _vault_block(last_user_text)
-    except Exception:  # noqa: BLE001 — notes must not break chat
+    except Exception:  # notes must not break chat
         logger.exception("chat: vault recall failed")
         vault_block = ""
     timing.record("chat_vault", (time.monotonic() - t_vault) * 1000.0)
@@ -1042,13 +1046,13 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
             ),
             timeout=budget,
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         logger.warning("chat: non-stream budget %.0fs exhausted", budget)
         raise HTTPException(
             status_code=504,
             detail="The model did not answer in time. Try again.",
         ) from exc
-    except Exception as exc:  # noqa: BLE001 - mapped to a clear HTTP error below
+    except Exception as exc:  # mapped to a clear HTTP error below
         logger.warning("chat: model call failed: %s", exc)
         raise _explain_llm_error(exc) from exc
     reply = (result.response.text or "").strip()
@@ -1068,7 +1072,11 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
     }
     # L0 §4: диагностика отказа — только строка в лог, без повторных вызовов и без текста.
     if bool(getattr(get_settings(), "refusal_detection_enabled", True)):
-        from aria.core.refusal import finish_reason_from_response, is_model_refusal, log_refusal
+        from aria.core.refusal import (
+            finish_reason_from_response,
+            is_model_refusal,
+            log_refusal,
+        )
 
         if is_model_refusal(
             reply,
@@ -1095,7 +1103,7 @@ async def _run_nonstream(session_id: uuid.UUID, request: Request, prepared: _Pre
                 source_trust=SourceTrust.trusted,
                 content_json=assistant_meta,
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             return stored, serialize_message(stored)
 
     with timing.stage("chat_store"):
@@ -1195,7 +1203,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
             result = await _run_nonstream(session_id, request, prepared)
         except HTTPException as exc:
             yield _ndjson_line({"type": "error", "status": exc.status_code, "message": str(exc.detail)})
-        except Exception:  # noqa: BLE001 — the stream is already open
+        except Exception:  # the stream is already open
             logger.exception("chat: non-stream fallback failed")
             yield _ndjson_line({"type": "error", "status": 502, "message": "The model call failed."})
         else:
@@ -1221,7 +1229,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
                     if chunk.final:
                         return
                 await sink.put(("end", None))
-            except Exception as exc:  # noqa: BLE001 — try the next provider, then non-stream
+            except Exception as exc:  # try the next provider, then non-stream
                 await sink.put(("error", exc))
 
         entry.task = asyncio.create_task(consume())
@@ -1270,7 +1278,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
         if attempt_failed:
             try:
                 request.app.state.router.mark_failed(candidate, TIMEOUT_COOLDOWN_SEC)
-            except Exception:  # noqa: BLE001 — cooling is best-effort
+            except Exception:  # cooling is best-effort
                 pass
             logger.warning("chat: stream failed on %s, trying the next provider", candidate.provider_id)
             if got_delta:
@@ -1283,7 +1291,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
             break
         try:
             request.app.state.router.mark_failed(candidate, TIMEOUT_COOLDOWN_SEC)
-        except Exception:  # noqa: BLE001 — cooling is best-effort
+        except Exception:  # cooling is best-effort
             pass
         logger.warning("chat: %s produced an empty stream, trying the next provider", candidate.provider_id)
 
@@ -1330,7 +1338,7 @@ async def _stream_events(session_id: uuid.UUID, request: Request, prepared: _Pre
                     "usage": final_usage,
                 },
             )
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now(UTC)
             return stored, serialize_message(stored)
 
     with timing.stage("chat_store"):

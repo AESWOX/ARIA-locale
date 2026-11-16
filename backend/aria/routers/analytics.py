@@ -8,7 +8,7 @@ per-token rate; real billing is not tracked (``actual_cost=0``).
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -27,7 +27,7 @@ _OUTPUT_RATE_PER_1M = 10.0  # $ per 1M output tokens (estimate)
 def _local(ts: datetime) -> datetime:
     """SQLite отдаёт naive UTC — считаем его UTC, а не локальным временем."""
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.replace(tzinfo=UTC)
     return ts.astimezone()
 
 
@@ -42,7 +42,7 @@ def _day_range(days: int) -> tuple[datetime, datetime]:
     local_start = (local_end - timedelta(days=max(1, days) - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    return local_start.astimezone(timezone.utc), end
+    return local_start.astimezone(UTC), end
 
 
 def _model_of(msg: m.Message) -> str:
@@ -238,7 +238,7 @@ async def analytics_models(
     profile: str | None = Query(default=None),
     _: str = Depends(require_runtime_token),
 ) -> dict[str, Any]:
-    start, end = _day_range(days)
+    start, _end = _day_range(days)
     with session_scope() as db:
         messages = db.query(m.Message).filter(m.Message.created_at >= start).all()
         sessions = db.query(m.Session).filter(m.Session.created_at >= start).all()

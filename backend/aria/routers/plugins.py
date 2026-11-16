@@ -131,7 +131,7 @@ async def plugins_import(body: dict[str, Any], _: str = Depends(require_runtime_
         "servers": [s["name"] for s in parsed["_servers"]],
         "installed_at": importer.now_iso(),
     }
-    importer.save_registry(registry + [entry])
+    importer.save_registry([*registry, entry])
     return {"ok": True, **importer.public_view(parsed), "installed": entry}
 
 

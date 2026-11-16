@@ -19,10 +19,10 @@ import httpx
 from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
+from aria.core import timing
 from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import ProviderStatus
-from aria.core import timing
 from aria.llm.key_pool import NoAvailableKeys
 from aria.llm.providers.base import ChatMessage, LlmProvider, LlmResponse
 
@@ -48,7 +48,7 @@ def _finish_hint(response) -> str:
     """' (finish_reason=length)' из сырого ответа, если он есть: по нему видно, почему content пустой."""
     try:
         reason = response.raw["choices"][0].get("finish_reason")
-    except Exception:  # noqa: BLE001 - сырой ответ может быть любым
+    except Exception:  # сырой ответ может быть любым
         return ""
     return f" (finish_reason={reason})" if reason else ""
 
@@ -228,7 +228,7 @@ class ProviderRouter:
 
         try:
             return quota.exhausted(getattr(provider, "model", None), get_settings().gemini_projects)
-        except Exception:  # noqa: BLE001 — учёт квоты не должен ронять маршрут
+        except Exception:  # учёт квоты не должен ронять маршрут
             return False
 
     @staticmethod
@@ -237,7 +237,7 @@ class ProviderRouter:
 
         try:
             quota.record(getattr(provider, "model", None))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     async def _pick_available(
@@ -305,7 +305,7 @@ class ProviderRouter:
                 holder = asyncio.Semaphore(limit)
                 try:
                     holder.aria_limit = limit
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 self.semaphores[provider_class] = holder
             async with holder:
@@ -417,7 +417,7 @@ class ProviderRouter:
                         else:
                             log_cache_usage(preferred.provider_id, response)
                             return RoutingResult(response=response, provider_id=preferred.provider_id)
-                except Exception as exc:  # noqa: BLE001 — выбранная модель не должна ронять задачу
+                except Exception as exc:  # выбранная модель не должна ронять задачу
                     logger.warning("preferred model %s failed (%s); using the class chain", prefer_provider_id, type(exc).__name__)
                     self._record_failed_attempt(
                         preferred, exc, purpose, session_id, task_id,
@@ -494,7 +494,7 @@ class ProviderRouter:
                 t_attempt = time.monotonic()
                 try:
                     response = await _timed_chat(provider, messages, tools, timeout_sec)
-                except Exception as exc:  # noqa: BLE001 — попытка фиксируется, цепочка идёт дальше
+                except Exception as exc:  # попытка фиксируется, цепочка идёт дальше
                     last_exc = exc
                     self._record_failed_attempt(
                         provider, exc, purpose, session_id, task_id, (time.monotonic() - t_attempt) * 1000.0,
@@ -539,7 +539,7 @@ class ProviderRouter:
                 reject_empty, allowed_provider_ids,
                 purpose=purpose, session_id=session_id, task_id=task_id,
             )
-        allowed, warn = self.budget_gate(provider_class)
+        allowed, _warn = self.budget_gate(provider_class)
         target_class = provider_class
         degraded = False
 
@@ -575,7 +575,7 @@ class ProviderRouter:
         self._quota_record(provider)
         try:
             response = await _timed_chat(provider, messages, tools, timeout_sec)
-        except Exception as exc:  # noqa: BLE001 — неуспех фиксируется и уходит наверх как раньше
+        except Exception as exc:  # неуспех фиксируется и уходит наверх как раньше
             self._record_failed_attempt(
                 provider, exc, purpose, session_id, task_id, (time.monotonic() - t_attempt) * 1000.0,
             )
@@ -765,7 +765,10 @@ def build_default_router() -> ProviderRouter:
     Gemini/Groq с ротацией ключей. Всегда есть deterministic stub для smoke/MVP."""
     from aria.llm import gemini_pools
     from aria.llm.key_pool import KeyPool
-    from aria.llm.providers.openai_compatible import OpenAICompatibleProvider, thinking_payload
+    from aria.llm.providers.openai_compatible import (
+        OpenAICompatibleProvider,
+        thinking_payload,
+    )
 
     settings = get_settings()
     router = ProviderRouter()

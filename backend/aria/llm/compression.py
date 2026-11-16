@@ -209,7 +209,7 @@ async def _escalate_summary(router, text_block: str, session_id=None) -> str | N
             purpose="compress",
             session_id=session_id,
         )
-    except Exception as exc:  # noqa: BLE001 — эскалация не должна ронять сжатие
+    except Exception as exc:  # эскалация не должна ронять сжатие
         logger.warning("compression escalation failed: %s", exc)
         return None
     text = (result.response.text or "").strip()
@@ -314,7 +314,7 @@ async def _maybe_compress_impl(session_id, router=None) -> bool:
             summary_text = await _summarize_via_router(router, text_block, session_id)
         else:
             summary_text = await _summarize(text_block)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("compression failed for session %s, leaving history uncompressed: %s", session_id, exc)
         return False
 

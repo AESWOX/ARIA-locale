@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
 from aria.db import repository as repo
 from aria.db.base import session_scope
-
 
 DEFAULT_SCHEDULER_JOBS: list[dict] = [
     {
@@ -132,7 +131,7 @@ class RefreshGate:
 async def refresh_provider_models_job(router) -> int:
     """Fetches /models from registered providers and upserts provider_models."""
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     refreshed = 0
     seen: set[str] = set()
     # Звенья цепочки одного хоста (до ~30 «провайдеров» на Gemini) получают один и тот же список: спрашиваем хост один раз.
@@ -231,7 +230,7 @@ async def run_due_jobs(router=None, runner=None, now: datetime | None = None) ->
     кладутся задачей в TaskRunner (единая дверь, A10). ``last_run_at``
     обновляется в обоих случаях — иначе job срабатывает бесконечно.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     due: list[str] = []
     submitted: list[str] = []
 
@@ -248,7 +247,7 @@ async def run_due_jobs(router=None, runner=None, now: datetime | None = None) ->
     for job_id, name, schedule, last_run_at, objective, role, tools, urgent, defer_until in snapshot:
         base = last_run_at
         if base is not None and base.tzinfo is None:
-            base = base.replace(tzinfo=timezone.utc)
+            base = base.replace(tzinfo=UTC)
         # Никогда не запускавшийся job привязываем к моменту, когда планировщик
         # впервые его увидел. Раньше якорем было «сутки назад», и свежесозданный
         # «каждый день в 9:00» срабатывал на ближайшем тике, а не в 9:00.
@@ -256,7 +255,7 @@ async def run_due_jobs(router=None, runner=None, now: datetime | None = None) ->
 
         if defer_until is not None:
             if defer_until.tzinfo is None:
-                defer_until = defer_until.replace(tzinfo=timezone.utc)
+                defer_until = defer_until.replace(tzinfo=UTC)
             if now < defer_until:
                 continue
 

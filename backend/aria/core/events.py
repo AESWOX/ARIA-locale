@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import timezone
+from datetime import UTC
 from typing import Any
 
 from aria.db import repository as repo
@@ -46,7 +46,7 @@ class EventBus:
                 "event_type": event.event_type,
                 "session_id": str(session_id) if session_id else None,
                 "task_id": str(task_id) if task_id else None,
-                "ts": event.ts.astimezone(timezone.utc).isoformat(),
+                "ts": event.ts.astimezone(UTC).isoformat(),
                 "payload": payload,
             }
         else:
@@ -62,7 +62,7 @@ class EventBus:
                 "event_type": event.event_type,
                 "session_id": str(session_id) if session_id else None,
                 "task_id": str(task_id) if task_id else None,
-                "ts": event.ts.astimezone(timezone.utc).isoformat(),
+                "ts": event.ts.astimezone(UTC).isoformat(),
                 "payload": payload,
             }
         for q in list(self._subscribers):

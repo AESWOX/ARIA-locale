@@ -14,7 +14,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aria.core.integrity import IntegrityFlag
-from aria.tools.validators import command_rejection_reason, is_windows_command, validate_tool_input
+from aria.tools.validators import (
+    command_rejection_reason,
+    is_windows_command,
+    validate_tool_input,
+)
 
 
 class PlanStep(BaseModel):
@@ -47,7 +51,7 @@ class PlanStep(BaseModel):
     write_scope: list[str] = []
 
     @model_validator(mode="after")
-    def must_have_tool_or_skill(self) -> "PlanStep":
+    def must_have_tool_or_skill(self) -> PlanStep:
         if not self.tool_ref and not self.skill_ref:
             raise ValueError(
                 f"freeform step forbidden: step '{self.objective[:50]}...' "
@@ -205,13 +209,13 @@ def find_cycles(steps: list[dict]) -> list[str]:
         if state.get(node) == 1:
             return
         if node in stack:
-            cycles.extend(stack[stack.index(node):] + [node])
+            cycles.extend([*stack[stack.index(node):], node])
             return
         state[node] = 0
         for dep in (ids[node].get("depends_on") or []):
             dep_id = str(dep)
             if dep_id in ids:
-                visit(dep_id, stack + [node])
+                visit(dep_id, [*stack, node])
         state[node] = 1
 
     for node_id in list(ids):

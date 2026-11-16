@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 # Имена — строго из aria.tools.registry.TOOL_REGISTRY (тест D5/D6 в test_b5_tool_inventory.py).
 # Read-only тулы (idempotency_class=safe_read): повтор с тем же результатом = нет прогресса.
@@ -191,7 +192,7 @@ class ToolCallGuardrailController:
         self, tool_name: str, args: Mapping[str, Any] | None, result: dict | str | None
     ) -> ToolGuardrailDecision:
         """Record a tool result AFTER execution — updates failure/no-progress counters."""
-        is_failure, reason = _detect_tool_failure(tool_name, result)
+        is_failure, _reason = _detect_tool_failure(tool_name, result)
         signature = ToolCallSignature.from_call(tool_name, args or {})
 
         if is_failure:

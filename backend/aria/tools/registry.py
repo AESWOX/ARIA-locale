@@ -6,22 +6,21 @@ null_output_allowed, requires_approval, allowed_roles, idempotency_class.
 """
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-import asyncio
-from dataclasses import dataclass
-from typing import Awaitable, Callable
-
 from aria.db.enums import IdempotencyClass, RiskLevel
+from aria.integrations.notebooklm.tool import notebook_query
 from aria.storage import obsidian_vault, vault_index
-from aria.tools.handlers import files as files_handler
-from aria.tools.handlers import shell as shell_handler
-from aria.tools.handlers import web as web_handler
 from aria.tools.handlers import audio as audio_handler
 from aria.tools.handlers import documents as documents_handler
-from aria.tools.handlers import vision as vision_handler
+from aria.tools.handlers import files as files_handler
+from aria.tools.handlers import shell as shell_handler
 from aria.tools.handlers import skills as skills_handler
-from aria.integrations.notebooklm.tool import notebook_query
+from aria.tools.handlers import vision as vision_handler
+from aria.tools.handlers import web as web_handler
 
 
 @dataclass(frozen=True)
@@ -178,9 +177,10 @@ async def _notebook_query(input_json: dict, **_ctx) -> dict:
 
 async def _skill_lookup(input_json: dict, **_ctx) -> dict:
     """Search skills_meta by name or category."""
+    from sqlalchemy import select
+
     from aria.db.base import session_scope
     from aria.db.models import SkillMeta
-    from sqlalchemy import select
     pattern = input_json.get("pattern", "")
     category = input_json.get("category", "")
     limit = min(input_json.get("limit", 10), 100)
@@ -201,10 +201,12 @@ async def _skill_lookup(input_json: dict, **_ctx) -> dict:
 
 async def _task_status(input_json: dict, **_ctx) -> dict:
     """Query task by ID."""
+    import uuid
+
+    from sqlalchemy import select
+
     from aria.db.base import session_scope
     from aria.db.models import Task
-    from sqlalchemy import select
-    import uuid
     task_id = input_json.get("task_id", "")
     with session_scope() as session:
         try:
@@ -229,9 +231,10 @@ async def _task_status(input_json: dict, **_ctx) -> dict:
 
 async def _friend_memory_read(input_json: dict, **_ctx) -> dict:
     """Read friend_memory entries."""
+    from sqlalchemy import select
+
     from aria.db.base import session_scope
     from aria.db.models import FriendMemory
-    from sqlalchemy import select
     category = input_json.get("category", "")
     limit = min(input_json.get("limit", 20), 200)
     with session_scope() as session:
@@ -297,9 +300,8 @@ async def _set_mode(input_json: dict, **_ctx) -> dict:
     if value not in ("on", "off"):
         return {"error": "value must be on or off"}
     from aria.core import adult_mode
-    from aria.db.base import session_scope
-
     from aria.db import repository as _repo
+    from aria.db.base import session_scope
 
     with session_scope() as db:
         task_id = _ctx.get("task_id")
@@ -1117,13 +1119,13 @@ async def _delegate_task(
     # D3: жёсткий таймаут — зависший саб-агент не должен блокировать родителя
     try:
         await asyncio.wait_for(_run_task(sub_task_id, router, sandbox_root), timeout=timeout_sec)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             with _session_scope() as db:
                 st = _repo.get_task(db, sub_task_id)
                 if st is not None and st.status not in (TaskStatus.done, TaskStatus.done_unaudited, TaskStatus.failed, TaskStatus.cancelled):
                     _repo.set_task_status(db, st, TaskStatus.failed, "delegate_timeout", f"exceeded {timeout_sec}s")
-        except Exception:  # noqa: BLE001 — переход состояния не должен маскировать таймаут
+        except Exception:  # переход состояния не должен маскировать таймаут
             pass
         return {"status": "timeout", "summary": "", "error": f"sub-task exceeded {timeout_sec}s", "task_id": str(sub_task_id)}
     except Exception as exc:

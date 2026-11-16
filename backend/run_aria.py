@@ -11,7 +11,7 @@ for _name in ("stdout", "stderr"):
         setattr(sys, _name, open(os.devnull, "w", encoding="utf-8"))
 
 # Load .env (уровень выше run_aria.py)
-from aria import paths as _paths  # noqa: E402
+from aria import paths as _paths
 
 env_file = str(_paths.env_file())
 if os.path.exists(env_file):

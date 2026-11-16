@@ -10,8 +10,13 @@ from collections.abc import AsyncIterator
 import httpx
 
 from aria.llm.key_pool import KeyPool, NoAvailableKeys
-from aria.llm.providers.base import ChatMessage, LlmProvider, LlmResponse, StreamChunk, ToolCallRequest
-
+from aria.llm.providers.base import (
+    ChatMessage,
+    LlmProvider,
+    LlmResponse,
+    StreamChunk,
+    ToolCallRequest,
+)
 
 logger = logging.getLogger(__name__)
 

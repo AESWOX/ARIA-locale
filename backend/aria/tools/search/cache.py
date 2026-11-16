@@ -28,7 +28,7 @@ def get(key: str) -> dict | None:
             if created is None or utc_now() - created > _ttl():
                 return None
             return dict(row.payload or {})
-    except Exception:  # noqa: BLE001 — кэш не должен ломать поиск
+    except Exception:  # кэш не должен ломать поиск
         logger.warning("search cache read failed", exc_info=True)
         return None
 
@@ -44,5 +44,5 @@ def put(key: str, payload: dict) -> None:
             else:
                 row.payload = payload
                 row.created_at = utc_now()
-    except Exception:  # noqa: BLE001 — сбой записи кэша только WARNING
+    except Exception:  # сбой записи кэша только WARNING
         logger.warning("search cache write failed", exc_info=True)

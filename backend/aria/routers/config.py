@@ -8,8 +8,6 @@ data/config.yaml and applied to the cached Settings instance immediately.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import json
 import os
 import re
@@ -20,6 +18,7 @@ from typing import Any
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
+from aria import paths
 from aria.api.auth import require_runtime_token, token_store
 from aria.config import get_settings
 from aria.http_utils import public_config_payload

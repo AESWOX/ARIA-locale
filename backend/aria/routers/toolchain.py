@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 
+from fastapi import APIRouter, Depends
+
 from aria import toolchain
 from aria.api.auth import require_runtime_token
-from fastapi import APIRouter, Depends
 
 router = APIRouter(tags=["toolchain"])
 

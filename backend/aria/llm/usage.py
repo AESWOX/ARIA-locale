@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +86,7 @@ def _append_jsonl(record: dict[str, Any]) -> None:
             pass
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-    except Exception:  # noqa: BLE001 — учёт не должен ломать ответ модели
+    except Exception:  # учёт не должен ломать ответ модели
         logger.warning("llm_usage_jsonl_failed", exc_info=True)
 
 
@@ -106,7 +106,7 @@ def _record(
     outcome: str,
 ) -> None:
     _append_jsonl({
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "task_id": _jsonable(task_id),
         "session_id": _jsonable(session_id),
         "source": purpose,
@@ -159,7 +159,7 @@ def record_usage(
             if miss is None:
                 miss = max(parsed["prompt_total"] - hit, 0)
             cost_usd, tier = pricing.cost_usd(model, hit, miss, parsed["completion"])
-        except Exception:  # noqa: BLE001 — стоимость не должна ломать запись
+        except Exception:  # стоимость не должна ломать запись
             logger.warning("llm_usage_pricing_failed provider=%s purpose=%s", provider_id, purpose, exc_info=True)
     _record(
         provider_id=provider_id,
@@ -206,7 +206,7 @@ def record_usage(
         from aria.db.base import run_with_db_retry
 
         return run_with_db_retry(_write)
-    except Exception:  # noqa: BLE001 — учёт не должен ломать ответ модели
+    except Exception:  # учёт не должен ломать ответ модели
         logger.warning("llm_usage_write_failed provider=%s purpose=%s", provider_id, purpose, exc_info=True)
         return None
 

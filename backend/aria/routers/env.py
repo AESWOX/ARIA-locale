@@ -7,8 +7,6 @@ GET; POST /api/env/reveal returns the raw value under runtime-token auth.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import logging
 import os
 import re
@@ -16,6 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 
 router = APIRouter(tags=["env"])
@@ -178,7 +177,7 @@ def _refresh_settings(request: Request | None = None) -> None:
             runner = getattr(request.app.state, "task_runner", None)
             if runner is not None:
                 runner.set_router(new_router)
-        except Exception:  # noqa: BLE001 - never fail saving a key because of this
+        except Exception:  # never fail saving a key because of this
             logging.getLogger("local_agent.env").exception("could not rebuild LLM router")
 
 

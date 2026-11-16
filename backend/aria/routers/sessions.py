@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
-
-from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import func
 
 from aria.api.auth import require_runtime_token
+from aria.config import get_settings
 from aria.core import clarifier
 from aria.core.loop import execute_agent_loop
 from aria.db import models as m
@@ -19,20 +19,19 @@ from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import SourceTrust, TaskStatus
 from aria.http_utils import (
-    content_disposition,
-    serialize_message,
     _safe_export_filename,
+    content_disposition,
     emit_message_created,
     emit_session_updated,
     emit_task_status,
     iso,
     render_session_export_markdown,
     serialize_attention,
+    serialize_message,
     serialize_task,
     session_snapshot_payload,
     utc_now,
 )
-from aria.config import get_settings
 
 logger = logging.getLogger("local_agent.sessions")
 
@@ -43,7 +42,7 @@ def _epoch_ms(dt: datetime | None) -> int | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1000)
 
 
@@ -144,7 +143,7 @@ async def list_sessions(
 async def sessions_stats_alias(_: str = Depends(require_runtime_token)) -> dict[str, Any]:
     with session_scope() as db:
         sessions = repo.list_sessions(db, limit=None)
-        msg_counts, _ = _bulk_counts(db)
+        _msg_counts, _ = _bulk_counts(db)
         msg_total = db.query(func.count(m.Message.id)).scalar() or 0
     total = len(sessions)
     active_store = sum(1 for s in sessions if s.status.value == "active")
@@ -230,11 +229,11 @@ async def prune_sessions(payload: dict[str, Any], _: str = Depends(require_runti
     removed = 0
     with session_scope() as db:
         sessions = repo.list_sessions(db, limit=None)
-        msg_counts, _ = _bulk_counts(db)
+        _msg_counts, _ = _bulk_counts(db)
         for s in sessions:
             created = s.created_at
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
+                created = created.replace(tzinfo=UTC)
             if created >= cutoff:
                 continue
             if repo.delete_session(db, s.id):

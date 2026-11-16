@@ -39,7 +39,7 @@ def _task_state(task_id: Any) -> dict[str, Any] | None:
                 "message_count": len(repo.list_messages_for_prompt(db, task.session_id)),
                 "tool_call_count": len(repo.list_tool_calls(db, tid)),
             }
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("task state snapshot failed", exc_info=True)
         return None
 

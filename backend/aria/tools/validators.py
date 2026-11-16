@@ -91,7 +91,7 @@ def is_high_risk_command(command: str) -> bool:
 
 
 def _tokens(segment: str) -> list[str]:
-    """Токены сегмента. posix=False — иначе shlex съедает «\» в Windows-путях."""
+    r"""Токены сегмента. posix=False — иначе shlex съедает «\» в Windows-путях."""
     try:
         raw = shlex.split(segment, posix=False)
     except ValueError:

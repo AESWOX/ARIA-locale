@@ -76,7 +76,7 @@ async def audio_transcribe(input_json: dict, sandbox_root: str, **_ctx) -> dict:
                     data=data,
                     files={"file": (path.name, path.read_bytes(), mime)},
                 )
-        except Exception as exc:  # noqa: BLE001 — сеть/таймаут не должны ронять задачу
+        except Exception as exc:  # сеть/таймаут не должны ронять задачу
             last_error = f"Groq Whisper request failed: {exc}"
             continue
         if response.status_code >= 400:

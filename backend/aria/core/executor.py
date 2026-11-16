@@ -15,16 +15,17 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
+from aria.config import get_settings
+from aria.core.delegate import run_bounded
 from aria.core.integrity import IntegrityFlag, run_integrity_audit
 from aria.core.locking import file_lock
-from aria.core.delegate import run_bounded
 from aria.core.notifiers.protocol import Notifier
 from aria.core.plan_validator import (
     MAX_REPLAN_ATTEMPTS,
@@ -37,15 +38,20 @@ from aria.core.plan_validator import (
     validate_plan,
     validate_plan_paths,
 )
-from aria.tools.validators import command_rejection_reason, is_windows_command
 from aria.core.secretscanner import ScanResult, assert_no_secrets, scan_changed_files
 from aria.db.base import release_write_lock
-from aria.db.enums import PLAN_PHASES, AuditVerdict, IntegrityVerdict, PlanStatus, TaskStatus
+from aria.db.enums import (
+    PLAN_PHASES,
+    AuditVerdict,
+    IntegrityVerdict,
+    PlanStatus,
+    TaskStatus,
+)
 from aria.db.models import IntegrityEvent, Task, TaskPlan
-from aria.storage.obsidian_vault import search_vault, vault_root, write_note_atomic
-from aria.config import get_settings
 from aria.llm.providers.base import ChatMessage
 from aria.llm.router import ProviderRouter, ProviderUnavailable
+from aria.storage.obsidian_vault import search_vault, vault_root, write_note_atomic
+from aria.tools.validators import command_rejection_reason, is_windows_command
 
 # Transient DB errors that should be retried
 _TRANSIENT_DB_ERRORS = (
@@ -191,7 +197,7 @@ def _append_plan_history(plan: TaskPlan) -> list[dict]:
     entry = {
         "version": plan.version,
         "plan_json": plan.plan_json,
-        "changed_at": datetime.now(timezone.utc).isoformat(),
+        "changed_at": datetime.now(UTC).isoformat(),
     }
     history.append(entry)
     # Retention: shift oldest if over limit
@@ -254,7 +260,7 @@ def _generate_delivery_note(
     Returns:
         str: полный .md контент заметки.
     """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     step_count = len(plan.plan_json or [])
 
     # Build step summary
@@ -756,7 +762,7 @@ def _persist_skipped_call(task_id: Any, step: dict, payload: dict) -> str:
                 error_message=str(output_json.get("reason") or "")[:400],
             )
             return str(call.id)
-    except Exception:  # noqa: BLE001 — пропуск не должен ронять волну
+    except Exception:  # пропуск не должен ронять волну
         logger.exception("Stage 3: не удалось записать skipped ToolCall")
         return fallback_id
 
@@ -785,7 +791,7 @@ def _execute_parallelism() -> int:
                 free_gb, EXECUTE_MIN_FREE_RAM_GB,
             )
             return 1
-    except Exception:  # noqa: BLE001 — нет psutil/нет данных: работаем по конфигу, а не падаем
+    except Exception:  # нет psutil/нет данных: работаем по конфигу, а не падаем
         logger.debug("psutil недоступен — лимит параллелизма EXECUTE берётся из настроек")
     return limit
 
@@ -864,7 +870,7 @@ def _dialog_context(session: OrmSession, task: Task) -> str:
         parts.append(f"Запрос пользователя:\n{_clip(task.objective, STEP_CONTEXT_DEP_CHARS)}")
     try:
         spec = _clarifier.load_spec(session, task.id)
-    except Exception:  # noqa: BLE001 — контекст не должен ронять исполнение
+    except Exception:  # контекст не должен ронять исполнение
         spec = None
     if spec is not None and (spec.goal or "").strip():
         parts.append("Контракт задачи:\n" + _clip(spec.to_markdown(), STEP_CONTEXT_DEP_CHARS))
@@ -1070,7 +1076,7 @@ async def _execute_step_isolated(
                 "error" if isinstance(output_json, dict) and output_json.get("error") else "ok",
                 session_id=session_id, task_id=task_id, sandbox_root=sandbox_root, checkpoint_id=checkpoint_id,
             )
-    except Exception as e:  # noqa: BLE001 — узел плана не роняет волну целиком
+    except Exception as e:  # узел плана не роняет волну целиком
         logger.warning("Stage 3: шаг %s упал: %s", step_id[:8] if step_id else "?", e)
         return {
             "id": tc_id,
@@ -1335,7 +1341,7 @@ def _deliver_assistant_message(task_id, session_id, content: str) -> None:
                     session_id=session_id, task_id=task_id, db=db,
                 )
             return
-        except Exception as exc:  # noqa: BLE001 - доставка не должна ломать задачу
+        except Exception as exc:  # доставка не должна ломать задачу
             if not _is_transient_db_error(exc):
                 logger.warning("Message for task %s not posted: %s", str(task_id)[:8], exc)
                 return
@@ -1367,7 +1373,7 @@ def _post_result_message(session: OrmSession, task: Task, task_plan: TaskPlan,
         # Статус done фиксируем до независимой записи сообщения: при сбое доставки
         # задача остаётся выполненной (L4: backend.log 3564).
         session.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Result message for task %s not posted: %s", str(task.id)[:8], exc)
         return
     _deliver_assistant_message(task.id, task.session_id, content)
@@ -1424,7 +1430,7 @@ def _post_failure_message(session: OrmSession, task: Task) -> None:
                     remarks.append(text[:300])
         content = build_failure_message(task, remarks[:4])
         session.commit()  # статус failed не должен зависеть от доставки сообщения
-    except Exception as exc:  # noqa: BLE001 - сбой доставки не должен ломать переход статуса
+    except Exception as exc:  # сбой доставки не должен ломать переход статуса
         logger.warning("Failure message for task %s not posted: %s", str(task.id)[:8], exc)
         return
     _deliver_assistant_message(task.id, task.session_id, content)
@@ -1634,7 +1640,7 @@ async def _stage4_audit(
                     criteria=[c.model_dump(mode="json") for c in spec.acceptance_criteria] if spec else None,
                     assumptions=list(spec.assumptions) if spec else None,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Correctness audit crashed — integrity verdict stands")
                 task_plan.integrity_verdict = IntegrityVerdict.pass_.value
                 return flags
@@ -1701,7 +1707,9 @@ async def _stage7_delivery(
     task_spec = _clarifier.load_spec(session, task.id)
 
     # PR-6: статусы критериев берём из последнего отчёта аудита (его пишет _stage4_audit).
-    from aria.db import repository as repo  # раньше не был импортирован: Stage 7 падал NameError на ЛЮБОЙ задаче
+    from aria.db import (
+        repository as repo,  # раньше не был импортирован: Stage 7 падал NameError на ЛЮБОЙ задаче
+    )
 
     reports = repo.list_audit_reports(session, task.id)
     criteria_status = {}

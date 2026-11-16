@@ -39,7 +39,7 @@ def _row(url: str):
     try:
         with session_scope() as db:
             return db.get(m.PageCache, url)
-    except Exception:  # noqa: BLE001 — кэш не должен ломать чтение
+    except Exception:  # кэш не должен ломать чтение
         logger.warning("page cache read failed", exc_info=True)
         return None
 
@@ -78,5 +78,5 @@ def put(url: str, data: dict) -> None:
             row.content_type = str(data.get("content_type") or "text/html")
             row.truncated = bool(data.get("truncated"))
             row.created_at = utc_now()
-    except Exception:  # noqa: BLE001 — сбой кэша только WARNING
+    except Exception:  # сбой кэша только WARNING
         logger.warning("page cache write failed", exc_info=True)

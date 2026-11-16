@@ -21,14 +21,14 @@ from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
 from aria.core import timing
-from aria.db import models as m
-from aria.db.base import release_write_lock
-from aria.db import repository as repo
 from aria.core.criteria_audit import (
     check_criteria,
     failed_criteria,
     merge_statuses,
 )
+from aria.db import models as m
+from aria.db import repository as repo
+from aria.db.base import release_write_lock
 
 logger = logging.getLogger("local_agent.audit")
 from aria.db.enums import AuditVerdict, ToolStatus
@@ -447,6 +447,6 @@ async def run_audit(
             from aria.core.verify_citations import maybe_verify_research_answer
 
             await maybe_verify_research_answer(db, session, task)
-    except Exception:  # noqa: BLE001 — проверка цитат не валит аудит
+    except Exception:  # проверка цитат не валит аудит
         logger.warning("citation verification failed", exc_info=True)
     return report

@@ -166,7 +166,7 @@ async def test_errors_are_not_cached(monkeypatch):
     made = _patch(monkeypatch, _Resp(status=401))
     await balance.fetch_balance()
     await balance.fetch_balance()
-    assert len(made) == 2, "?????? ?? ??????????"
+    assert len(made) == 2, "Ошибка не кэшируется"
 
 
 @pytest.mark.anyio

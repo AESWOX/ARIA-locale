@@ -89,7 +89,7 @@ def finish_reason_from_response(response: Any) -> str | None:
     """OpenAI-compatible ``choices[0].finish_reason`` if the provider returned it."""
     try:
         reason = response.raw["choices"][0].get("finish_reason")
-    except Exception:  # noqa: BLE001 — raw may be absent or shaped differently
+    except Exception:  # raw may be absent or shaped differently
         return None
     return str(reason) if reason else None
 

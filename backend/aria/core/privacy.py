@@ -87,7 +87,7 @@ class EntityAnonymizer:
                     msg.content = content
                     out.append(msg)
                     continue
-                except Exception:  # noqa: BLE001 — slots/dataclass без setattr
+                except Exception:  # slots/dataclass без setattr
                     pass
             out.append(type(msg)(role=getattr(msg, "role", "user"), content=content) if hasattr(msg, "role") else content)
         return out

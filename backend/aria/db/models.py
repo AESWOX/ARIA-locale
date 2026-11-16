@@ -14,20 +14,22 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
-    Enum as SAEnum,
+    Float,
     ForeignKey,
     Integer,
-    Float,
-    JSON,
     String,
     Text,
     UniqueConstraint,
     Uuid,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -49,7 +51,7 @@ def _uuid() -> uuid.UUID:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -73,8 +75,8 @@ class Session(Base):
     last_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    messages: Mapped[list["Message"]] = relationship(back_populates="session", foreign_keys="Message.session_id")
-    tasks: Mapped[list["Task"]] = relationship(back_populates="session", foreign_keys="Task.session_id")
+    messages: Mapped[list[Message]] = relationship(back_populates="session", foreign_keys="Message.session_id")
+    tasks: Mapped[list[Task]] = relationship(back_populates="session", foreign_keys="Task.session_id")
 
 
 class Task(Base):
@@ -102,12 +104,12 @@ class Task(Base):
     session: Mapped[Session] = relationship(back_populates="tasks", foreign_keys=[session_id])
     # §7.2: self-referential parent-children. children = one-to-many (remote side),
     # parent = many-to-one (locally fk'd). remote_side=Task.id только на parent.
-    children: Mapped[list["Task"]] = relationship(
+    children: Mapped[list[Task]] = relationship(
         back_populates="parent",
         foreign_keys=[parent_task_id],
         lazy="selectin",
     )
-    parent: Mapped["Task | None"] = relationship(
+    parent: Mapped[Task | None] = relationship(
         back_populates="children",
         foreign_keys=[parent_task_id],
         remote_side="Task.id",

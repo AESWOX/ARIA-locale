@@ -7,14 +7,13 @@ so a restart keeps the chosen models.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import json
 import threading
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 from aria.db import repository as repo
 from aria.db.base import session_scope

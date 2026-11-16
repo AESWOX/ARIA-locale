@@ -8,14 +8,13 @@ no results, so the SkillsPage renders and installs/uninstalls locally.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import re
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 from aria.db import models as m
 from aria.db import repository as repo

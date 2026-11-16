@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterator, TypeVar
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -12,6 +13,7 @@ _LOCK_MARKERS = ("database is locked", "database table is locked", "database is 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
+
 from aria.config import get_settings
 from aria.db.models import Base
 
@@ -65,10 +67,11 @@ def run_migrations(dsn: str | None = None) -> None:
         (старая история / create_all-snapshot) -> alembic stamp head
       - alembic_version актуальная          -> no-op (upgrade head ничего не делает)
     """
-    from alembic import command
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     from sqlalchemy import inspect, text
+
+    from alembic import command
 
     settings = get_settings()
     dsn = dsn or settings.POSTGRES_DSN
@@ -130,7 +133,7 @@ def run_with_db_retry(
     for attempt in range(attempts):
         try:
             return fn()
-        except Exception as exc:  # noqa: BLE001 - only lock errors are retried
+        except Exception as exc:  # only lock errors are retried
             if not is_locked_error(exc) or attempt == attempts - 1:
                 raise
             last_exc = exc
@@ -164,10 +167,10 @@ def release_write_lock(db) -> None:
         return
     try:
         db.commit()
-    except Exception:  # noqa: BLE001 - блокировка не должна ронять сам вызов модели
+    except Exception:  # блокировка не должна ронять сам вызов модели
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         import logging
 

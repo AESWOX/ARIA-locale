@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any
 
 from aria.config import get_settings
 from aria.core.roles import get_role
@@ -97,9 +98,9 @@ async def delegate_task(request: DelegateRequest, run_subtask_fn) -> DelegateRes
             coro = run_subtask_fn(request.role, request.objective, request.allowed_tools, request.allow_paid)
             result: DelegateResult = await asyncio.wait_for(coro, timeout=request.hard_timeout_sec)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             last_error = "timeout"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_error = str(exc)
 
     status = "timeout" if last_error == "timeout" else "failed"

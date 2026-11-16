@@ -24,9 +24,8 @@ import shlex
 from pathlib import Path
 
 from aria.config import get_settings
-from aria.tools.validators import classify_shell_command
 from aria.core.winproc import NO_WINDOW
-
+from aria.tools.validators import classify_shell_command
 
 # Дочерний процесс получает ТОЛЬКО эти переменные (default-deny, как и сама политика команд).
 # Раньше он наследовал весь os.environ родителя: ключи провайдеров, runtime-токен и PIN.
@@ -63,7 +62,7 @@ def _toolchain_paths() -> list[str]:
         from aria import toolchain
 
         return toolchain.path_entries()
-    except Exception:  # noqa: BLE001 — отсутствие venv не ломает shell
+    except Exception:  # отсутствие venv не ломает shell
         return []
 
 
@@ -209,7 +208,7 @@ async def shell_execute(input_json: dict, timeout_sec: int, cwd: str | None = No
             "stdout": stdout.decode(errors="replace")[-20000:],
             "stderr": stderr.decode(errors="replace")[-20000:],
         }
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except (TimeoutError, asyncio.CancelledError):
         # Cancel/Stop must not leave the child running (it used to survive until the OS reaped it).
         if proc.returncode is None:
             await asyncio.shield(_terminate_then_kill(proc))
@@ -220,7 +219,7 @@ async def _terminate_then_kill(proc: asyncio.subprocess.Process) -> None:
     proc.terminate()
     try:
         await asyncio.wait_for(proc.wait(), timeout=3)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()
 

@@ -303,17 +303,14 @@ def _is_textual(ctype: str) -> bool:
     """F-010: текст, JSON (+json), XML (+xml), JS; остальное — честный отказ."""
     ctype = (ctype or "").lower()
     return (
-        ctype in _TEXT_TYPES
-        or ctype.startswith("text/")
-        or ctype.endswith("+json")
-        or ctype.endswith("+xml")
+        ctype in _TEXT_TYPES or ctype.startswith("text/") or ctype.endswith(("+json", "+xml"))
     )
 
 
 def _brotli_available() -> bool:
     try:
         import brotli  # noqa: F401
-    except Exception:  # noqa: BLE001 — модуль необязательный
+    except Exception:  # модуль необязательный
         return False
     return True
 
@@ -440,7 +437,7 @@ def _open_url(req: urllib.request.Request, timeout: float):
     return opener.open(req, timeout=timeout)
 
 
-_ZERO_WIDTH = re.compile("[​-‏‪-‮⁠-⁤﻿]")
+_ZERO_WIDTH = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 _CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _META_CHARSET = re.compile(rb"<meta[^>]+charset=[\"']?\s*([\w\-]+)", re.IGNORECASE)
 
@@ -785,7 +782,10 @@ async def web_fetch(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:
 
 async def telegram_channel(input_json: dict, sandbox_root: str = "", **_ctx) -> dict:
     """Read recent posts from a public Telegram channel via t.me/s (no account)."""
-    from aria.integrations.telegram_public.reader import TelegramPublicError, read_channel
+    from aria.integrations.telegram_public.reader import (
+        TelegramPublicError,
+        read_channel,
+    )
 
     channel = str(input_json.get("channel") or "").strip()
     if not channel:

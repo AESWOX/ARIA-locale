@@ -82,7 +82,7 @@ async def verify_citation(url: str, claim: str, fetch=None) -> Citation:
     fetcher = fetch or _default_fetch
     try:
         page = await fetcher(url)
-    except Exception:  # noqa: BLE001 — недоступность страницы не валит проверку
+    except Exception:  # недоступность страницы не валит проверку
         return Citation(url=url, claim=claim, status="unavailable", detail="fetch error")
     if not page:
         return Citation(url=url, claim=claim, status="unavailable", detail="empty page")
@@ -157,6 +157,6 @@ async def maybe_verify_research_answer(db, session, task, fetch=None) -> str | N
         text = summary(citations)
         repo.append_message(db, session, role="assistant", content=text)
         return text
-    except Exception:  # noqa: BLE001 — проверка цитат не должна валить аудит
+    except Exception:  # проверка цитат не должна валить аудит
         logger.warning("citation verification failed", exc_info=True)
         return None

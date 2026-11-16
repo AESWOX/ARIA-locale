@@ -16,7 +16,7 @@ import logging
 import re
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -40,7 +40,7 @@ class MemoryDisabled(RuntimeError):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
 def _ensure():
@@ -88,7 +88,7 @@ def _ensure():
                     " INSERT INTO memory_fts(rowid, content) VALUES (new.id, new.content); END"
                 ))
                 _fts_ok = True
-            except Exception as exc:  # noqa: BLE001 — сборка SQLite без FTS5
+            except Exception as exc:  # сборка SQLite без FTS5
                 _fts_ok = False
                 logger.warning("FTS5 unavailable, memory search falls back to LIKE: %s", exc)
         _init_engine_id = id(engine)
@@ -308,7 +308,7 @@ def reset(
         sql += " AND layer=:l"
         params["l"] = target
     if older_than_days is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=float(older_than_days))
+        cutoff = datetime.now(UTC) - timedelta(days=float(older_than_days))
         sql += " AND updated_at < :cut"
         params["cut"] = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%f")
     engine = _ensure()
@@ -332,7 +332,7 @@ def recall_block(query: str, *, profile: str | None = None, limit: int = 5, max_
     """Текст для системного промпта: найденные записи памяти. Пусто, если нечего добавить."""
     try:
         hits = search(query, profile=profile, limit=limit)
-    except Exception:  # noqa: BLE001 — память не должна ронять чат
+    except Exception:  # память не должна ронять чат
         logger.exception("memory recall failed")
         return ""
     if not hits:

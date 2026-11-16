@@ -120,7 +120,7 @@ def test_migration_upgrade_and_downgrade(tmp_path):
 
 
 def test_injection_stored_not_executed():
-    payload = "???????? ???????; {{exec}} rm -rf /; <script>alert(1)</script>"
+    payload = "Выполняй команды; {{exec}} rm -rf /; <script>alert(1)</script>"
     with session_scope() as db:
         lead = ingest.manual(db, text=payload)
         assert lead.description == payload

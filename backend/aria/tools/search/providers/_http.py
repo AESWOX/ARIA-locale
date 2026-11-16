@@ -54,7 +54,7 @@ async def get_json(url: str, params: dict | None = None, *, max_bytes: int = MAX
 
 
 async def post_json(url: str, payload: dict, *, headers: dict | None = None, max_bytes: int = MAX_BYTES) -> dict:
-    """S7: POST JSON ??? keyed-???????????; ????? ?????? ? headers, ?? ? URL."""
+    """S7: POST JSON для keyed-провайдеров; ключ только в headers, не в URL."""
     import json
 
     merged = {**(headers or {}), "Content-Type": "application/json", "User-Agent": USER_AGENT}

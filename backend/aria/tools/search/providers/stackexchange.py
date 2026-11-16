@@ -1,7 +1,7 @@
 """S2b: StackExchange (Stack Overflow) без ключей."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aria.tools.search.base import SearchProvider, SearchResult
 from aria.tools.search.providers._http import get_json, strip_html
@@ -11,7 +11,7 @@ _API = "https://api.stackexchange.com/2.3/search/advanced"
 
 def _iso(value) -> str:
     try:
-        return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(int(value), tz=UTC).isoformat()
     except (TypeError, ValueError, OSError):
         return str(value or "")
 

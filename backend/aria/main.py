@@ -21,58 +21,68 @@ from aria import paths as _paths
 _paths.ensure_user_data()
 load_dotenv(_paths.env_file())
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from aria.api.auth import token_store
 from aria.config import get_settings
 from aria.db import repository as repo
 from aria.db.base import init_db, run_migrations, session_scope
-from aria.version import APP_VERSION
 from aria.db.enums import ProviderStatus
 from aria.http_utils import seed_database
 from aria.llm.router import build_default_router
+from aria.logredact import RedactingFormatter as _RedactingFormatter
+from aria.logredact import quiet_library_loggers as _quiet_library_loggers
+from aria.logsetup import (
+    LOG_FORMAT as _LOG_FORMAT,
+)
+from aria.logsetup import (
+    QuietAccessFilter as _QuietAccessFilter,
+)
+from aria.logsetup import (
+    TaskTagFilter as _TaskTagFilter,
+)
+from aria.logsetup import (
+    install_record_factory as _install_record_factory,
+)
+from aria.logsetup import (
+    install_subsystem_handlers as _install_subsystem_handlers,
+)
 from aria.routers.actions import router as actions_router
 from aria.routers.analytics import router as analytics_router
-from aria.routers.chat import router as chat_router
 from aria.routers.auth import router as auth_router
+from aria.routers.chat import router as chat_router
 from aria.routers.config import router as config_router
 from aria.routers.cron import router as cron_router
 from aria.routers.env import router as env_router
 from aria.routers.files import router as files_router
+from aria.routers.jobs import router as jobs_router
 from aria.routers.logs import router as logs_router
 from aria.routers.mcp import router as mcp_router
-from aria.routers.plugins import router as plugins_router
-from aria.routers.jobs import router as jobs_router
 from aria.routers.memory import router as memory_router
-from aria.routers.ops_hooks import router as ops_hooks_router
 from aria.routers.model import router as model_router
+from aria.routers.ops import router as ops_router
+from aria.routers.ops_hooks import router as ops_hooks_router
+from aria.routers.plugins import router as plugins_router
 from aria.routers.profiles import router as profiles_router
 from aria.routers.providers import router as providers_router
 from aria.routers.sessions import router as sessions_router
 from aria.routers.setup import router as setup_router
 from aria.routers.skills import router as skills_router
 from aria.routers.storage import router as storage_router
-from aria.routers.ops import router as ops_router
 from aria.routers.stubs import router as stubs_router
-from aria.logsetup import (
-    LOG_FORMAT as _LOG_FORMAT,
-    QuietAccessFilter as _QuietAccessFilter,
-    TaskTagFilter as _TaskTagFilter,
-    install_record_factory as _install_record_factory,
-    install_subsystem_handlers as _install_subsystem_handlers,
-)
-from aria.logredact import RedactingFormatter as _RedactingFormatter, quiet_library_loggers as _quiet_library_loggers
-from aria.routers.webhooks import router as webhooks_router
 from aria.routers.system import router as system_router
 from aria.routers.tasks import router as tasks_router
-from aria.routers.tools import router as tools_router
 from aria.routers.toolchain import router as toolchain_router
+from aria.routers.tools import router as tools_router
 from aria.routers.vault import router as vault_router
+from aria.routers.webhooks import router as webhooks_router
+from aria.version import APP_VERSION
 
 # --- Файловое логирование (иначе история живёт только в scrollback консоли
 # и теряется при закрытии/переполнении терминала) ---

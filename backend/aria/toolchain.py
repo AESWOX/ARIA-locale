@@ -144,7 +144,7 @@ def _find_uv() -> str | None:
         from aria.mcp.executables import resolve_executable
 
         found = resolve_executable("uv")
-    except Exception:  # noqa: BLE001
+    except Exception:
         found = shutil.which("uv")
     if not found:
         return None

@@ -11,15 +11,14 @@ Rules (enforced by tests/test_stubs_honesty.py):
 """
 from __future__ import annotations
 
-from aria import paths
-from aria.version import APP_VERSION
-
 import json
 from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from aria import paths
 from aria.api.auth import require_runtime_token
+from aria.version import APP_VERSION
 
 router = APIRouter(tags=["stubs"])
 
@@ -268,7 +267,7 @@ async def telegram_onboarding_status(pairing_id: str, _: str = Depends(require_r
 
     return {
         "status": "waiting",
-        "expires_at": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)).isoformat(),
+        "expires_at": (datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=15)).isoformat(),
     }
 
 

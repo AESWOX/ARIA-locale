@@ -233,7 +233,7 @@ def discover(
             models = list_models(base_url, key, http=http)
             good_key = key
             break
-        except Exception as exc:  # noqa: BLE001 — пробуем следующий ключ
+        except Exception as exc:  # пробуем следующий ключ
             last_exc = exc
     if not good_key:
         raise RuntimeError(f"model list unavailable with any key: {type(last_exc).__name__ if last_exc else 'no keys'}")
@@ -318,6 +318,6 @@ def refresh_if_stale(
             ) or result["chains"]
         save_cache(result, data_dir)
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("gemini model discovery failed (%s); keeping previous chains", type(exc).__name__)
         return False

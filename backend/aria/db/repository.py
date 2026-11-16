@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session as OrmSession
@@ -38,7 +38,7 @@ APPROVAL_TTL_BY_TYPE = {
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ---------- sessions ----------
@@ -351,7 +351,7 @@ def finish_tool_call(db: OrmSession, call: m.ToolCall, status: ToolStatus, outpu
     started = persisted.started_at
     finished = persisted.finished_at
     if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
+        started = started.replace(tzinfo=UTC)
     persisted.duration_ms = int((finished - started).total_seconds() * 1000)
     persisted.output_json = secretguard.mask_obj(output_json)
     persisted.error_code = error_code

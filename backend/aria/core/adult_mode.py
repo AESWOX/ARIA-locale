@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+from sqlalchemy.orm import Session as OrmSession
 
 from aria.config import get_settings
 from aria.db import repository as repo
-from sqlalchemy.orm import Session as OrmSession
 
 logger = logging.getLogger("local_agent.chat")
 
@@ -61,7 +62,7 @@ def set_adult(
     current["adult"] = bool(enabled)
     current["adult_scope"] = scope
     if mark_confirmed:
-        current["adult_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+        current["adult_confirmed_at"] = datetime.now(UTC).isoformat()
     if not enabled:
         current["adult_confirmed_at"] = None
     repo.set_agent_state(db, key, current, source="user")
@@ -75,7 +76,7 @@ def set_adult(
             session_id=session_id,
             db=db,
         )
-    except Exception:  # noqa: BLE001 — событие бейджа не должно ронять смену режима
+    except Exception:  # событие бейджа не должно ронять смену режима
         logger.warning("mode_changed event failed", exc_info=True)
     return current
 

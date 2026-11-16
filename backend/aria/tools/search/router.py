@@ -54,7 +54,7 @@ async def _call(provider: SearchProvider, query: str, max_results: int) -> tuple
         return provider.name, list(results or []), "", False
     except SearchRateLimited as exc:
         return provider.name, [], f"{provider.name}: rate limited ({exc})", True
-    except Exception as exc:  # noqa: BLE001 — падение одного провайдера не ломает ответ
+    except Exception as exc:  # падение одного провайдера не ломает ответ
         return provider.name, [], f"{provider.name}: {type(exc).__name__}", False
 
 
@@ -103,7 +103,7 @@ async def search(
             asyncio.gather(*(_guarded(p) for p in chosen), return_exceptions=True),
             timeout=TOTAL_TIMEOUT_SEC,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {
             "results": [],
             "error": f"search failed: timeout after {int(TOTAL_TIMEOUT_SEC)}s",

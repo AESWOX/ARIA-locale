@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 from sqlalchemy.orm import Session as OrmSession
@@ -32,12 +32,12 @@ def _parse_date(value: str | None) -> datetime | None:
         if raw.endswith("Z"):
             return datetime.fromisoformat(raw[:-1] + "+00:00")
         parsed = datetime.fromisoformat(raw)
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except ValueError:
         pass
     try:
         parsed = parsedate_to_datetime(raw)
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except (TypeError, ValueError):
         return None
 

@@ -6,8 +6,6 @@ built-in profile backed by the backend working dir and cannot be deleted.
 """
 from __future__ import annotations
 
-from aria import paths
-
 import re
 import shutil
 from pathlib import Path
@@ -16,6 +14,7 @@ from typing import Any
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
+from aria import paths
 from aria.api.auth import require_runtime_token
 from aria.config import get_settings
 

@@ -190,7 +190,7 @@ def _record_vision_usage(result: dict, ctx: dict) -> None:
             with session_scope() as db:
                 task = repo.get_task(db, task_id)
                 session_id = task.session_id if task is not None else None
-        except Exception:  # noqa: BLE001 — учёт не должен ломать vision
+        except Exception:  # учёт не должен ломать vision
             logger.warning("vision: could not resolve session for task_id", exc_info=True)
     record_usage(
         provider_id=str(result.get("provider") or "vision"),
@@ -277,7 +277,7 @@ def _request_backends(backends: list[dict], prompt: str, content_type: str, b64_
                     if exc.code in (429, 401, 402, 403):
                         continue  # key-level: next key
                     break  # model-level (404/503/5xx): next model
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     last_error = str(exc)
                     logger.warning("vision: %s failed: %s", backend["name"], exc)
                     break  # next model

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
@@ -46,7 +46,7 @@ def add_entry(
     fx = _number(fx_to_usd, "fx_to_usd")
     cost = _number(llm_cost_usd, "llm_cost_usd", allow_none=True)
     hours_v = _number(hours, "hours", allow_none=True)
-    if revenue_v < 0 or fee < 0 or cost is not None and cost < 0 or hours_v is not None and hours_v < 0:
+    if revenue_v < 0 or fee < 0 or (cost is not None and cost < 0) or (hours_v is not None and hours_v < 0):
         raise ValueError("amounts must be non-negative")
     if fee > revenue_v:
         raise ValueError("platform_fee cannot exceed revenue")
@@ -67,9 +67,9 @@ def add_entry(
     )
     if created_at is not None:
         entry.created_at = (
-            created_at.astimezone(timezone.utc)
+            created_at.astimezone(UTC)
             if created_at.tzinfo is not None
-            else created_at.replace(tzinfo=timezone.utc)
+            else created_at.replace(tzinfo=UTC)
         )
     db.add(entry)
     db.flush()
@@ -85,7 +85,7 @@ def entry_report(entry: m.OrderLedger) -> dict:
     return_multiple = round(revenue_usd / float(cost), 2) if cost and float(cost) > 0 else None
     created = entry.created_at
     if created is not None:
-        created = created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created.astimezone(timezone.utc)
+        created = created.replace(tzinfo=UTC) if created.tzinfo is None else created.astimezone(UTC)
     return {
         "id": str(entry.id),
         "lead_id": str(entry.lead_id),
@@ -123,11 +123,11 @@ def lead_report(db: OrmSession, lead_id: uuid.UUID) -> dict:
 def monthly_report(db: OrmSession, year: int, month: int) -> dict:
     if not 1 <= int(year) <= 9999 or not 1 <= int(month) <= 12:
         raise ValueError("invalid year/month")
-    start = datetime(int(year), int(month), 1, tzinfo=timezone.utc)
+    start = datetime(int(year), int(month), 1, tzinfo=UTC)
     end = (
-        datetime(int(year) + 1, 1, 1, tzinfo=timezone.utc)
+        datetime(int(year) + 1, 1, 1, tzinfo=UTC)
         if int(month) == 12
-        else datetime(int(year), int(month) + 1, 1, tzinfo=timezone.utc)
+        else datetime(int(year), int(month) + 1, 1, tzinfo=UTC)
     )
     reports = _entries(
         db,

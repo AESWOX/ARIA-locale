@@ -17,9 +17,11 @@ import itertools
 import json
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
+
 from aria.core.winproc import NO_WINDOW
 from aria.mcp.executables import resolve_executable
 
@@ -116,7 +118,7 @@ class StdioTransport:
                         fut.set_result(msg)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("mcp stdio reader failed")
         finally:
             for fut in self._pending.values():
@@ -134,7 +136,7 @@ class StdioTransport:
                 self.stderr_tail = (self.stderr_tail + chunk.decode("utf-8", "replace"))[-4000:]
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     async def _send(self, msg: dict) -> None:
@@ -149,7 +151,7 @@ class StdioTransport:
         try:
             await self._send(payload)
             return await asyncio.wait_for(fut, timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise McpTimeout(f"no response to {payload.get('method')} in {timeout:.0f}s") from exc
         finally:
             self._pending.pop(payload["id"], None)
@@ -164,7 +166,7 @@ class StdioTransport:
         for task in self._tasks:
             try:
                 await task
-            except BaseException:  # noqa: BLE001
+            except BaseException:
                 pass
         self._tasks = []
         if proc is None:
@@ -172,17 +174,17 @@ class StdioTransport:
         try:
             if proc.stdin and not proc.stdin.is_closing():
                 proc.stdin.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         if proc.returncode is None:
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), 3)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 try:
                     proc.kill()
                     await asyncio.wait_for(proc.wait(), 3)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
         self._proc = None
 
@@ -283,7 +285,7 @@ class HttpTransport:
     async def request(self, payload: dict, timeout: float) -> dict:
         try:
             result = await asyncio.wait_for(self._post(payload, payload["id"], timeout), timeout + 1)
-        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+        except (TimeoutError, httpx.TimeoutException) as exc:
             raise McpTimeout(f"no response to {payload.get('method')} in {timeout:.0f}s") from exc
         except httpx.HTTPError as exc:
             raise McpError(f"network error: {exc}") from exc
@@ -303,7 +305,7 @@ class HttpTransport:
         if self._session_id:
             try:
                 await client.delete(self.url, headers=self._headers(), timeout=5)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if self._owns_client:
             await client.aclose()

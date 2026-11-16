@@ -4,12 +4,12 @@ from __future__ import annotations
 from aria.tools.search.providers.arxiv import ArxivProvider
 from aria.tools.search.providers.ddg import DuckDuckGoProvider
 from aria.tools.search.providers.deepseek import active_deepseek_provider
-from aria.tools.search.providers.keyed import active_keyed_providers
-from aria.tools.search.providers.searxng import active_searxng_provider
 from aria.tools.search.providers.github import GitHubProvider
-from aria.tools.search.providers.openalex import OpenAlexProvider
-from aria.tools.search.providers.stackexchange import StackExchangeProvider
 from aria.tools.search.providers.hackernews import HackerNewsProvider
+from aria.tools.search.providers.keyed import active_keyed_providers
+from aria.tools.search.providers.openalex import OpenAlexProvider
+from aria.tools.search.providers.searxng import active_searxng_provider
+from aria.tools.search.providers.stackexchange import StackExchangeProvider
 from aria.tools.search.providers.wikipedia import WikipediaProvider
 
 

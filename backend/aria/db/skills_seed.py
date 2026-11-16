@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-
 from sqlalchemy import select
 
 from aria import paths
