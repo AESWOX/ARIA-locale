@@ -244,14 +244,17 @@ async def run_audit(
     criteria: list | None = None,
     assumptions: list[str] | None = None,
 ) -> m.AuditReport:
-    """``level``: ``strict`` — структура + проверка второй моделью (по умолчанию); ``light`` — только
-    структурная проверка, без вызова модели; ``off`` — аудит отключён владельцем (``unaudited``)."""
+    """``level``: ``strict`` — структура + проверка второй моделью (по умолчанию); ``light`` — структурная
+    проверка + дешёвая модель; ``off`` — аудит отключён владельцем: только структурная проверка
+    по фактам, без вызова модели (``unaudited``)."""
     settings = get_settings()
 
-    if level == "off":
+    degrade_to_structural = level == "off"
+    if degrade_to_structural:
         # AC-4: аудит tool-задач не может быть выключен полностью. Профиль ``off``
         # деградирует до структурной проверки (model=structural-only) и честного
-        # статуса unverified, а не маскируется строкой model=off.
+        # статуса unverified, а не маскируется строкой model=off. Модель при этом
+        # не вызывается: владелец явно отказался от LLM-аудита.
         logger.warning("audit profile=off is degraded to structural-only for task %s", task.id)
         level = "light"
 
@@ -341,8 +344,13 @@ async def run_audit(
         patch_suggestions = [f"ruff: {item}" for item in heavy_findings]
     else:
         audit_tier = "heavy" if changed_paths and heavy_available else "light"
+        if degrade_to_structural:
+            # AC-4: facts are clean — report honestly "unverified" without a model call.
+            audit_tier = "structural"
+            auditor_model = "structural-only"
+            verdict = AuditVerdict.unaudited
         # структура в порядке — качественный проход через auditor role
-        if router is None:
+        elif router is None:
             verdict = AuditVerdict.unaudited
             audit_tier = "unaudited"
             budget_degraded = True

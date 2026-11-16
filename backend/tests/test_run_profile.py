@@ -13,7 +13,7 @@ from aria.core.audit import run_audit
 from aria.core.loop import execute_agent_loop
 from aria.db import repository as repo
 from aria.db.base import session_scope
-from aria.db.enums import AuditVerdict, TaskStatus
+from aria.db.enums import AuditVerdict, TaskStatus, ToolStatus
 from aria.llm.providers.stub import StubProvider, final_answer
 from aria.llm.router import ProviderRouter
 from aria.routers import chat as chat_mod
@@ -128,6 +128,21 @@ def test_audit_levels():
             repo.finish_tool_call(db, c, __import__("aria.db.enums", fromlist=["ToolStatus"]).ToolStatus.ok, output_json={"a": 1})
         light = asyncio.run(run_audit(db, s, t, r, level="light"))
         assert light.verdict == AuditVerdict.pass_ and p["std-a"].calls == 1, "лёгкий аудит зовёт дешёвую модель"
+
+
+def test_audit_off_with_tool_calls_checks_facts_without_a_model():
+    """Профиль audit=off: tool-задача проверяется по фактам, модель не вызывается (AC-4)."""
+    r, p = _router(("std-a", "standard_reasoning"))
+    with session_scope() as db:
+        s = repo.create_session(db, "au-off-tools")
+        t = repo.create_task(db, s, role="general", objective="write a note")
+        call = repo.start_tool_call(db, s, t, "file_read", "general", "low", {})
+        repo.finish_tool_call(db, call, ToolStatus.ok, output_json={"a": 1})
+        report = asyncio.run(run_audit(db, s, t, r, level="off"))
+        assert report.verdict == AuditVerdict.unaudited
+        assert report.auditor_model == "structural-only"
+        assert report.plan_vs_fact["audit_tier"] == "structural"
+        assert p["std-a"].calls == 0, "audit=off не должен тратить модель"
 
 
 def _client(r):
