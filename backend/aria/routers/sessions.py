@@ -396,7 +396,9 @@ async def post_message(
     adult = await _adult_gate(session_id, {"content": content}, request)
     if adult is not None:
         return adult
-    telegram = await _telegram_notice(session_id, {"content": content})
+    telegram = await _telegram_notice(
+        session_id, {"content": content, "retry": bool(payload.get("retry"))}
+    )
     if telegram is not None:
         return telegram
     # 19.4b B1: приветствие/«ок»/«спасибо» — это ответ чата в любой вкладке:

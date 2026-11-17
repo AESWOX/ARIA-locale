@@ -120,43 +120,54 @@ _RUNNING_TASK_STATUSES = {TaskStatus.in_progress, TaskStatus.under_audit}
 async def _telegram_notice(session_id: uuid.UUID, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Personal Telegram data without a linked bot: answer with a card, never from memory."""
     content = str(payload.get("content") or "").strip()
-    if not content or payload.get("retry"):
+    if not content:
         return None
     notice = telegram_gate.blocked_notice(content, get_settings())
     if notice is None:
         return None
+    # GATE-1 R5 (строго): retry тоже проходит гейт (иначе «повторить» отдаёт вопрос модели),
+    # но сообщение владельца в истории не дублируется — карточка показывается снова.
+    retry = bool(payload.get("retry"))
 
-    def _store() -> tuple[Any, dict[str, Any], Any, dict[str, Any]]:
+    def _store() -> tuple[Any, dict[str, Any] | None, Any, dict[str, Any]]:
         with session_scope() as db:
             session = repo.get_session(db, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="session not found")
-            user_msg = repo.append_message(
-                db, session, role="user", content=content, source_trust=SourceTrust.trusted
-            )
+            user_msg = None
+            if not retry:
+                user_msg = repo.append_message(
+                    db, session, role="user", content=content, source_trust=SourceTrust.trusted
+                )
+            card_json: dict[str, Any] = {"notice": notice["notice"]}
+            if notice.get("action"):
+                card_json["action"] = notice["action"]
+                card_json["action_path"] = notice.get("action_path") or "/channels"
             assistant = repo.append_message(
                 db,
                 session,
                 role="assistant",
                 content=notice["text"],
                 source_trust=SourceTrust.trusted,
-                content_json={
-                    "notice": notice["notice"],
-                    "action": "connect_telegram",
-                    "action_path": "/channels",
-                },
+                content_json=card_json,
             )
             session.updated_at = datetime.now(UTC)
-            if (session.title or "") in DEFAULT_TITLES:
+            if user_msg is not None and (session.title or "") in DEFAULT_TITLES:
                 session.title = content.replace("\n", " ")[:60]
-            return user_msg, serialize_message(user_msg), assistant, serialize_message(assistant)
+            return (
+                user_msg,
+                serialize_message(user_msg) if user_msg is not None else None,
+                assistant,
+                serialize_message(assistant),
+            )
 
     user_msg, user_payload, assistant_msg, assistant_payload = run_with_db_retry(_store)
-    emit_message_created(user_msg, session_id, None)
+    if user_msg is not None:
+        emit_message_created(user_msg, session_id, None)
     emit_message_created(assistant_msg, session_id, None)
     return {
         "ok": True,
-        "mode": "telegram_not_connected",
+        "mode": notice.get("mode") or notice["notice"],
         "user": user_payload,
         "assistant": assistant_payload,
     }
