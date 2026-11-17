@@ -12,7 +12,7 @@ from sqlalchemy import func
 
 from aria.api.auth import require_runtime_token
 from aria.config import get_settings
-from aria.core import clarifier
+from aria.core import clarifier, loop_state
 from aria.core.loop import execute_agent_loop
 from aria.db import models as m
 from aria.db import repository as repo
@@ -330,9 +330,11 @@ async def get_session_run(session_id: uuid.UUID, _: str = Depends(require_runtim
         status = None
         error_code = error_message = None
         questions: list[dict] = []
+        stopped = False
         if task is not None:
             status = task.status.value if hasattr(task.status, "value") else str(task.status)
             error_code, error_message = task.error_code, task.error_message
+            stopped = loop_state.is_stopped(db, task.id)
             if task.status == TaskStatus.awaiting_clarification:
                 # PRD-3: карточка уточнений должна переживать перезагрузку окна, поэтому
                 # открытые вопросы берутся из TaskSpec, а не только из ответа на /send.
@@ -358,6 +360,7 @@ async def get_session_run(session_id: uuid.UUID, _: str = Depends(require_runtim
         "session_id": str(session_id),
         "task_id": str(task.id) if task is not None else None,
         "status": status,
+        "stopped": stopped,
         "terminal": status in {s.value for s in _TERMINAL_TASK_STATUSES},
         "attention": pending,
         # открытые вопросы уточнения (пусто, если задача не ждёт ответа)
@@ -407,7 +410,13 @@ async def post_message(
             repo.get_task(db, early_session.current_task_id) if early_session.current_task_id else None
         )
         awaiting_reply = current is not None and current.status == TaskStatus.awaiting_clarification
-    if role == "user" and not awaiting_reply and clarifier.is_small_talk(content):
+        # STOP-1 R10: owner text after Stop continues the paused task with the same budget.
+        stopped_continue = bool(
+            current is not None
+            and current.status == TaskStatus.in_progress
+            and loop_state.is_stopped(db, current.id)
+        )
+    if role == "user" and not awaiting_reply and not stopped_continue and clarifier.is_small_talk(content):
         from aria.routers.chat import _chat_send
 
         answer = await _chat_send(session_id, {"content": content}, request)
@@ -429,10 +438,12 @@ async def post_message(
             )
             repo.set_task_status(db, task, TaskStatus.draft)
         msg = repo.append_message(db, session, role=role, content=content, source_trust=SourceTrust.trusted)
+        if stopped_continue and task is not None and role == "user":
+            msg.content_json = {"resume_after_stop": True}
         if task and role == "user":
             # П.4.4 ТЗ: пока задача ждёт уточнения, ответ владельца идёт в TaskSpec
             # (через гейт ниже), а исходная цель задачи не перезаписывается ответом.
-            if task.status != TaskStatus.awaiting_clarification:
+            if task.status != TaskStatus.awaiting_clarification and not stopped_continue:
                 task.objective = content
             if task.status == TaskStatus.needs_rework:
                 # §8.1: needs_rework допускает только in_progress/cancelled, approved запрещён
@@ -524,6 +535,9 @@ async def post_message(
 
     if task and role == "user" and task.status in (TaskStatus.approved, TaskStatus.in_progress):
         settings = get_settings()
+        if stopped_continue:
+            with session_scope() as db:
+                loop_state.set_stopped(db, task.id, False)
         runner = getattr(request.app.state, "task_runner", None)
         if runner is not None:
             # Волна 1 (A10): агент больше не исполняется внутри HTTP-запроса.

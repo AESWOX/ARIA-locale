@@ -40,6 +40,19 @@ def clear(db: OrmSession, task_id: uuid.UUID | str) -> None:
     save(db, task_id, {})
 
 
+def is_stopped(db: OrmSession, task_id: uuid.UUID | str) -> bool:
+    """True when the task was paused by owner Stop and has not resumed yet."""
+    return bool(load(db, task_id).get("stopped", False))
+
+
+def set_stopped(db: OrmSession, task_id: uuid.UUID | str, stopped: bool = True) -> dict:
+    """Keep the iteration budget intact and only flip the ``stopped`` marker."""
+    state = load(db, task_id)
+    state["stopped"] = bool(stopped)
+    save(db, task_id, state)
+    return state
+
+
 def _sig(tool_name: Any, args_hash: Any) -> ToolCallSignature:
     return ToolCallSignature(tool_name=str(tool_name), args_hash=str(args_hash))
 

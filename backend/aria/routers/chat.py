@@ -298,16 +298,28 @@ async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], r
     Возвращает ответ с ``mode="agent"`` (и ``task_id``), если сессия переключена,
     иначе None — сообщение идёт обычным чат-путём.
     """
-    from aria.core import clarifier
+    from aria.core import clarifier, loop_state
 
     content = str(payload.get("content") or "").strip()
     if not content or payload.get("retry"):
         return None
+    with session_scope() as db:
+        _session = repo.get_session(db, session_id)
+        _current = (
+            repo.get_task(db, _session.current_task_id)
+            if _session is not None and _session.current_task_id
+            else None
+        )
+        stopped_continue = bool(
+            _current is not None
+            and _current.status in _RUNNING_TASK_STATUSES
+            and loop_state.is_stopped(db, _current.id)
+        )
     # P0 attach: файл(ы) в сообщении всегда требуют инструментов (file_read/vision).
     has_attachments = bool(payload.get("attachments"))
     if has_attachments:
         logger.info("chat→agent: attachments present, switching to Agent")
-    elif clarifier.is_small_talk(content):
+    elif not stopped_continue and clarifier.is_small_talk(content):
         logger.debug("chat→agent skipped: small talk")
         return None
     runner = getattr(request.app.state, "task_runner", None)
@@ -320,7 +332,16 @@ async def _auto_route_to_agent(session_id: uuid.UUID, payload: dict[str, Any], r
         task = repo.get_task(db, session.current_task_id) if session.current_task_id else None
         assistant_msg = None
         busy_task_id = None
-        if task is not None and task.status in _RUNNING_TASK_STATUSES:
+        if stopped_continue and task is not None and task.status in _RUNNING_TASK_STATUSES:
+            # STOP-1 R10: текст после Stop дополняет ту же задачу, а не создаёт новую.
+            user_msg = repo.append_message(
+                db, session, role="user", content=content, source_trust=SourceTrust.trusted,
+            )
+            user_msg.content_json = {"resume_after_stop": True}
+            loop_state.set_stopped(db, task.id, False)
+            session.updated_at = datetime.now(UTC)
+            task_id = task.id
+        elif task is not None and task.status in _RUNNING_TASK_STATUSES:
             busy_task_id = task.id
             assistant_msg = repo.append_message(
                 db,
@@ -842,12 +863,20 @@ async def chat_send(
 
 @router.post("/sessions/{session_id}/stop")
 async def chat_stop(session_id: uuid.UUID, _: str = Depends(require_runtime_token)) -> dict[str, Any]:
-    """Прервать идущую генерацию ответа; сессия остаётся живой и принимает новое сообщение."""
+    """Прервать идущую генерацию ответа и идущую агентскую задачу; сессия остаётся живой.
+
+    STOP-1: Stop не отменяет задачу (не ``cancelled``), а ставит её на паузу; бюджет итераций
+    сохраняется, следующее сообщение продолжает ту же задачу. Cancel task не меняется.
+    """
+    from aria.core.stopctl import stop_session_task
+
+    stream_stopped = False
     entry = _ACTIVE_STREAMS.get(session_id)
-    if entry is None:
-        return {"ok": True, "stopped": False}
-    entry.stop_event.set()
-    return {"ok": True, "stopped": True}
+    if entry is not None:
+        entry.stop_event.set()
+        stream_stopped = True
+    task_stopped = stop_session_task(session_id)
+    return {"ok": True, "stopped": bool(stream_stopped or task_stopped)}
 
 
 @dataclass

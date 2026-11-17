@@ -24,6 +24,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 
 from aria.config import get_settings
+from aria.core import loop_state, stop_registry
 from aria.core.events import event_bus
 from aria.db import models as m
 from aria.db import repository as repo
@@ -42,6 +43,13 @@ RUNNABLE_STATUSES = (TaskStatus.approved, TaskStatus.in_progress, TaskStatus.nee
 TERMINAL_STATUSES = (TaskStatus.done, TaskStatus.done_unaudited, TaskStatus.failed, TaskStatus.cancelled)
 
 _LOW_RAM_MB = 1500
+
+# STOP-1: the last started runner, so Stop/continue can be called without HTTP (Telegram bot, tests).
+_ACTIVE_RUNNER: TaskRunner | None = None
+
+
+def active_runner() -> TaskRunner | None:
+    return _ACTIVE_RUNNER
 
 
 def _build_notifier():
@@ -189,9 +197,11 @@ class TaskRunner:
     # ── lifecycle ────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        global _ACTIVE_RUNNER
         if self._started:
             return
         self._started = True
+        _ACTIVE_RUNNER = self
         workers = self._max_workers
         ram = available_ram_mb()
         if ram is not None and ram < _LOW_RAM_MB:
@@ -205,6 +215,9 @@ class TaskRunner:
         logger.info("TaskRunner started: %d worker(s), max_workers=%d", workers, self._max_workers)
 
     async def stop(self) -> None:
+        global _ACTIVE_RUNNER
+        if _ACTIVE_RUNNER is self:
+            _ACTIVE_RUNNER = None
         self._stopping = True
         for job_task in list(self._running.values()):
             job_task.cancel()
@@ -243,6 +256,8 @@ class TaskRunner:
         if key in self._pending:
             logger.info("task %s already queued/running — duplicate submit ignored", key[:8])
             return {"ok": True, "queued": False, "duplicate": True, "task_id": str(task_id), "mode": mode, "source": source}
+        # STOP-1: a stale in-memory Stop signal must not kill a freshly submitted/continued run.
+        stop_registry.clear(task_id)
         self._cancelled.discard(str(task_id))
         self._pending.add(key)
         self._queue.put_nowait(job)
@@ -259,6 +274,37 @@ class TaskRunner:
         for job_task in running:
             job_task.cancel()
         logger.info("cancel requested for task %s (%s)", key[:8], "running" if running else "queued")
+        return True
+
+    def _stop_targets(self, task_id: uuid.UUID) -> list[uuid.UUID]:
+        """The task plus its delegated children (up to the delegation depth cap)."""
+        ids = [task_id]
+        frontier = [task_id]
+        with session_scope() as db:
+            for _ in range(3):
+                rows = db.execute(select(m.Task.id).where(m.Task.parent_task_id.in_(frontier))).scalars().all()
+                fresh = [row for row in rows if row not in ids]
+                if not fresh:
+                    break
+                ids.extend(fresh)
+                frontier = fresh
+        return ids
+
+    def request_stop(self, task_id: uuid.UUID) -> bool:
+        """STOP-1: cooperative Stop. Signals the loop(s); unlike ``cancel`` it never cancels
+        the job task, so the task is not marked ``cancelled`` and its budget survives."""
+        targets = {str(tid) for tid in self._stop_targets(task_id)}
+        running = any(
+            key in targets or key.split(":")[0] in targets for key in self._running
+        )
+        pending = any(
+            key in targets or key.split(":")[0] in targets for key in self._pending
+        )
+        if not running and not pending:
+            return False
+        for tid in targets:
+            stop_registry.request(tid)
+        logger.info("stop requested for task %s (%d target(s))", str(task_id)[:8], len(targets))
         return True
 
     async def resume_pending(self) -> int:
@@ -296,7 +342,12 @@ class TaskRunner:
                 .scalars()
                 .all()
             )
-            pending = [(t.id, str(t.status.value if hasattr(t.status, "value") else t.status)) for t in rows]
+            # STOP-1: a task paused by owner Stop must not resume itself on restart.
+            pending = [
+                (t.id, str(t.status.value if hasattr(t.status, "value") else t.status))
+                for t in rows
+                if not loop_state.is_stopped(db, t.id)
+            ]
         approvals_by_task = _unexecuted_approvals([tid for tid, _ in pending])
         for task_id, _status in pending:
             # Approve получен, а действие не успело исполниться (перезапуск между ними): исполнить его, а не начинать заново.
@@ -372,6 +423,9 @@ class TaskRunner:
         from aria.core.loop import execute_agent_loop
 
         await execute_agent_loop(job.task_id, self._router, self._sandbox_root)
+        with session_scope() as db:
+            if loop_state.is_stopped(db, job.task_id):
+                return {"status": "stopped"}
         return {"status": "ok"}
 
     async def _run_approved(self, job: Job) -> dict[str, Any]:
@@ -439,6 +493,10 @@ class TaskRunner:
                     except Exception:
                         logger.exception("could not mark task %s failed", key[:8])
             return {"status": "failed", "error": str(exc)[:200]}
+        # STOP-1: a stopped task is paused, not finished: no episode, no task.finished.
+        if result.get("status") == "stopped":
+            logger.info("task %s stopped by owner; left resumable", key[:8])
+            return result
         _record_episode(job.task_id, job.mode)
         event_bus.emit("task.finished", {"task_id": key, "result": result}, session_id=None, task_id=job.task_id)
         return result

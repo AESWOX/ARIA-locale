@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from aria.api.auth import require_runtime_token
-from aria.core import clarifier
+from aria.core import clarifier, loop_state
 from aria.db import repository as repo
 from aria.db.base import session_scope
 from aria.db.enums import TaskStatus
@@ -112,7 +112,12 @@ async def get_task_children(task_id: uuid.UUID, _: str = Depends(require_runtime
         if task is None:
             raise HTTPException(status_code=404, detail="task not found")
         children = repo.list_child_tasks(db, task_id)
-        return [serialize_task(child) for child in children]
+        result = []
+        for child in children:
+            data = serialize_task(child) or {}
+            data["stopped"] = loop_state.is_stopped(db, child.id)
+            result.append(data)
+        return result
 
 
 @router.post("/tasks/{task_id}/cancel")

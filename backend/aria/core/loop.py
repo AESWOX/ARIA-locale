@@ -19,6 +19,7 @@ session_scope() — сетевой HTTP-запрос внутри открыто
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -35,6 +36,7 @@ from aria.core import (
     loop_state,
     role_models,
     runprofile,
+    stop_registry,
     toolhooks,
 )
 from aria.core.audit import run_audit
@@ -290,6 +292,10 @@ def _build_messages(role_prompt: str, history: list[m.Message]) -> list[ChatMess
             rendered = _render_tool_result(msg)
             if rendered is not None:
                 content = rendered
+        if msg.role == "user" and isinstance(getattr(msg, "content_json", None), dict) \
+                and msg.content_json.get("resume_after_stop"):
+            # STOP-1: уточнение после Stop не должно выглядеть новой задачей. Сохранённый текст не меняем.
+            content = "[Уточнение владельца после остановки]\n" + content
         if msg.source_trust == SourceTrust.untrusted:
             # §14.1: untrusted content изолируется явными delimiters, не может менять system policy
             content = f"<untrusted_content source_trust=\"untrusted\">\n{content}\n</untrusted_content>"
@@ -310,6 +316,41 @@ AGENT_FALLBACK_CLASSES = ("standard_reasoning", "free_tier_reasoning")
 
 # A23: сколько раз подряд одна и та же делегация может упасть, прежде чем цикл перестанет её исполнять.
 MAX_DELEGATE_RETRIES = 2
+
+_STOPPED = object()
+
+
+async def _await_stoppable(awaitable, task_id):
+    """STOP-1: await the call, but wake up as soon as owner Stop is requested for the task.
+
+    On Stop the inner coroutine is cancelled (so ``shell_execute`` kills its child process via
+    its existing CancelledError handler) and the sentinel ``_STOPPED`` is returned.
+    Cancellation from Cancel task still propagates: the inner coroutine is cancelled and awaited
+    before re-raising, so shell cleanup is not orphaned.
+    """
+    if stop_registry.is_set(task_id):
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        return _STOPPED
+    inner = asyncio.ensure_future(awaitable)
+    waiter = asyncio.ensure_future(stop_registry.wait(task_id))
+    try:
+        done, _pending = await asyncio.wait({inner, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        inner.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await inner
+        waiter.cancel()
+        raise
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+    if inner in done:
+        return inner.result()
+    inner.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await inner
+    return _STOPPED
 
 
 async def _append_once(task_id, marker: str, message: str) -> None:
@@ -372,8 +413,14 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         # 0.2.1: бюджет шагов и guardrails переживают паузу на Approve. Продолжаем счётчики только
         # для возобновления задачи (in_progress); новый запуск и rework начинают бюджет заново.
         saved_state = loop_state.load(db, task_id) if task.status == TaskStatus.in_progress else {}
+        if saved_state.get("stopped"):
+            # STOP-1 R9(c): задача возобновляется — пометка «остановлена» снимается, бюджет остаётся.
+            saved_state = dict(saved_state)
+            saved_state["stopped"] = False
+            loop_state.save(db, task_id, saved_state)
         if not saved_state:
             loop_state.clear(db, task_id)
+        loop_session_id = session.id
 
         repo.set_task_status(db, task, TaskStatus.in_progress)
         event_bus.emit("task.status_changed", {"status": TaskStatus.in_progress.value}, session_id=session.id, task_id=task.id, db=db)
@@ -522,14 +569,30 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
     budget_warned = False
     step_warned = False
     step_warn_at = max(1, int(call_limit * 0.8))
+    stopped_flag = False
 
     def _persist_state(db: OrmSession) -> None:
         loop_state.save(db, task_id, {
             "iterations": iterations,
             "repeat_suppressed": repeat_suppressed,
             "approvals": approval_requests,
+            "stopped": stopped_flag,
             "guardrails": loop_state.dump_guardrails(guardrails),
         })
+
+    def _mark_stopped(point: str) -> None:
+        """STOP-1: persist the paused state, announce it and leave the loop without a verdict."""
+        nonlocal stopped_flag
+        stopped_flag = True
+        with session_scope() as db:
+            _persist_state(db)
+        logger.info("task_stopped task=%s iteration=%d point=%s", task_id, iterations, point)
+        event_bus.emit(
+            "task.stopped",
+            {"task_id": str(task_id), "iteration": iterations, "point": point},
+            session_id=loop_session_id,
+            task_id=task_id,
+        )
 
     def _register_approval(db: OrmSession) -> str | None:
         """Count one approval card; return the abort message when the per-task cap is hit."""
@@ -544,6 +607,9 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
         return None
 
     while iterations < max_iterations:
+        if stop_registry.is_set(task_id):
+            _mark_stopped("iteration")
+            return
         iterations += 1
         if iterations > call_limit:
             with session_scope() as db:
@@ -614,13 +680,16 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                 preferred_model = role_model
             # resilient: повтор 5xx и переход на запасной класс/провайдера (как в чате, A20). Без этого один
             # 503/429 от Gemini сразу ронял всю задачу (живой смоук 11.10: агентские стадии падали за 1.7 с).
-            routing = await router.route_chat(
+            routing = await _await_stoppable(router.route_chat(
                 model_class, messages, tool_schemas, allow_degrade=True, prefer_provider_id=preferred_model,
                 resilient=True, fallback_classes=AGENT_FALLBACK_CLASSES,
                 purpose="subagent" if delegation_depth > 0 else "agent",
                 session_id=session.id, task_id=task.id,
                 allowed_provider_ids=allowed_provider_ids,
-            )
+            ), task_id)
+            if routing is _STOPPED:
+                _mark_stopped("llm")
+                return
         except (ProviderUnavailable, httpx.HTTPStatusError) as exc:
             if isinstance(exc, httpx.HTTPStatusError):
                 # тело ответа провайдера — единственное, что объясняет 400/404 (модель, схема тулов, параметры)
@@ -965,11 +1034,15 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
                     )
                 continue
 
-            output, status, error_code, error_message = await _execute_tool(
+            tool_result = await _await_stoppable(_execute_tool(
                 spec, call.arguments, sandbox_root, approved=bool(ledger_approved and spec.tool_name == "shell_execute"),
                 router=router, task_id=task_id,
                 shell_root=agent_shell_root, agent_shell=agent_shell,
-            )
+            ), task_id)
+            if tool_result is _STOPPED:
+                _mark_stopped("tool")
+                return
+            output, status, error_code, error_message = tool_result
 
             # После tool call — guardrail recording для loop detection
             guardrails.after_call(spec.tool_name, call.arguments, output)
@@ -1009,9 +1082,13 @@ async def execute_agent_loop(task_id: uuid.UUID, router: ProviderRouter, sandbox
             return
 
         if delegate_batch:
-            if await _run_delegate_batch(
+            paused = await _await_stoppable(_run_delegate_batch(
                 delegate_batch, task_id=task_id, router=router, sandbox_root=sandbox_root, delegate_failures=delegate_failures,
-            ):
+            ), task_id)
+            if paused is _STOPPED:
+                _mark_stopped("delegate")
+                return
+            if paused:
                 _parent_paused = True
 
         if _parent_paused and approval_ctx is None:
